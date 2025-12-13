@@ -1,0 +1,532 @@
+package storage
+
+import (
+	"fmt"
+	"petacore/internal/core"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// BenchmarkVClock_SingleWrite измеряет скорость одиночных записей
+func BenchmarkVClock_SingleWrite(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("key%d", i)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(key, "value")
+			return nil
+		})
+	}
+}
+
+// BenchmarkVClock_SingleRead измеряет скорость одиночных чтений с quorum
+func BenchmarkVClock_SingleRead(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Подготовка данных
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(key, "value")
+			return nil
+		})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("key%d", i%1000)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Read(key)
+			return nil
+		})
+	}
+}
+
+// BenchmarkVClock_ReadWrite измеряет скорость смешанных операций
+func BenchmarkVClock_ReadWrite(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Подготовка данных
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%d", i)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(key, "value")
+			return nil
+		})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%2 == 0 {
+			// Чтение
+			key := fmt.Sprintf("key%d", i%100)
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Read(key)
+				return nil
+			})
+		} else {
+			// Запись
+			key := fmt.Sprintf("key%d", i%100)
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Write(key, "newvalue")
+				return nil
+			})
+		}
+	}
+}
+
+// BenchmarkVClock_ConcurrentWrites измеряет throughput параллельных записей
+func BenchmarkVClock_ConcurrentWrites(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			key := fmt.Sprintf("key%d", i)
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Write(key, "value")
+				return nil
+			})
+			i++
+		}
+	})
+}
+
+// BenchmarkVClock_ConcurrentReads измеряет throughput параллельных чтений
+func BenchmarkVClock_ConcurrentReads(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Подготовка данных
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(key, "value")
+			return nil
+		})
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			key := fmt.Sprintf("key%d", i%1000)
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Read(key)
+				return nil
+			})
+			i++
+		}
+	})
+}
+
+// BenchmarkVClock_Transaction измеряет скорость транзакций
+func BenchmarkVClock_Transaction(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(fmt.Sprintf("key%d", i), "value")
+			tx.Read(fmt.Sprintf("key%d", i))
+			return nil
+		})
+	}
+}
+
+// BenchmarkVClock_LargeTransaction измеряет скорость больших транзакций
+func BenchmarkVClock_LargeTransaction(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			// 10 операций в одной транзакции
+			for j := 0; j < 10; j++ {
+				key := fmt.Sprintf("key%d_%d", i, j)
+				tx.Write(key, "value")
+			}
+			return nil
+		})
+	}
+}
+
+// BenchmarkVClock_HotKey измеряет contention на горячем ключе
+func BenchmarkVClock_HotKey(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Инициализация горячего ключа
+	storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+		tx.Write("hotkey", "0")
+		return nil
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Read("hotkey")
+				tx.Write("hotkey", "updated")
+				return nil
+			})
+		}
+	})
+}
+
+// BenchmarkVClock_QuorumOverhead измеряет overhead от quorum проверки
+func BenchmarkVClock_QuorumOverhead(b *testing.B) {
+	scenarios := []struct {
+		name       string
+		totalNodes int
+	}{
+		{"1node", 1},
+		{"3nodes", 3},
+		{"5nodes", 5},
+	}
+
+	for _, scenario := range scenarios {
+		b.Run(scenario.name, func(b *testing.B) {
+			kvStore := NewMockKVStore()
+			storage := NewDistributedStorageVClock(kvStore, "node1", scenario.totalNodes, core.ReadCommitted, 0)
+			storage.Start()
+			defer storage.Stop()
+
+			time.Sleep(50 * time.Millisecond)
+
+			// Подготовка данных
+			for i := 0; i < 100; i++ {
+				key := fmt.Sprintf("key%d", i)
+				storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+					tx.Write(key, "value")
+					return nil
+				})
+			}
+
+			time.Sleep(100 * time.Millisecond)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				key := fmt.Sprintf("key%d", i%100)
+				storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+					tx.Read(key)
+					return nil
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkVClock_VectorClockSize измеряет влияние размера VectorClock
+func BenchmarkVClock_VectorClockSize(b *testing.B) {
+	// Симулируем несколько узлов
+	nodes := []string{"node1", "node2", "node3", "node4", "node5"}
+	kvStore := NewMockKVStore()
+
+	storages := make([]*DistributedStorageVClock, len(nodes))
+	for i, nodeID := range nodes {
+		storages[i] = NewDistributedStorageVClock(kvStore, nodeID, len(nodes), core.ReadCommitted, 0)
+		storages[i].Start()
+		defer storages[i].Stop()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			nodeIdx := i % len(nodes)
+			key := fmt.Sprintf("key%d", i)
+			storages[nodeIdx].RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Write(key, "value")
+				return nil
+			})
+			i++
+		}
+	})
+}
+
+// BenchmarkVClock_Latency измеряет распределение латентности
+func BenchmarkVClock_Latency(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	latencies := make([]time.Duration, b.N)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		start := time.Now()
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(fmt.Sprintf("key%d", i), "value")
+			return nil
+		})
+		latencies[i] = time.Since(start)
+	}
+
+	b.StopTimer()
+
+	// Вычисляем перцентили
+	if b.N > 0 {
+		// Простая сортировка для малых N
+		for i := 0; i < len(latencies)-1; i++ {
+			for j := i + 1; j < len(latencies); j++ {
+				if latencies[i] > latencies[j] {
+					latencies[i], latencies[j] = latencies[j], latencies[i]
+				}
+			}
+		}
+
+		p50 := latencies[b.N/2]
+		p95 := latencies[b.N*95/100]
+		p99 := latencies[b.N*99/100]
+
+		b.ReportMetric(float64(p50.Microseconds()), "p50_us")
+		b.ReportMetric(float64(p95.Microseconds()), "p95_us")
+		b.ReportMetric(float64(p99.Microseconds()), "p99_us")
+	}
+}
+
+// BenchmarkVClock_Throughput измеряет максимальный throughput
+func BenchmarkVClock_Throughput(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	var ops int64
+	done := make(chan struct{})
+
+	// Запускаем измерение throughput
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				current := atomic.LoadInt64(&ops)
+				b.ReportMetric(float64(current), "ops/sec")
+				atomic.StoreInt64(&ops, 0)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Write(fmt.Sprintf("key%d", i), "value")
+				return nil
+			})
+			atomic.AddInt64(&ops, 1)
+			i++
+		}
+	})
+
+	close(done)
+}
+
+// BenchmarkVClock_MemoryUsage измеряет использование памяти
+func BenchmarkVClock_MemoryUsage(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	b.ResetTimer()
+
+	// Записываем много данных для измерения памяти
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("key%d", i)
+		value := fmt.Sprintf("value_%d_with_some_data", i)
+		storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			tx.Write(key, value)
+			return nil
+		})
+	}
+}
+
+// BenchmarkVClock_Scalability проверяет масштабируемость с разным числом горутин
+func BenchmarkVClock_Scalability(b *testing.B) {
+	goroutines := []int{1, 2, 4, 8, 16, 32}
+
+	for _, numGoroutines := range goroutines {
+		b.Run(fmt.Sprintf("goroutines_%d", numGoroutines), func(b *testing.B) {
+			kvStore := NewMockKVStore()
+			storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+			storage.Start()
+			defer storage.Stop()
+
+			time.Sleep(50 * time.Millisecond)
+
+			b.SetParallelism(numGoroutines)
+			b.ResetTimer()
+
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					key := fmt.Sprintf("key%d", i)
+					storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+						tx.Write(key, "value")
+						return nil
+					})
+					i++
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkVClock_BatchWrite измеряет скорость пакетной записи
+func BenchmarkVClock_BatchWrite(b *testing.B) {
+	batchSizes := []int{1, 10, 50, 100}
+
+	for _, batchSize := range batchSizes {
+		b.Run(fmt.Sprintf("batch_%d", batchSize), func(b *testing.B) {
+			kvStore := NewMockKVStore()
+			storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+			storage.Start()
+			defer storage.Stop()
+
+			time.Sleep(50 * time.Millisecond)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+					for j := 0; j < batchSize; j++ {
+						key := fmt.Sprintf("key%d_%d", i, j)
+						tx.Write(key, "value")
+					}
+					return nil
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkVClock_ContentionLevel измеряет производительность при разных уровнях contention
+func BenchmarkVClock_ContentionLevel(b *testing.B) {
+	contentionLevels := []struct {
+		name     string
+		keyRange int
+	}{
+		{"low_contention", 10000},
+		{"medium_contention", 100},
+		{"high_contention", 10},
+	}
+
+	for _, level := range contentionLevels {
+		b.Run(level.name, func(b *testing.B) {
+			kvStore := NewMockKVStore()
+			storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+			storage.Start()
+			defer storage.Stop()
+
+			time.Sleep(50 * time.Millisecond)
+
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					key := fmt.Sprintf("key%d", i%level.keyRange)
+					storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+						tx.Write(key, "value")
+						return nil
+					})
+					i++
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkVClock_SynchronizationOverhead измеряет overhead синхронизации
+func BenchmarkVClock_SynchronizationOverhead(b *testing.B) {
+	kvStore := NewMockKVStore()
+	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	storage.Start()
+	defer storage.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	var wg sync.WaitGroup
+
+	b.ResetTimer()
+
+	// Измеряем время с учетом синхронизации watch
+	for i := 0; i < b.N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+				tx.Write(fmt.Sprintf("key%d", i), "value")
+				return nil
+			})
+		}(i)
+	}
+
+	wg.Wait()
+}

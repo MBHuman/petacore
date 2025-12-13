@@ -50,10 +50,14 @@ func putForwardSlice(slice []*SkipListNode) {
 
 // SkipListNode represents a node in the skip list
 type SkipListNode struct {
-	key     int64
-	value   string
-	forward []*SkipListNode
+	key         int64
+	value       string
+	forward     []*SkipListNode
+	versionData *MVCCVersion // Для хранения полной версии с VectorClock
 }
+
+// Для обратной совместимости
+type skipListNode = SkipListNode
 
 // ConcurrentSkipListMap is a thread-safe skip list map
 type ConcurrentSkipListMap struct {

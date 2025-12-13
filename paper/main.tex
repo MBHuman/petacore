@@ -1,0 +1,269 @@
+% PetaCore paper in Springer LNCS style (llncs)
+% Notes:
+%  - Requires the Springer 'llncs' class and (usually) pdflatex.
+%  - If your environment uses LaTeX 2020+, you may omit inputenc, but LNCS templates often keep it.
+% Build (example): pdflatex -interaction=nonstopmode -halt-on-error main.tex
+
+\documentclass[runningheads]{llncs}
+
+\usepackage[T2A]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[russian,english]{babel}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+
+\usepackage{xcolor}
+\usepackage{listings}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{220,220,220}
+\definecolor{codekw}{RGB}{0,92,163}
+\definecolor{codestr}{RGB}{163,21,21}
+
+\lstdefinelanguage{Go}{
+  morekeywords={break,default,func,interface,select,case,defer,go,map,struct,chan,else,goto,package,switch,const,fallthrough,if,range,type,continue,for,import,return,var},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]"}
+
+\lstset{
+  language=Go,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\bfseries\color{codekw},
+  stringstyle=\color{codestr},
+  commentstyle=\itshape\color{gray},
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  aboveskip=6pt,
+  belowskip=6pt,
+}
+
+\begin{document}
+
+	itle{PetaCore: распределённое key-value хранилище \\ с MVCC и Vector Clock \\ для быстрого локального чтения с настраиваемыми CP-гарантиями}
+
+% If the paper title is too long for the running head, you can set
+% an abbreviated paper title here.
+	itlerunning{PetaCore: MVCC + Vector Clock поверх ETCD}
+
+\author{\textit{First Author}\inst{1} \and \textit{Second Author}\inst{1}}
+\authorrunning{First Author et al.}
+
+\institute{\textit{Your University / Company}\\
+\email{your.email@example.com}}
+
+\maketitle
+
+\begin{abstract}
+PetaCore --- прототип распределённого key-value хранилища, ориентированный на сценарии с доминирующими чтениями. Система совмещает (1) устойчивую запись через ETCD (Raft) как единственный источник истины и (2) крайне быстрые чтения из локального in-memory MVCC. Ключевая идея состоит в том, что узел возвращает клиенту только такую версию ключа, которая подтверждена достаточным числом узлов кластера. Это условие реализуется через метаданные Vector Clock и единственный параметр консистентности \texttt{MIN\_ACKS} (\texttt{1}, \texttt{N/2+1}, \texttt{N}). Мы описываем архитектуру (HTTP API, движок хранения, синхронизацию), алгоритмы записи/репликации/чтения, модель консистентности и приводим результаты end-to-end бенчмарков на реальном ETCD-кластере.
+\keywords{distributed storage \and MVCC \and vector clock \and quorum read \and ETCD \and Raft}
+\end{abstract}
+
+\section{Введение}
+Распределённые системы хранения традиционно балансируют между доступностью и строгой консистентностью. В системах AP-класса чтения часто обслуживаются локально, но могут возвращать устаревшие данные. В системах CP-класса чтения обычно требуют обращения к лидеру или к протоколу консенсуса, что увеличивает задержки.
+
+PetaCore нацелен на компромисс: \emph{читать локально} (как из кеша), но \emph{не возвращать версии}, которые ещё не распространились на кворум узлов. Для этого используется MVCC в памяти и Vector Clock как метаданные подтверждений. Записи выполняются синхронно в ETCD, а локальные реплики обновляются через механизм watch.
+
+\section{Предпосылки}
+\subsection{ETCD и Raft}
+ETCD обеспечивает устойчивое реплицированное состояние. В PetaCore ETCD используется как \emph{источник истины}: запись фиксируется через \texttt{Put} в ETCD и проходит Raft-консенсус, обеспечивая персистентность.
+
+\subsection{MVCC}
+MVCC (Multi-Version Concurrency Control) хранит несколько версий значения для одного ключа, что помогает поддерживать транзакционные уровни изоляции и выбирать корректную версию в зависимости от метаданных.
+
+\subsection{Vector Clock как подтверждение видимости}
+В классическом виде Vector Clock используется для каузального порядка. В PetaCore он применяется прагматично: как индикатор того, \emph{какие узлы уже увидели конкретную версию}. Это позволяет проверять условие безопасности $|VC| \ge \texttt{MIN\_ACKS}$ при чтении.
+
+\section{Модель и конфигурация}
+\subsection{Узлы}
+Пусть в системе $N$ приложений-узлов. Каждый узел содержит:
+\begin{itemize}
+  \item локальный MVCC в памяти,
+  \item компонент синхронизации с ETCD (write-through + watch),
+  \item HTTP API для операций чтения/записи.
+\end{itemize}
+
+\subsection{Параметр \texttt{MIN\_ACKS}}
+	exttt{MIN\_ACKS} задаёт минимальное число подтверждений (узлов), которое должно отражаться в Vector Clock версии, чтобы версия считалась \emph{безопасной}.
+
+Поддерживаются значения:
+\begin{itemize}
+  \item \texttt{0}: использовать кворум по умолчанию $\lfloor N/2 \rfloor + 1$,
+  \item \texttt{-1}: требовать $N$ (все узлы),
+  \item \texttt{>0}: конкретное значение.
+\end{itemize}
+
+\section{Архитектура системы}
+Практическая реализация состоит из следующих модулей.
+
+\subsection{HTTP API}
+Сервис предоставляет эндпоинты:
+\begin{itemize}
+  \item \texttt{POST /write} --- запись пары ключ/значение,
+  \item \texttt{GET /read?key=...} --- чтение с quorum-фильтрацией,
+  \item \texttt{GET /status} --- диагностика (состояние синхронизации, текущий \texttt{min\_acks}),
+  \item \texttt{POST|PUT /config/min\_acks} --- динамическая настройка \texttt{MIN\_ACKS}.
+\end{itemize}
+
+\subsection{Storage Engine: \texttt{DistributedStorageVClock}}
+Движок инкапсулирует:
+\begin{itemize}
+  \item запуск транзакций (\texttt{RunTransaction}),
+  \item настройку кворума (\texttt{SetMinAcks}),
+  \item методы диагностики (\texttt{IsSynced}, \texttt{GetMinAcks}).
+\end{itemize}
+
+\subsection{Локальное хранилище: \texttt{MVCCWithVClock}}
+Каждый ключ хранит список версий. Каждая версия включает:
+\begin{itemize}
+  \item значение,
+  \item таймстемп (логический/гибридный логический),
+  \item Vector Clock.
+\end{itemize}
+Версии организованы так, чтобы быстро находить «последнюю безопасную» при чтении.
+
+\subsection{Синхронизация: \texttt{SynchronizerVClock}}
+Синхронизатор реализует:
+\begin{itemize}
+  \item \textbf{write-through}: запись в ETCD и локальный MVCC,
+  \item \textbf{initial sync}: загрузку состояния при старте узла,
+  \item \textbf{watch loop}: получение обновлений из ETCD и применение в локальный MVCC.
+\end{itemize}
+
+\section{Алгоритмы}
+\subsection{Запись (write-through)}
+Запись осуществляется транзакционно: HTTP-обработчик запускает транзакцию, которая буферизует изменения и фиксирует их при \texttt{Commit()} через синхронизатор.
+
+\begin{lstlisting}[caption={Концептуальная логика записи (узел-инициатор)},label={lst:write}]
+// handler -> storage.RunTransaction
+err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+    tx.Write(key, value)
+    return nil
+})
+// Commit() -> synchronizer.WriteThroughVClock -> ETCD.Put
+\end{lstlisting}
+
+Фиксация в ETCD доминирует в задержке записи, так как включает Raft-консенсус.
+
+\subsection{Репликация (watch loop)}
+Каждый узел подписывается на изменения ETCD по префиксу. При получении события:
+\begin{enumerate}
+  \item версия десериализуется,
+  \item узел отмечает, что \emph{он видел} версию (инкрементирует Vector Clock для своего \texttt{nodeID}),
+  \item версия записывается в локальный MVCC.
+\end{enumerate}
+
+Это увеличивает число подтверждений у версии и позволяет большему числу узлов считать её безопасной.
+
+\subsection{Чтение с кворумной фильтрацией}
+Чтение выполняется из локального MVCC, но возвращается только версия, удовлетворяющая условию безопасности:
+$$|VC(v)| \ge \texttt{MIN\_ACKS}.$$
+
+Алгоритм:
+\begin{enumerate}
+  \item получить версии ключа,
+  \item итерироваться от новой к старой,
+  \item вернуть первую версию, где $|VC|$ достаточно велик,
+  \item иначе вернуть \emph{not found}.
+\end{enumerate}
+
+\begin{lstlisting}[caption={Кворумный выбор версии при чтении (псевдокод)},label={lst:read}]
+for v in versions_newest_to_oldest(key) {
+    if len(v.VectorClock) >= minAcks {
+        return v.Value
+    }
+}
+return not_found
+\end{lstlisting}
+
+Интуитивно это означает, что если новая версия ещё не успела распространиться на достаточное число узлов, чтение вернёт более старую, но подтверждённую.
+
+\section{Транзакции и уровни изоляции}
+Транзакция хранит \texttt{localWrites}. При \texttt{Read} сначала проверяется локальный буфер, затем MVCC с кворумной фильтрацией. Для Snapshot Isolation фиксируется snapshot (Vector Clock) на \texttt{Begin} и проверяется каузальная совместимость при чтениях.
+
+\section{Динамическая настройка консистентности}
+Параметр \texttt{MIN\_ACKS} может задаваться при старте через переменные окружения и изменяться во время работы через HTTP:
+
+\begin{lstlisting}[caption={Пример изменения MIN_ACKS через API},label={lst:minacks}]
+curl -X POST http://localhost:8081/config/min_acks \
+  -H "Content-Type: application/json" \
+  -d '{"min_acks":0}'   // N/2 + 1
+
+curl -X POST http://localhost:8081/config/min_acks \
+  -H "Content-Type: application/json" \
+  -d '{"min_acks":-1}'  // N
+\end{lstlisting}
+
+\section{Оценка производительности}
+Оценка выполнялась end-to-end бенчмарками с реальным ETCD-кластером (3 узла) и тремя репликами приложения.
+
+\subsection{Результаты}
+Наблюдаемые ориентиры в одном из прогонов:
+\begin{itemize}
+  \item чтение (quorum): порядка \textbf{171 нс/op},
+  \item запись (ETCD Put + Raft): порядка \textbf{1.4 мс/op},
+  \item смешанная нагрузка (пример: 70\% чтений): порядка \textbf{426 \textmu s/op}.
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\caption{Иллюстративные метрики операций}
+\label{tab:perf}
+\begin{tabular}{@{}lll@{}}
+	oprule
+Операция & Путь & Оценка задержки \\ \midrule
+Read (quorum) & память + фильтр VC & \~171 нс/op \\ 
+Write & ETCD Put (Raft) & \~1.4 мс/op \\ 
+Mixed (пример) & read+write & \~426 \textmu s/op \\ \bottomrule
+\end{tabular}
+\end{table}
+
+Результаты подтверждают основной тезис: чтения масштабируются локально и почти не зависят от ETCD в steady-state, а записи ограничены консенсусом.
+
+\section{Ограничения и дальнейшая работа}
+\begin{itemize}
+  \item \textbf{Задержка распространения} зависит от watch/сети; система не обещает мгновенной видимости записи на всех узлах.
+  \item \textbf{Рост числа версий} требует политики очистки (GC/compaction) и ограничений на MVCC.
+  \item \textbf{Семантика конфликтов} при конкурентных записях может требовать стратегии разрешения (LWW, CRDT, приложение-специфично).
+  \item \textbf{Метрики и воспроизводимость}: полезно фиксировать конфигурацию окружения и дополнять анализ перцентилями задержек.
+\end{itemize}
+
+\section{Заключение}
+PetaCore демонстрирует архитектуру, где устойчивость достигается через ETCD (write-through), а быстрые чтения --- через локальный MVCC. Vector Clock используется как метка подтверждённой видимости, что позволяет реализовать кворумное чтение без обращений к консенсусу на горячем пути чтения. Параметр \texttt{MIN\_ACKS} делает компромисс «консистентность vs. свежесть/доступность» управляемым на уровне конфигурации.
+
+\begin{thebibliography}{8}
+\bibitem{cap}
+Brewer, E.: Towards robust distributed systems (abstract). PODC (2000)
+
+\bibitem{raft}
+Ongaro, D., Ousterhout, J.: In Search of an Understandable Consensus Algorithm (Raft). USENIX ATC (2014)
+
+\bibitem{etcd}
+etcd documentation. \url{https://etcd.io/}
+
+\bibitem{lamport}
+Lamport, L.: Time, Clocks, and the Ordering of Events in a Distributed System. CACM \textbf{21}(7), 558--565 (1978)
+
+\bibitem{fidge}
+Fidge, C.J.: Timestamps in message-passing systems that preserve the partial ordering. Australian Computer Science Communications \textbf{10}, 56--66 (1988)
+
+\bibitem{mattern}
+Mattern, F.: Virtual time and global states of distributed systems. In: Proc. Int. Workshop on Parallel and Distributed Algorithms (1989)
+
+\bibitem{mvcc}
+Berenson, H., Bernstein, P., Gray, J., et al.: A Critique of ANSI SQL Isolation Levels. SIGMOD (1995)
+
+\bibitem{postgres}
+PostgreSQL documentation: Concurrency Control. \url{https://www.postgresql.org/docs/current/mvcc.html}
+\end{thebibliography}
+
+\end{document}
