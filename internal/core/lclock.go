@@ -36,15 +36,24 @@ func getPhysicalTime() uint64 {
 // Комбинируем wallTime и logical в одно uint64 значение для обратной совместимости
 func (lc *LClock) Get() uint64 {
 	pt := getPhysicalTime()
-	wallTime := atomic.LoadUint64(&lc.wallTime)
-	logical := atomic.LoadUint64(&lc.logical)
+	for {
+		currentWallTime := atomic.LoadUint64(&lc.wallTime)
+		currentLogical := atomic.LoadUint64(&lc.logical)
 
-	// Возвращаем максимум из физического времени и сохраненного wallTime
-	if pt > wallTime {
-		return pt
+		if pt > currentWallTime {
+			// Если физическое время больше, обновляем wallTime и сбрасываем logical
+			if atomic.CompareAndSwapUint64(&lc.wallTime, currentWallTime, pt) {
+				atomic.StoreUint64(&lc.logical, 0)
+				return pt
+			}
+		} else {
+			// Если физическое время не продвинулось, увеличиваем logical
+			if atomic.CompareAndSwapUint64(&lc.wallTime, currentWallTime, currentWallTime) {
+				atomic.StoreUint64(&lc.logical, currentLogical+1)
+				return currentWallTime + currentLogical + 1
+			}
+		}
 	}
-	// Если физическое время не продвинулось, используем wallTime + logical как offset
-	return wallTime + logical
 }
 
 // GetTimestamp возвращает полное HLC timestamp
@@ -74,9 +83,16 @@ func (lc *LClock) SendOrLocal() uint64 {
 			newLogical = currentLogical + 1
 		}
 
-		// Атомарно обновляем оба значения
+		// Атомарно обновляем wallTime, а затем сразу обновляем logical
 		if atomic.CompareAndSwapUint64(&lc.wallTime, currentWallTime, newWallTime) {
-			atomic.StoreUint64(&lc.logical, newLogical)
+			// Используем CompareAndSwap для logical, чтобы гарантировать уникальность
+			for !atomic.CompareAndSwapUint64(&lc.logical, currentLogical, newLogical) {
+				// Если другая горутина изменила logical, пересчитываем
+				currentLogical = atomic.LoadUint64(&lc.logical)
+				if newWallTime == currentWallTime {
+					newLogical = currentLogical + 1
+				}
+			}
 			return newWallTime + newLogical
 		}
 	}
