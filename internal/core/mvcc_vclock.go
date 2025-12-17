@@ -40,24 +40,26 @@ func (m *MVCCWithVClock) WriteWithVClock(key string, value string, timestamp uin
 	skipList.PutVersion(int64(timestamp), version)
 }
 
-// ReadWithVClock читает значение с проверкой Vector Clock
-// Возвращает последнюю безопасную версию (с подтверждённым quorum)
-func (m *MVCCWithVClock) ReadWithVClock(key string, minAcks int, totalNodes int) (string, *VectorClock, bool) {
+// ReadWithSnapshot читает значение с snapshot isolation
+// Возвращает последнюю безопасную версию, которая произошла до snapshotVClock
+func (m *MVCCWithVClock) ReadWithSnapshot(key string, snapshotVClock *VectorClock, minAcks int, totalNodes int, currentNodeID string) (string, *VectorClock, bool) {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
 		return "", nil, false
 	}
 
 	// Используем итератор для поиска последней безопасной версии
+	// которая произошла до snapshotVClock
 	iterator := skipList.NewVersionIterator()
 	defer iterator.Close()
 
 	var latestSafe *MVCCVersion
 
-	// Итерируем от старых к новым, но ищем максимальную безопасную
+	// Итерируем от старых к новым, ищем максимальную безопасную версию
+	// которая не произошла после snapshotVClock
 	for iterator.Next() {
 		version := iterator.Value()
-		if version.VectorClock.IsSafeToRead(minAcks, totalNodes) {
+		if !version.VectorClock.HappensBefore(snapshotVClock) && version.VectorClock.IsSafeToRead(minAcks, totalNodes) {
 			latestSafe = version
 		}
 	}
@@ -66,7 +68,7 @@ func (m *MVCCWithVClock) ReadWithVClock(key string, minAcks int, totalNodes int)
 		return latestSafe.Value, latestSafe.VectorClock, true
 	}
 
-	// Нет безопасных версий
+	// Нет безопасных версий в snapshot
 	return "", nil, false
 }
 

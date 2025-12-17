@@ -144,6 +144,27 @@ func (ds *DistributedStorageVClock) RunTransaction(txFunc func(tx *DistributedTr
 	return tx.Commit()
 }
 
+// BeginTransaction начинает долгоживущую транзакцию
+func (ds *DistributedStorageVClock) BeginTransaction() *DistributedTransactionVClock {
+	tx := NewDistributedTransactionVClock(
+		ds.mvccVClock,
+		ds.logicalClock,
+		ds.synchronizer,
+		ds.isolationLevel,
+		ds.nodeID,
+		ds.minAcks,
+		ds.totalNodes,
+	)
+	tx.Begin()
+	return tx
+}
+
+// CommitTransaction коммитит долгоживущую транзакцию
+func (ds *DistributedStorageVClock) CommitTransaction(tx *DistributedTransactionVClock) error {
+	defer tx.Release()
+	return tx.Commit()
+}
+
 // DistributedTransactionVClock транзакция с Vector Clock
 type DistributedTransactionVClock struct {
 	mvccVClock     *core.MVCCWithVClock
@@ -200,22 +221,21 @@ func (dtx *DistributedTransactionVClock) Read(key string) (string, bool) {
 		return value, true
 	}
 
-	// Читаем из MVCC с проверкой quorum
-	// Это гарантирует CP: возвращаем только данные, подтвержденные большинством узлов
-	value, vclock, ok := dtx.mvccVClock.ReadWithVClock(key, dtx.minAcks, dtx.totalNodes)
+	// Определяем snapshot VClock в зависимости от уровня изоляции
+	var snapshotVC *core.VectorClock
+	if dtx.isolationLevel == core.SnapshotIsolation && dtx.snapshotVClock != nil {
+		// Для Snapshot Isolation используем фиксированный snapshot
+		snapshotVC = dtx.snapshotVClock
+	} else {
+		// Для ReadCommitted используем текущий global VClock
+		snapshotVC = dtx.synchronizer.GetGlobalVectorClock()
+	}
+
+	// Читаем из MVCC с snapshot и quorum проверкой
+	value, _, ok := dtx.mvccVClock.ReadWithSnapshot(key, snapshotVC, dtx.minAcks, dtx.totalNodes, dtx.nodeID)
 	if !ok {
 		return "", false
 	}
-
-	// Для Snapshot Isolation проверяем, что версия не новее snapshot
-	if dtx.isolationLevel == core.SnapshotIsolation && dtx.snapshotVClock != nil {
-		if vclock.HappensBefore(dtx.snapshotVClock) || vclock.Equals(dtx.snapshotVClock) {
-			return value, true
-		}
-		// Версия слишком новая для нашего snapshot
-		return "", false
-	}
-
 	return value, true
 }
 

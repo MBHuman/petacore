@@ -86,19 +86,20 @@ func (r *REPL) handleGet(args []string) {
 func (r *REPL) handleTransaction() {
 	fmt.Println("\n=== Интерактивная транзакция ===")
 	fmt.Println("Команды внутри транзакции:")
-	fmt.Println("  read <key>            - Прочитать значение")
-	fmt.Println("  write <key> <value>   - Записать значение")
+	fmt.Println("  read <key>            - Прочитать значение сразу")
+	fmt.Println("  write <key> <value>   - Записать значение сразу")
 	fmt.Println("  commit                - Зафиксировать транзакцию")
 	fmt.Println("  rollback              - Отменить транзакцию")
 	fmt.Println()
 
-	type txOp struct {
-		opType string
-		key    string
-		value  string
-	}
+	// Начинаем долгоживущую транзакцию
+	tx := r.storage.BeginTransaction()
+	defer func() {
+		if tx != nil {
+			r.storage.CommitTransaction(tx) // В случае выхода без commit
+		}
+	}()
 
-	operations := []txOp{}
 	inTransaction := true
 
 	for inTransaction {
@@ -122,8 +123,12 @@ func (r *REPL) handleTransaction() {
 				fmt.Println("❌ Использование: read <key>")
 				continue
 			}
-			operations = append(operations, txOp{opType: "read", key: args[0]})
-			fmt.Printf("→ Запланировано чтение: %s\n", args[0])
+			key := args[0]
+			if value, ok := tx.Read(key); ok {
+				fmt.Printf("✓ %s = %s\n", key, value)
+			} else {
+				fmt.Printf("⚠ %s = <не найдено>\n", key)
+			}
 
 		case "write":
 			if len(args) < 2 {
@@ -132,30 +137,15 @@ func (r *REPL) handleTransaction() {
 			}
 			key := args[0]
 			value := strings.Join(args[1:], " ")
-			operations = append(operations, txOp{opType: "write", key: key, value: value})
-			fmt.Printf("→ Запланирована запись: %s = %s\n", key, value)
+			tx.Write(key, value)
+			fmt.Printf("✓ Записано: %s = %s\n", key, value)
 
 		case "commit":
-			fmt.Println("\n→ Выполнение транзакции...")
-			err := r.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				for _, op := range operations {
-					switch op.opType {
-					case "read":
-						if value, ok := tx.Read(op.key); ok {
-							fmt.Printf("  [READ] %s = %s\n", op.key, value)
-						} else {
-							fmt.Printf("  [READ] %s = <не найдено>\n", op.key)
-						}
-					case "write":
-						tx.Write(op.key, op.value)
-						fmt.Printf("  [WRITE] %s = %s\n", op.key, op.value)
-					}
-				}
-				return nil
-			})
-
+			// Коммитим транзакцию
+			err := r.storage.CommitTransaction(tx)
+			tx = nil // Чтобы defer не коммитил снова
 			if err != nil {
-				fmt.Printf("❌ Ошибка транзакции: %v\n", err)
+				fmt.Printf("❌ Ошибка коммита: %v\n", err)
 			} else {
 				fmt.Println("✓ Транзакция успешно зафиксирована")
 			}
@@ -163,6 +153,8 @@ func (r *REPL) handleTransaction() {
 
 		case "rollback":
 			fmt.Println("✓ Транзакция отменена")
+			// Не коммитим, просто выходим
+			tx = nil
 			inTransaction = false
 
 		default:
@@ -237,10 +229,22 @@ func main() {
 	nodeID := flag.String("node", "node1", "ID узла")
 	totalNodes := flag.Int("nodes", 3, "Общее количество узлов в кластере")
 	etcdEndpoints := flag.String("etcd", "localhost:2379,localhost:2479,localhost:2579", "ETCD endpoints через запятую")
+	isolationStr := flag.String("isolation", "snapshot", "Уровень изоляции транзакций: readcommitted или snapshot")
 	flag.Parse()
 
+	// Парсим уровень изоляции
+	var isolationLevel core.IsolationLevel
+	switch strings.ToLower(*isolationStr) {
+	case "readcommitted":
+		isolationLevel = core.ReadCommitted
+	case "snapshot":
+		isolationLevel = core.SnapshotIsolation
+	default:
+		log.Fatalf("❌ Неверный уровень изоляции: %s. Допустимые значения: readcommitted, snapshot\n", *isolationStr)
+	}
+
 	fmt.Println("=== PetaCore VClock REPL ===")
-	fmt.Printf("NodeID: %s, Total Nodes: %d, Quorum: %d\n", *nodeID, *totalNodes, (*totalNodes/2)+1)
+	fmt.Printf("NodeID: %s, Total Nodes: %d, Quorum: %d, Isolation: %s\n", *nodeID, *totalNodes, (*totalNodes/2)+1, *isolationStr)
 	fmt.Println()
 
 	// Подключаемся к ETCD кластеру
@@ -262,7 +266,7 @@ func main() {
 
 	// Создаем распределенное хранилище с VClock
 	fmt.Println("🔧 Создание VClock хранилища...")
-	storageVClock := storage.NewDistributedStorageVClock(kvStore, *nodeID, *totalNodes, core.ReadCommitted, 0)
+	storageVClock := storage.NewDistributedStorageVClock(kvStore, *nodeID, *totalNodes, isolationLevel, 0)
 
 	// Запускаем синхронизацию
 	if err := storageVClock.Start(); err != nil {
