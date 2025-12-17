@@ -49,7 +49,7 @@ func (e *ETCDStore) makeKey(key string) string {
 // Get получает значение по ключу
 func (e *ETCDStore) Get(ctx context.Context, key string) (*KVEntry, error) {
 	fullKey := e.makeKey(key)
-	resp, err := e.client.Get(ctx, fullKey)
+	resp, err := e.client.Get(ctx, fullKey, clientv3.WithSerializable())
 	if err != nil {
 		return nil, fmt.Errorf("etcd get error: %w", err)
 	}

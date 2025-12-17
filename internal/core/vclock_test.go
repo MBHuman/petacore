@@ -118,25 +118,25 @@ func TestVectorClock_IsSafeToRead(t *testing.T) {
 	vc := NewVectorClock()
 
 	// Нет подтверждений
-	if vc.IsSafeToRead(2, 3) {
+	if vc.IsSafeToRead(2, 3, "") {
 		t.Error("Should not be safe with 0 acks")
 	}
 
 	// Одно подтверждение
 	vc.Increment("node1")
-	if vc.IsSafeToRead(2, 3) {
+	if vc.IsSafeToRead(2, 3, "") {
 		t.Error("Should not be safe with 1 ack, need 2")
 	}
 
 	// Два подтверждения - quorum
 	vc.Increment("node2")
-	if !vc.IsSafeToRead(2, 3) {
+	if !vc.IsSafeToRead(2, 3, "") {
 		t.Error("Should be safe with 2 acks (quorum)")
 	}
 
 	// Три подтверждения
 	vc.Increment("node3")
-	if !vc.IsSafeToRead(2, 3) {
+	if !vc.IsSafeToRead(2, 3, "") {
 		t.Error("Should be safe with 3 acks")
 	}
 }

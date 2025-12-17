@@ -97,9 +97,9 @@ func (vc *VectorClock) HappensBefore(other *VectorClock) bool {
 	return hasStrictlyLess
 }
 
-// ConcurrentWith проверяет, являются ли события конкурентными (несравнимыми)
-func (vc *VectorClock) ConcurrentWith(other *VectorClock) bool {
-	return !vc.HappensBefore(other) && !other.HappensBefore(vc) && !vc.Equals(other)
+// HappensAfter проверяет, произошло ли событие this после other
+func (vc *VectorClock) HappensAfter(other *VectorClock) bool {
+	return other.HappensBefore(vc)
 }
 
 // Equals проверяет равенство векторных часов
@@ -125,6 +125,11 @@ func (vc *VectorClock) Equals(other *VectorClock) bool {
 	}
 
 	return true
+}
+
+// ConcurrentWith проверяет, являются ли два вектора конкурентными
+func (vc *VectorClock) ConcurrentWith(other *VectorClock) bool {
+	return !vc.HappensAfter(other) && !other.HappensAfter(vc)
 }
 
 // Clone создаёт копию векторных часов
@@ -163,14 +168,18 @@ func (vc *VectorClock) String() string {
 
 // IsSafeToRead проверяет, можно ли безопасно читать данные с данным VClock
 // на основе кворума узлов. Данные считаются безопасными, если они
-// синхронизированы на большинстве узлов (quorum).
-func (vc *VectorClock) IsSafeToRead(minAcks int, totalNodes int) bool {
+// синхронизированы на большинстве узлов (quorum) ИЛИ записаны на текущем узле.
+func (vc *VectorClock) IsSafeToRead(minAcks int, totalNodes int, currentNodeID string) bool {
 	vc.mu.RLock()
 	defer vc.mu.RUnlock()
 
-	// Подсчитываем количество узлов, которые подтвердили эту версию
-	acks := len(vc.clock)
+	// Если версия была записана на текущем узле, она безопасна для чтения
+	if vc.clock[currentNodeID] > 0 {
+		return true
+	}
 
+	// Иначе проверяем кворум
+	acks := len(vc.clock)
 	return acks >= minAcks
 }
 

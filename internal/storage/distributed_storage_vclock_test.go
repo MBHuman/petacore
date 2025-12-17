@@ -485,3 +485,101 @@ func TestVectorClock_SequentialWrites(t *testing.T) {
 		t.Errorf("Sequential writes test failed: %v", err)
 	}
 }
+
+// TestOCC_DoubleSpending тестирует OCC для предотвращения double spending
+func TestOCC_DoubleSpending(t *testing.T) {
+	kvStore := SetupKVStore(t, "test_occ_double")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+
+	// Создаём два хранилища на одном KV (симулируем два узла)
+	store1 := storage.NewDistributedStorageVClock(kvStore, "node1", 2, core.SnapshotIsolation, -1)
+	store2 := storage.NewDistributedStorageVClock(kvStore, "node2", 2, core.SnapshotIsolation, -1)
+
+	if err := store1.Start(); err != nil {
+		t.Fatalf("Failed to start store1: %v", err)
+	}
+	defer store1.Stop()
+
+	if err := store2.Start(); err != nil {
+		t.Fatalf("Failed to start store2: %v", err)
+	}
+	defer store2.Stop()
+
+	// Ждём инициализации
+	time.Sleep(200 * time.Millisecond)
+
+	// Устанавливаем начальный баланс
+	err := store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+		tx.Write("balance", "100")
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Ждём синхронизации
+	time.Sleep(500 * time.Millisecond)
+
+	// Транзакция 1: read balance, write balance-50
+	var tx1Done sync.WaitGroup
+	tx1Done.Add(1)
+	var tx1Err error
+	go func() {
+		defer tx1Done.Done()
+		tx1Err = store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+			if value, ok := tx.Read("balance"); !ok {
+				return fmt.Errorf("balance not found")
+			} else if value != "100" {
+				return fmt.Errorf("expected 100, got %s", value)
+			}
+			tx.Write("balance", "50")
+			time.Sleep(200 * time.Millisecond) // Имитируем работу
+			return nil
+		})
+	}()
+
+	// Транзакция 2: read balance, write balance-100 (double spending)
+	var tx2Done sync.WaitGroup
+	tx2Done.Add(1)
+	var tx2Err error
+	go func() {
+		defer tx2Done.Done()
+		time.Sleep(50 * time.Millisecond) // Начинаем после tx1
+		tx2Err = store2.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+			if value, ok := tx.Read("balance"); !ok {
+				return fmt.Errorf("balance not found")
+			} else if value != "100" {
+				return fmt.Errorf("expected 100, got %s", value)
+			}
+			tx.Write("balance", "0")
+			time.Sleep(300 * time.Millisecond) // Имитируем работу
+			return nil
+		})
+	}()
+
+	// Ждём завершения
+	tx1Done.Wait()
+	tx2Done.Wait()
+
+	// Tx1 должна быть успешной
+	require.NoError(t, tx1Err, "Tx1 should succeed")
+
+	// Tx2 должна fail с OCC violation
+	require.Error(t, tx2Err, "Tx2 should fail with OCC violation")
+	require.Contains(t, tx2Err.Error(), "OCC violation", "Error should contain OCC violation")
+
+	// Проверяем финальный баланс
+	time.Sleep(500 * time.Millisecond) // Ждём синхронизации
+	err = store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+		value, ok := tx.Read("balance")
+		if !ok {
+			return fmt.Errorf("balance not found")
+		}
+		if value != "50" {
+			t.Errorf("Expected balance 50, got %s", value)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
