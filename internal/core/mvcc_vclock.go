@@ -15,7 +15,6 @@ type MVCCVersion struct {
 type MVCCWithVClock struct {
 	// версии данных: key -> (timestamp -> MVCCVersion)
 	versions *ConcurrentHashMap
-	mu       sync.RWMutex
 }
 
 // NewMVCCWithVClock создаёт новый MVCC с Vector Clock
@@ -49,20 +48,22 @@ func (m *MVCCWithVClock) ReadWithVClock(key string, minAcks int, totalNodes int)
 		return "", nil, false
 	}
 
-	// Получаем все версии и ищем последнюю безопасную
-	versions := skipList.GetAllVersions()
-	if len(versions) == 0 {
-		return "", nil, false
+	// Используем итератор для поиска последней безопасной версии
+	iterator := skipList.NewVersionIterator()
+	defer iterator.Close()
+
+	var latestSafe *MVCCVersion
+
+	// Итерируем от старых к новым, но ищем максимальную безопасную
+	for iterator.Next() {
+		version := iterator.Value()
+		if version.VectorClock.IsSafeToRead(minAcks, totalNodes) {
+			latestSafe = version
+		}
 	}
 
-	// Идём от самой новой к самой старой
-	for i := len(versions) - 1; i >= 0; i-- {
-		version := versions[i]
-
-		// Проверяем, безопасна ли эта версия для чтения
-		if version.VectorClock.IsSafeToRead(minAcks, totalNodes) {
-			return version.Value, version.VectorClock, true
-		}
+	if latestSafe != nil {
+		return latestSafe.Value, latestSafe.VectorClock, true
 	}
 
 	// Нет безопасных версий
@@ -77,12 +78,20 @@ func (m *MVCCWithVClock) ReadLatest(key string) (string, *VectorClock, bool) {
 		return "", nil, false
 	}
 
-	versions := skipList.GetAllVersions()
-	if len(versions) == 0 {
+	iterator := skipList.NewVersionIterator()
+	defer iterator.Close()
+
+	var latest *MVCCVersion
+
+	// Итерируем до конца, чтобы найти последнюю версию
+	for iterator.Next() {
+		latest = iterator.Value()
+	}
+
+	if latest == nil {
 		return "", nil, false
 	}
 
-	latest := versions[len(versions)-1]
 	return latest.Value, latest.VectorClock, true
 }
 
@@ -178,20 +187,39 @@ func (sl *ConcurrentSkipListMap) GetVersion(key int64) *MVCCVersion {
 	return nil
 }
 
-// GetAllVersions возвращает все версии в порядке возрастания timestamp
-func (sl *ConcurrentSkipListMap) GetAllVersions() []*MVCCVersion {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
+// VersionIterator итератор для версий в ConcurrentSkipListMap
+type VersionIterator struct {
+	current *skipListNode
+	mu      *sync.RWMutex // Для управления блокировкой
+}
 
-	var versions []*MVCCVersion
-	current := sl.head.forward[0]
-
-	for current != nil {
-		if current.versionData != nil {
-			versions = append(versions, current.versionData)
-		}
-		current = current.forward[0]
+// NewVersionIterator создаёт итератор для версий (от старых к новым)
+func (sl *ConcurrentSkipListMap) NewVersionIterator() *VersionIterator {
+	sl.mu.RLock() // Блокируем на чтение для всего итератора
+	return &VersionIterator{
+		current: sl.head.forward[0],
+		mu:      &sl.mu,
 	}
+}
 
-	return versions
+// Next переходит к следующей версии, возвращает true если есть следующая
+func (it *VersionIterator) Next() bool {
+	if it.current == nil {
+		return false
+	}
+	it.current = it.current.forward[0]
+	return it.current != nil && it.current.versionData != nil
+}
+
+// Value возвращает текущую версию
+func (it *VersionIterator) Value() *MVCCVersion {
+	if it.current == nil {
+		return nil
+	}
+	return it.current.versionData
+}
+
+// Close разблокирует мьютекс
+func (it *VersionIterator) Close() {
+	it.mu.RUnlock()
 }

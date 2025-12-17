@@ -4,29 +4,83 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"petacore/internal/core"
 	"petacore/internal/distributed"
 	"petacore/internal/storage"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// setupDistributedStorage создает тестовое распределенное хранилище
-func setupDistributedStorage(b *testing.B) *storage.DistributedStorage {
-	b.Helper()
+// SetupKVStore создает тестовый KVStore на основе env переменных
+// DB_TYPE: etcd (default), postgres
+// ETCD_ENDPOINTS: для etcd, default "localhost:2379"
+// PG_CONN_STRING: для postgres, default "postgres://postgres:password@localhost/petacore_test?sslmode=disable"
+func SetupKVStore(tb testing.TB, namespace string) distributed.KVStore {
+	tb.Helper()
 
-	// Подключаемся к ETCD
-	etcdEndpoints := []string{"localhost:2379"}
-	kvStore, err := distributed.NewETCDStore(etcdEndpoints, fmt.Sprintf("bench_%d", time.Now().UnixNano()))
-	if err != nil {
-		b.Skipf("ETCD не доступен, пропускаем тест: %v", err)
+	dbType := os.Getenv("DB_TYPE")
+	if dbType == "" {
+		dbType = "etcd"
+	}
+
+	var kvStore distributed.KVStore
+	var err error
+
+	switch strings.ToLower(dbType) {
+	case "etcd":
+		endpointsStr := os.Getenv("ETCD_ENDPOINTS")
+		if endpointsStr == "" {
+			endpointsStr = "localhost:2379"
+		}
+		endpoints := strings.Split(endpointsStr, ",")
+		for i, ep := range endpoints {
+			endpoints[i] = strings.TrimSpace(ep)
+		}
+		kvStore, err = distributed.NewETCDStore(endpoints, namespace)
+		if err != nil {
+			tb.Skipf("ETCD не доступен (%v), пропускаем тест: %v", endpoints, err)
+			return nil
+		}
+
+	case "postgres":
+		connStr := os.Getenv("PG_CONN_STRING")
+		if connStr == "" {
+			connStr = "postgres://postgres:password@localhost/petacore_test?sslmode=disable"
+		}
+		kvStore, err = distributed.NewPGStore(connStr, namespace)
+		if err != nil {
+			tb.Skipf("PostgreSQL не доступен (%s), пропускаем тест: %v", connStr, err)
+			return nil
+		}
+
+	default:
+		tb.Fatalf("Неизвестный DB_TYPE: %s", dbType)
+		return nil
+	}
+
+	return kvStore
+}
+
+// SetupDistributedStorage создает тестовое распределенное хранилище на основе env переменных
+// DB_TYPE: etcd (default), postgres
+// ETCD_ENDPOINTS: для etcd, default "localhost:2379"
+// PG_CONN_STRING: для postgres, default "postgres://postgres:password@localhost/petacore_test?sslmode=disable"
+func SetupDistributedStorage(tb testing.TB) *storage.DistributedStorage {
+	tb.Helper()
+
+	namespace := fmt.Sprintf("%s_%d", tb.Name(), time.Now().UnixNano())
+
+	kvStore := SetupKVStore(tb, namespace)
+	if kvStore == nil {
 		return nil
 	}
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
 	if err := ds.Start(); err != nil {
-		b.Fatalf("Не удалось запустить синхронизацию: %v", err)
+		tb.Fatalf("Не удалось запустить синхронизацию: %v", err)
 	}
 
 	// Ждем синхронизации
@@ -34,26 +88,70 @@ func setupDistributedStorage(b *testing.B) *storage.DistributedStorage {
 	for !ds.IsSynced() {
 		select {
 		case <-timeout:
-			b.Fatal("Таймаут ожидания синхронизации")
+			tb.Fatal("Таймаут ожидания синхронизации")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	b.Cleanup(func() {
+	tb.Cleanup(func() {
 		ds.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = kvStore.DeleteAll(ctx, "")
+		if kvStoreT, ok := kvStore.(distributed.KVStoreT); ok {
+			_ = kvStoreT.DeleteAll(ctx, "")
+		}
 		kvStore.Close()
 	})
 
 	return ds
 }
 
+// SetupDistributedStorageVClock создает тестовое распределенное хранилище VClock на основе env переменных
+func SetupDistributedStorageVClock(tb testing.TB, nodeID string, totalNodes int, isolation core.IsolationLevel, minAcks int) *storage.DistributedStorageVClock {
+	tb.Helper()
+
+	namespace := fmt.Sprintf("%s_%d", tb.Name(), time.Now().UnixNano())
+
+	kvStore := SetupKVStore(tb, namespace)
+	if kvStore == nil {
+		return nil
+	}
+
+	ds := storage.NewDistributedStorageVClock(kvStore, nodeID, totalNodes, isolation, minAcks)
+	if err := ds.Start(); err != nil {
+		tb.Fatalf("Не удалось запустить синхронизацию: %v", err)
+	}
+
+	// Ждем синхронизации
+	timeout := time.After(10 * time.Second)
+	for !ds.IsSynced() {
+		select {
+		case <-timeout:
+			tb.Fatal("Таймаут ожидания синхронизации")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	tb.Cleanup(func() {
+		ds.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if kvStoreT, ok := kvStore.(distributed.KVStoreT); ok {
+			_ = kvStoreT.DeleteAll(ctx, "")
+		}
+		kvStore.Close()
+	})
+
+	return ds
+}
+
+// setupDistributedStorage создает тестовое распределенное хранилище (legacy, используй SetupDistributedStorage)
+
 // BenchmarkDistributedWrite измеряет производительность записей
 func BenchmarkDistributedWrite(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -76,7 +174,7 @@ func BenchmarkDistributedWrite(b *testing.B) {
 
 // BenchmarkDistributedRead измеряет производительность чтений
 func BenchmarkDistributedRead(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -110,7 +208,7 @@ func BenchmarkDistributedRead(b *testing.B) {
 
 // BenchmarkDistributedReadWrite измеряет производительность смешанных операций
 func BenchmarkDistributedReadWrite(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -146,7 +244,7 @@ func BenchmarkDistributedReadWrite(b *testing.B) {
 
 // BenchmarkDistributedTransaction измеряет производительность сложных транзакций
 func BenchmarkDistributedTransaction(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -182,7 +280,7 @@ func BenchmarkDistributedTransaction(b *testing.B) {
 
 // BenchmarkDistributedConcurrentWrites измеряет конкурентные записи
 func BenchmarkDistributedConcurrentWrites(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -209,7 +307,7 @@ func BenchmarkDistributedConcurrentWrites(b *testing.B) {
 
 // BenchmarkDistributedConcurrentReads измеряет конкурентные чтения
 func BenchmarkDistributedConcurrentReads(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -247,7 +345,7 @@ func BenchmarkDistributedConcurrentReads(b *testing.B) {
 
 // BenchmarkDistributedHotKey измеряет работу с горячим ключом
 func BenchmarkDistributedHotKey(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -290,10 +388,9 @@ func BenchmarkDistributedIsolationLevels(b *testing.B) {
 
 	for _, lvl := range levels {
 		b.Run(lvl.name, func(b *testing.B) {
-			etcdEndpoints := []string{"localhost:2379"}
-			kvStore, err := distributed.NewETCDStore(etcdEndpoints, fmt.Sprintf("bench_iso_%s_%d", lvl.name, time.Now().UnixNano()))
-			if err != nil {
-				b.Skipf("ETCD не доступен: %v", err)
+			namespace := fmt.Sprintf("bench_iso_%s_%d", lvl.name, time.Now().UnixNano())
+			kvStore := SetupKVStore(b, namespace)
+			if kvStore == nil {
 				return
 			}
 			defer kvStore.Close()
@@ -352,10 +449,8 @@ func BenchmarkDistributedMultiNode(b *testing.B) {
 
 	// Создаем несколько узлов
 	for i := 0; i < nodeCount; i++ {
-		etcdEndpoints := []string{"localhost:2379"}
-		kvStore, err := distributed.NewETCDStore(etcdEndpoints, namespace)
-		if err != nil {
-			b.Skipf("ETCD не доступен: %v", err)
+		kvStore := SetupKVStore(b, namespace)
+		if kvStore == nil {
 			return
 		}
 
@@ -370,7 +465,9 @@ func BenchmarkDistributedMultiNode(b *testing.B) {
 			ds.Stop()
 			if i == 0 {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = kvStore.DeleteAll(ctx, "")
+				if kvStoreT, ok := kvStore.(distributed.KVStoreT); ok {
+					_ = kvStoreT.DeleteAll(ctx, "")
+				}
 				cancel()
 			}
 			kvStore.Close()
@@ -422,7 +519,7 @@ func BenchmarkDistributedMultiNode(b *testing.B) {
 
 // BenchmarkDistributedBatchWrites измеряет пакетные записи
 func BenchmarkDistributedBatchWrites(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -454,7 +551,7 @@ func BenchmarkDistributedBatchWrites(b *testing.B) {
 
 // BenchmarkDistributedLatency измеряет задержки операций
 func BenchmarkDistributedLatency(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -501,7 +598,7 @@ func BenchmarkDistributedLatency(b *testing.B) {
 
 // BenchmarkDistributedContention измеряет конкуренцию за ключи
 func BenchmarkDistributedContention(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -541,7 +638,7 @@ func BenchmarkDistributedContention(b *testing.B) {
 
 // BenchmarkDistributedReadHeavy измеряет производительность при большой нагрузке на чтение
 func BenchmarkDistributedReadHeavy(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}
@@ -585,7 +682,7 @@ func BenchmarkDistributedReadHeavy(b *testing.B) {
 
 // BenchmarkDistributedWriteHeavy измеряет производительность при большой нагрузке на запись
 func BenchmarkDistributedWriteHeavy(b *testing.B) {
-	ds := setupDistributedStorage(b)
+	ds := SetupDistributedStorage(b)
 	if ds == nil {
 		return
 	}

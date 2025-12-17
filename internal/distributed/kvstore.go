@@ -23,15 +23,22 @@ type KVStore interface {
 	// Delete удаляет ключ
 	Delete(ctx context.Context, key string) error
 
-	// Watch следит за изменениями ключей с указанным префиксом
-	// Возвращает канал с событиями изменений
-	Watch(ctx context.Context, prefix string) (<-chan *WatchEvent, error)
-
-	// GetAll получает все ключи с указанным префиксом
-	GetAll(ctx context.Context, prefix string) ([]*KVEntry, error)
+	// SyncIterator возвращает итератор для синхронизации ключей с префиксом
+	// После того как Revision достигает ревизии в distributed хранилище,
+	// состояние узла считается синхронизированным и он принимать участие в кворуме
+	// и принимать запросы
+	SyncIterator(ctx context.Context, prefix string) (<-chan *WatchEvent, error)
 
 	// Close закрывает соединение с хранилищем
 	Close() error
+}
+
+// KVStoreT - тестовый интерфейс, расширяющий KVStore методами для тестирования
+type KVStoreT interface {
+	KVStore
+
+	// DeleteAll удаляет все ключи с префиксом (для тестирования)
+	DeleteAll(ctx context.Context, prefix string) error
 }
 
 // WatchEventType тип события изменения

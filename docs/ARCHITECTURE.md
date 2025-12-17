@@ -97,13 +97,13 @@
            │                                    │
            │ Quorum Read                        │ Write + Sync
            ▼                                    ▼
-┌──────────────────────────┐         ┌──────────────────────────┐
-│   MVCCWithVClock         │         │   SynchronizerVClock     │
-│  ┌────────────────────┐  │         │  ┌────────────────────┐  │
-│  │ Skip List Versions │  │◄────────│  │ WriteThroughVClock │  │
-│  │  key → [versions]  │  │         │  │ Watch Loop         │  │
-│  │                    │  │         │  │ Initial Sync       │  │
-│  │ Each version:      │  │         │  └────────────────────┘  │
+┌──────────────────────────┐         ┌──────────────────────────-┐
+│   MVCCWithVClock         │         │   SynchronizerVClock      │
+│  ┌────────────────────┐  │         │  ┌────────────────────┐   │
+│  │ Skip List Versions │  │◄────────│  │ WriteThroughVClock │   │
+│  │  key → [versions]  │  │         │  │ Watch Loop         │   │
+│  │                    │  │         │  │ Initial Sync       │   │
+│  │ Each version:      │  │         │  └────────────────────┘   │
 │  │  - Value           │  │         │           │               │
 │  │  - VectorClock     │  │         │           │ ETCD Watch    │
 │  │  - Timestamp       │  │         │           ▼               │

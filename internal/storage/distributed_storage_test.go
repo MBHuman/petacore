@@ -11,190 +11,12 @@ import (
 	"time"
 )
 
-// MockKVStore - мок для тестирования распределенного хранилища
-type MockKVStore struct {
-	mu       sync.RWMutex
-	data     map[string]*distributed.KVEntry
-	revision int64
-	watchers []chan *distributed.WatchEvent
-	closed   bool
-}
-
-func NewMockKVStore() *MockKVStore {
-	return &MockKVStore{
-		data:     make(map[string]*distributed.KVEntry),
-		revision: 0,
-		watchers: make([]chan *distributed.WatchEvent, 0),
-	}
-}
-
-func (m *MockKVStore) Get(ctx context.Context, key string) (*distributed.KVEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.closed {
-		return nil, errors.New("kvstore is closed")
-	}
-
-	entry, ok := m.data[key]
-	if !ok {
-		return nil, errors.New("key not found")
-	}
-
-	// Возвращаем копию
-	return &distributed.KVEntry{
-		Key:      entry.Key,
-		Value:    entry.Value,
-		Version:  entry.Version,
-		Revision: entry.Revision,
-	}, nil
-}
-
-func (m *MockKVStore) Put(ctx context.Context, key string, value string, version int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return errors.New("kvstore is closed")
-	}
-
-	m.revision++
-	entry := &distributed.KVEntry{
-		Key:      key,
-		Value:    value,
-		Version:  version,
-		Revision: m.revision,
-	}
-
-	m.data[key] = entry
-
-	// Уведомляем наблюдателей
-	event := &distributed.WatchEvent{
-		Type:  distributed.EventTypePut,
-		Entry: entry,
-	}
-
-	for _, watcher := range m.watchers {
-		select {
-		case watcher <- event:
-		default:
-			// Если канал заполнен, пропускаем
-		}
-	}
-
-	return nil
-}
-
-func (m *MockKVStore) Delete(ctx context.Context, key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return errors.New("kvstore is closed")
-	}
-
-	entry, ok := m.data[key]
-	if !ok {
-		return nil // Молча игнорируем удаление несуществующего ключа
-	}
-
-	delete(m.data, key)
-
-	// Уведомляем наблюдателей
-	event := &distributed.WatchEvent{
-		Type:  distributed.EventTypeDelete,
-		Entry: entry,
-	}
-
-	for _, watcher := range m.watchers {
-		select {
-		case watcher <- event:
-		default:
-		}
-	}
-
-	return nil
-}
-
-func (m *MockKVStore) Watch(ctx context.Context, prefix string) (<-chan *distributed.WatchEvent, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return nil, errors.New("kvstore is closed")
-	}
-
-	watcher := make(chan *distributed.WatchEvent, 100)
-	m.watchers = append(m.watchers, watcher)
-
-	// Закрываем канал при отмене контекста (но только если не закрыт)
-	go func() {
-		<-ctx.Done()
-		m.mu.Lock()
-		defer m.mu.Unlock()
-
-		// Проверяем, что канал еще не закрыт
-		if !m.closed {
-			select {
-			case <-watcher:
-				// Канал уже закрыт
-			default:
-				close(watcher)
-			}
-		}
-	}()
-
-	return watcher, nil
-}
-
-func (m *MockKVStore) GetAll(ctx context.Context, prefix string) ([]*distributed.KVEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.closed {
-		return nil, errors.New("kvstore is closed")
-	}
-
-	result := make([]*distributed.KVEntry, 0, len(m.data))
-	for _, entry := range m.data {
-		result = append(result, &distributed.KVEntry{
-			Key:      entry.Key,
-			Value:    entry.Value,
-			Version:  entry.Version,
-			Revision: entry.Revision,
-		})
-	}
-
-	return result, nil
-}
-
-func (m *MockKVStore) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return nil // Уже закрыт
-	}
-
-	m.closed = true
-
-	// Закрываем все каналы наблюдателей
-	for _, watcher := range m.watchers {
-		select {
-		case <-watcher:
-			// Канал уже закрыт
-		default:
-			close(watcher)
-		}
-	}
-	m.watchers = nil
-
-	return nil
-}
-
 // TestDistributedStorageBasicReadWrite тестирует базовые операции чтения/записи
 func TestDistributedStorageBasicReadWrite(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_basic")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -244,9 +66,12 @@ func TestDistributedStorageBasicReadWrite(t *testing.T) {
 	}
 }
 
-// TestDistributedStorageReadCommitted тестирует изоляцию Read Committed
+// TestDistributedStorageReadCommitted тестирует уровень изоляции Read Committed
 func TestDistributedStorageReadCommitted(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_read_committed")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -297,7 +122,10 @@ func TestDistributedStorageReadCommitted(t *testing.T) {
 
 // TestDistributedStorageSnapshotIsolation тестирует изоляцию Snapshot
 func TestDistributedStorageSnapshotIsolation(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_snapshot")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.SnapshotIsolation)
@@ -350,7 +178,10 @@ func TestDistributedStorageSnapshotIsolation(t *testing.T) {
 
 // TestDistributedStorageLocalWrites тестирует локальные записи внутри транзакции
 func TestDistributedStorageLocalWrites(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_local_writes")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -395,7 +226,10 @@ func TestDistributedStorageLocalWrites(t *testing.T) {
 
 // TestDistributedStorageEmptyTransaction тестирует пустую транзакцию
 func TestDistributedStorageEmptyTransaction(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_empty_tx")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -417,7 +251,10 @@ func TestDistributedStorageEmptyTransaction(t *testing.T) {
 
 // TestDistributedStorageMultipleKeys тестирует работу с множественными ключами
 func TestDistributedStorageMultipleKeys(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_multiple_keys")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -466,7 +303,10 @@ func TestDistributedStorageMultipleKeys(t *testing.T) {
 
 // TestDistributedStorageConcurrentTransactions тестирует конкурентные транзакции
 func TestDistributedStorageConcurrentTransactions(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_concurrent")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -522,7 +362,10 @@ func TestDistributedStorageConcurrentTransactions(t *testing.T) {
 
 // TestDistributedStorageSyncStatus тестирует статус синхронизации
 func TestDistributedStorageSyncStatus(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_sync_status")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -554,7 +397,10 @@ func TestDistributedStorageSyncStatus(t *testing.T) {
 
 // TestDistributedStorageTransactionError тестирует обработку ошибок в транзакции
 func TestDistributedStorageTransactionError(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_tx_error")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -579,7 +425,10 @@ func TestDistributedStorageTransactionError(t *testing.T) {
 
 // TestDistributedStorageReadNonExistentKey тестирует чтение несуществующего ключа
 func TestDistributedStorageReadNonExistentKey(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_read_nonexistent")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
@@ -604,7 +453,10 @@ func TestDistributedStorageReadNonExistentKey(t *testing.T) {
 
 // TestDistributedStorageInitialData тестирует загрузку начальных данных из ETCD
 func TestDistributedStorageInitialData(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_initial_data")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
 	defer kvStore.Close()
 
 	// Предварительно заполняем kvStore

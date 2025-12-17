@@ -1,10 +1,9 @@
-package storage
+package storage_test
 
 import (
-	"context"
 	"fmt"
 	"petacore/internal/core"
-	"petacore/internal/distributed"
+	"petacore/internal/storage"
 	"sync"
 	"testing"
 	"time"
@@ -12,123 +11,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MockKVStore для тестирования без реального ETCD
-type MockKVStore struct {
-	data       map[string]*distributed.KVEntry
-	mu         sync.RWMutex
-	watchChans []chan *distributed.WatchEvent
-	revision   int64
-}
-
-func NewMockKVStore() *MockKVStore {
-	return &MockKVStore{
-		data:       make(map[string]*distributed.KVEntry),
-		watchChans: make([]chan *distributed.WatchEvent, 0),
-		revision:   0,
-	}
-}
-
-func (m *MockKVStore) Get(ctx context.Context, key string) (*distributed.KVEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if entry, ok := m.data[key]; ok {
-		return entry, nil
-	}
-	return nil, fmt.Errorf("key not found")
-}
-
-func (m *MockKVStore) Put(ctx context.Context, key string, value string, version int64) error {
-	m.mu.Lock()
-	m.revision++
-	entry := &distributed.KVEntry{
-		Key:      key,
-		Value:    value,
-		Version:  version,
-		Revision: m.revision,
-	}
-	m.data[key] = entry
-	watchChans := make([]chan *distributed.WatchEvent, len(m.watchChans))
-	copy(watchChans, m.watchChans)
-	m.mu.Unlock()
-
-	// Уведомляем наблюдателей
-	event := &distributed.WatchEvent{
-		Type:  distributed.EventTypePut,
-		Entry: entry,
-	}
-	for _, ch := range watchChans {
-		select {
-		case ch <- event:
-		default:
-		}
-	}
-
-	return nil
-}
-
-func (m *MockKVStore) Delete(ctx context.Context, key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.data, key)
-	return nil
-}
-
-func (m *MockKVStore) GetAll(ctx context.Context, prefix string) ([]*distributed.KVEntry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	result := make([]*distributed.KVEntry, 0)
-	for k, entry := range m.data {
-		if prefix == "" || (len(k) >= len(prefix) && k[:len(prefix)] == prefix) {
-			result = append(result, entry)
-		}
-	}
-	return result, nil
-}
-
-func (m *MockKVStore) Watch(ctx context.Context, prefix string) (<-chan *distributed.WatchEvent, error) {
-	ch := make(chan *distributed.WatchEvent, 100)
-
-	m.mu.Lock()
-	m.watchChans = append(m.watchChans, ch)
-	m.mu.Unlock()
-
-	return ch, nil
-}
-
-func (m *MockKVStore) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, ch := range m.watchChans {
-		close(ch)
-	}
-	m.watchChans = nil
-	return nil
-}
-
-// NewMockKVStoreForREPL экспортированная версия для REPL
-func NewMockKVStoreForREPL() distributed.KVStore {
-	return NewMockKVStore()
-}
-
 // TestVectorClock_BasicOperations тестирует базовые операции с VClock
 func TestVectorClock_BasicOperations(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_vclock_basic")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
 	// Используем totalNodes=1 для простоты (minAcks=1)
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	// Ждём инициализации
 	time.Sleep(100 * time.Millisecond)
 
 	// Тест Write
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("key1", "value1")
 		return nil
 	})
@@ -141,7 +43,7 @@ func TestVectorClock_BasicOperations(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Тест Read
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		value, ok := tx.Read("key1")
 		if !ok {
 			t.Error("Expected to find key1")
@@ -164,12 +66,16 @@ func TestVectorClock_BasicOperations(t *testing.T) {
 func TestVectorClock_QuorumRead(t *testing.T) {
 	t.Skip("Skipping quorum test - requires proper 3-node setup and synchronization timing")
 
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_vclock_quorum")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
 
 	// Создаём 3 узла
-	storage1 := NewDistributedStorageVClock(kvStore, "node1", 3, core.ReadCommitted, 0)
-	storage2 := NewDistributedStorageVClock(kvStore, "node2", 3, core.ReadCommitted, 0)
-	storage3 := NewDistributedStorageVClock(kvStore, "node3", 3, core.ReadCommitted, 0)
+	storage1 := storage.NewDistributedStorageVClock(kvStore, "node1", 3, core.ReadCommitted, 0)
+	storage2 := storage.NewDistributedStorageVClock(kvStore, "node2", 3, core.ReadCommitted, 0)
+	storage3 := storage.NewDistributedStorageVClock(kvStore, "node3", 3, core.ReadCommitted, 0)
 
 	if err := storage1.Start(); err != nil {
 		t.Fatalf("Failed to start storage1: %v", err)
@@ -189,7 +95,7 @@ func TestVectorClock_QuorumRead(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Node1 записывает данные
-	err := storage1.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := storage1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("test_key", "test_value")
 		return nil
 	})
@@ -202,8 +108,8 @@ func TestVectorClock_QuorumRead(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Проверяем, что все узлы получили запись
-	for i, storage := range []*DistributedStorageVClock{storage1, storage2, storage3} {
-		err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	for i, store := range []*storage.DistributedStorageVClock{storage1, storage2, storage3} {
+		err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			value, ok := tx.Read("test_key")
 			if !ok {
 				return fmt.Errorf("node%d: key not found", i+1)
@@ -220,14 +126,18 @@ func TestVectorClock_QuorumRead(t *testing.T) {
 
 // TestVectorClock_ConcurrentWrites тестирует конкурентные записи
 func TestVectorClock_ConcurrentWrites(t *testing.T) {
-	kvStore := NewMockKVStore()
+	kvStore := SetupKVStore(t, "test_vclock_concurrent")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
 	// Используем totalNodes=1 для простоты
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -239,7 +149,7 @@ func TestVectorClock_ConcurrentWrites(t *testing.T) {
 	for i := 0; i < numWrites; i++ {
 		go func(i int) {
 			defer wg.Done()
-			err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Write(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 				return nil
 			})
@@ -254,7 +164,7 @@ func TestVectorClock_ConcurrentWrites(t *testing.T) {
 
 	// Проверяем, что все записи прошли
 	for i := 0; i < numWrites; i++ {
-		err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			key := fmt.Sprintf("key%d", i)
 			value, ok := tx.Read(key)
 			if !ok {
@@ -272,18 +182,22 @@ func TestVectorClock_ConcurrentWrites(t *testing.T) {
 
 // TestVectorClock_TransactionIsolation тестирует изоляцию транзакций
 func TestVectorClock_TransactionIsolation(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_isolation")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Первая транзакция - инициализация
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("counter", "0")
 		return nil
 	})
@@ -302,7 +216,7 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 	for i := 0; i < numTx; i++ {
 		go func() {
 			defer wg.Done()
-			storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+			store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				val, ok := tx.Read("counter")
 				if !ok {
 					val = "0"
@@ -318,7 +232,7 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Проверяем финальное значение
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		value, ok := tx.Read("counter")
 		if !ok {
 			return fmt.Errorf("counter not found")
@@ -337,18 +251,22 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 
 // TestVectorClock_MultipleKeys тестирует работу с несколькими ключами
 func TestVectorClock_MultipleKeys(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_multiple")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Записываем несколько ключей в одной транзакции
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("user:1:name", "Alice")
 		tx.Write("user:1:email", "alice@example.com")
 		tx.Write("user:2:name", "Bob")
@@ -363,7 +281,7 @@ func TestVectorClock_MultipleKeys(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Читаем все ключи
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tests := []struct {
 			key      string
 			expected string
@@ -393,18 +311,22 @@ func TestVectorClock_MultipleKeys(t *testing.T) {
 
 // TestVectorClock_UpdateOperations тестирует операции обновления
 func TestVectorClock_UpdateOperations(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_update")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Первая запись
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("config:version", "1.0")
 		return nil
 	})
@@ -415,7 +337,7 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Обновление
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("config:version", "1.1")
 		return nil
 	})
@@ -426,7 +348,7 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Проверяем, что получаем последнюю версию
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		value, ok := tx.Read("config:version")
 		if !ok {
 			return fmt.Errorf("config:version not found")
@@ -444,18 +366,22 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 
 // TestVectorClock_EmptyRead тестирует чтение несуществующего ключа
 func TestVectorClock_EmptyRead(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_empty")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Читаем несуществующий ключ
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		_, ok := tx.Read("nonexistent")
 		if ok {
 			return fmt.Errorf("expected key not found, but it was found")
@@ -470,18 +396,22 @@ func TestVectorClock_EmptyRead(t *testing.T) {
 
 // TestVectorClock_TransactionRollback тестирует откат транзакций
 func TestVectorClock_TransactionRollback(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_rollback")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Транзакция с ошибкой (должна откатиться)
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("rollback_test", "should_not_persist")
 		return fmt.Errorf("simulated error")
 	})
@@ -493,7 +423,7 @@ func TestVectorClock_TransactionRollback(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Проверяем, что данные НЕ сохранились
-	err = storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		_, ok := tx.Read("rollback_test")
 		if ok {
 			return fmt.Errorf("data should not exist after rollback")
@@ -508,13 +438,17 @@ func TestVectorClock_TransactionRollback(t *testing.T) {
 
 // TestVectorClock_SequentialWrites тестирует последовательные записи
 func TestVectorClock_SequentialWrites(t *testing.T) {
-	kvStore := NewMockKVStore()
-	storage := NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
+	kvStore := SetupKVStore(t, "test_vclock_sequential")
+	if kvStore == nil {
+		t.Skip("KVStore not available")
+	}
+	defer kvStore.Close()
+	store := storage.NewDistributedStorageVClock(kvStore, "node1", 1, core.ReadCommitted, 0)
 
-	if err := storage.Start(); err != nil {
+	if err := store.Start(); err != nil {
 		t.Fatalf("Failed to start storage: %v", err)
 	}
-	defer storage.Stop()
+	defer store.Stop()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -522,7 +456,7 @@ func TestVectorClock_SequentialWrites(t *testing.T) {
 
 	// Последовательные записи
 	for i := 0; i < numWrites; i++ {
-		err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write("sequence", fmt.Sprintf("value-%d", i))
 			return nil
 		})
@@ -535,7 +469,7 @@ func TestVectorClock_SequentialWrites(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Проверяем финальное значение
-	err := storage.RunTransaction(func(tx *DistributedTransactionVClock) error {
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		value, ok := tx.Read("sequence")
 		if !ok {
 			return fmt.Errorf("sequence key not found")

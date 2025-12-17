@@ -52,10 +52,12 @@ func NewPGStore(connString string, prefix string) (*PGStore, error) {
 func (ps *PGStore) initSchema(ctx context.Context) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS kv_store (
-			key TEXT PRIMARY KEY,
+			key TEXT NOT NULL,
 			value JSONB NOT NULL,
-			revision BIGSERIAL NOT NULL
+			revision BIGSERIAL NOT NULL,
+			PRIMARY KEY (revision, key)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_kv_store_key ON kv_store (key)`,
 		`CREATE OR REPLACE FUNCTION notify_kv_change() RETURNS TRIGGER AS $$
 		DECLARE
 			payload JSON;
@@ -184,27 +186,92 @@ func (ps *PGStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Watch следит за изменениями ключей с указанным префиксом
-func (ps *PGStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEvent, error) {
+// SyncIterator возвращает итератор для синхронизации ключей с префиксом
+// Сначала отправляет все существующие ключи как PUT события, затем переключается на listen
+func (ps *PGStore) SyncIterator(ctx context.Context, prefix string) (<-chan *WatchEvent, error) {
 	fullPrefix := ps.makeKey(prefix)
-
-	// Создаем отдельное соединение для LISTEN
-	conn, err := ps.client.Acquire(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire connection: %w", err)
-	}
-
-	_, err = conn.Exec(ctx, "LISTEN kv_changes")
-	if err != nil {
-		conn.Release()
-		return nil, fmt.Errorf("failed to listen: %w", err)
-	}
-
-	eventChan := make(chan *WatchEvent, 100)
+	eventChan := make(chan *WatchEvent, 1000)
 
 	go func() {
 		defer close(eventChan)
+
+		// Фаза 1: Получить все существующие ключи пачками
+		lastRev := int64(0)
+		batchSize := 200
+
+		for {
+			rows, err := ps.client.Query(ctx,
+				"SELECT key, value, revision FROM kv_store WHERE key LIKE $1 AND revision > $2 ORDER BY revision LIMIT $3",
+				fullPrefix+"%", lastRev, batchSize,
+			)
+			if err != nil {
+				return
+			}
+
+			hasRows := false
+			for rows.Next() {
+				hasRows = true
+				var key string
+				var valueJSON []byte
+				var revision int64
+
+				if err := rows.Scan(&key, &valueJSON, &revision); err != nil {
+					rows.Close()
+					return
+				}
+
+				var val pgValue
+				if err := json.Unmarshal(valueJSON, &val); err != nil {
+					continue
+				}
+
+				// Извлекаем ключ без префикса
+				if ps.prefix != "" && strings.HasPrefix(key, ps.prefix+"/") {
+					key = key[len(ps.prefix)+1:]
+				}
+
+				event := &WatchEvent{
+					Type: EventTypePut,
+					Entry: &KVEntry{
+						Key:      key,
+						Value:    val.Value,
+						Version:  val.Version,
+						Revision: revision,
+					},
+				}
+
+				select {
+				case eventChan <- event:
+				case <-ctx.Done():
+					rows.Close()
+					return
+				}
+
+				lastRev = revision
+			}
+
+			rows.Close()
+
+			if err := rows.Err(); err != nil {
+				return
+			}
+
+			if !hasRows {
+				break
+			}
+		}
+
+		// Фаза 2: Запустить listen для инкрементальных обновлений
+		conn, err := ps.client.Acquire(ctx)
+		if err != nil {
+			return
+		}
 		defer conn.Release()
+
+		_, err = conn.Exec(ctx, "LISTEN kv_changes")
+		if err != nil {
+			return
+		}
 
 		for {
 			notification, err := conn.Conn().WaitForNotification(ctx)
@@ -215,7 +282,7 @@ func (ps *PGStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEvent
 				continue
 			}
 
-			// Парсим payload
+			// Парсим событие
 			var payload struct {
 				Type         string          `json:"type"`
 				Key          string          `json:"key"`
@@ -302,65 +369,11 @@ func (ps *PGStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEvent
 	return eventChan, nil
 }
 
-// GetAll получает все ключи с указанным префиксом
-func (ps *PGStore) GetAll(ctx context.Context, prefix string) ([]*KVEntry, error) {
-	fullPrefix := ps.makeKey(prefix)
-
-	rows, err := ps.client.Query(ctx,
-		"SELECT key, value, revision FROM kv_store WHERE key LIKE $1",
-		fullPrefix+"%",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("pg get all error: %w", err)
-	}
-	defer rows.Close()
-
-	var entries []*KVEntry
-	for rows.Next() {
-		var key string
-		var valueJSON []byte
-		var revision int64
-
-		if err := rows.Scan(&key, &valueJSON, &revision); err != nil {
-			continue
-		}
-
-		var val pgValue
-		if err := json.Unmarshal(valueJSON, &val); err != nil {
-			continue
-		}
-
-		// Извлекаем ключ без префикса
-		if ps.prefix != "" && strings.HasPrefix(key, ps.prefix+"/") {
-			key = key[len(ps.prefix)+1:]
-		}
-
-		entries = append(entries, &KVEntry{
-			Key:      key,
-			Value:    val.Value,
-			Version:  val.Version,
-			Revision: revision,
-		})
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("pg get all rows error: %w", err)
-	}
-
-	return entries, nil
-}
-
-// DeleteAll удаляет все ключи с указанным префиксом
+// DeleteAll удаляет все ключи с префиксом (для тестирования)
 func (ps *PGStore) DeleteAll(ctx context.Context, prefix string) error {
 	fullPrefix := ps.makeKey(prefix)
-	_, err := ps.client.Exec(ctx,
-		"DELETE FROM kv_store WHERE key LIKE $1",
-		fullPrefix+"%",
-	)
-	if err != nil {
-		return fmt.Errorf("pg delete all error: %w", err)
-	}
-	return nil
+	_, err := ps.client.Exec(ctx, "DELETE FROM kv_store WHERE key LIKE $1", fullPrefix+"%")
+	return err
 }
 
 // Close закрывает соединение с хранилищем

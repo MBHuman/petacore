@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -103,15 +104,53 @@ func (e *ETCDStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Watch следит за изменениями ключей с указанным префиксом
-func (e *ETCDStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEvent, error) {
+// SyncIterator возвращает итератор для синхронизации ключей с префиксом
+// Сначала отправляет все существующие ключи как PUT события, затем переключается на watch
+func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *WatchEvent, error) {
 	fullPrefix := e.makeKey(prefix)
-	watchChan := e.client.Watch(ctx, fullPrefix, clientv3.WithPrefix())
-
-	eventChan := make(chan *WatchEvent, 100)
+	eventChan := make(chan *WatchEvent, 1000) // Увеличен буфер для большого количества ключей
 
 	go func() {
 		defer close(eventChan)
+
+		// Фаза 1: Получить все существующие ключи
+		resp, err := e.client.Get(ctx, fullPrefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+		if err != nil {
+			// Отправить ошибку как событие? Или просто закрыть канал
+			return
+		}
+
+		// Отправить существующие ключи как PUT события
+		for _, kv := range resp.Kvs {
+			var val etcdValue
+			if err := json.Unmarshal(kv.Value, &val); err != nil {
+				continue
+			}
+
+			key := string(kv.Key)
+			if e.prefix != "" && strings.HasPrefix(key, e.prefix+"/") {
+				key = key[len(e.prefix)+1:]
+			}
+
+			event := &WatchEvent{
+				Type: EventTypePut,
+				Entry: &KVEntry{
+					Key:      key,
+					Value:    val.Value,
+					Version:  val.Version,
+					Revision: kv.ModRevision,
+				},
+			}
+
+			select {
+			case eventChan <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		// Фаза 2: Запустить watch для инкрементальных обновлений
+		watchChan := e.client.Watch(ctx, fullPrefix, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
 
 		for wresp := range watchChan {
 			if wresp.Canceled {
@@ -121,9 +160,8 @@ func (e *ETCDStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEven
 			for _, ev := range wresp.Events {
 				event := &WatchEvent{}
 
-				// Извлекаем ключ без префикса
 				key := string(ev.Kv.Key)
-				if e.prefix != "" {
+				if e.prefix != "" && strings.HasPrefix(key, e.prefix+"/") {
 					key = key[len(e.prefix)+1:]
 				}
 
@@ -141,7 +179,6 @@ func (e *ETCDStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEven
 						Revision: ev.Kv.ModRevision,
 					}
 
-					// Обрабатываем предыдущее значение, если есть
 					if ev.PrevKv != nil {
 						var prevVal etcdValue
 						if err := json.Unmarshal(ev.PrevKv.Value, &prevVal); err == nil {
@@ -160,7 +197,6 @@ func (e *ETCDStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEven
 						Key: key,
 					}
 
-					// Предыдущее значение при удалении
 					if ev.PrevKv != nil {
 						var prevVal etcdValue
 						if err := json.Unmarshal(ev.PrevKv.Value, &prevVal); err == nil {
@@ -186,45 +222,11 @@ func (e *ETCDStore) Watch(ctx context.Context, prefix string) (<-chan *WatchEven
 	return eventChan, nil
 }
 
-// GetAll получает все ключи с указанным префиксом
-func (e *ETCDStore) GetAll(ctx context.Context, prefix string) ([]*KVEntry, error) {
-	fullPrefix := e.makeKey(prefix)
-	resp, err := e.client.Get(ctx, fullPrefix, clientv3.WithPrefix())
-	if err != nil {
-		return nil, fmt.Errorf("etcd get all error: %w", err)
-	}
-
-	entries := make([]*KVEntry, 0, len(resp.Kvs))
-	for _, kv := range resp.Kvs {
-		var val etcdValue
-		if err := json.Unmarshal(kv.Value, &val); err != nil {
-			continue
-		}
-
-		// Извлекаем ключ без префикса
-		key := string(kv.Key)
-		if e.prefix != "" {
-			key = key[len(e.prefix)+1:]
-		}
-
-		entries = append(entries, &KVEntry{
-			Key:      key,
-			Value:    val.Value,
-			Version:  val.Version,
-			Revision: kv.ModRevision,
-		})
-	}
-
-	return entries, nil
-}
-
+// DeleteAll удаляет все ключи с префиксом (для тестирования)
 func (e *ETCDStore) DeleteAll(ctx context.Context, prefix string) error {
 	fullPrefix := e.makeKey(prefix)
 	_, err := e.client.Delete(ctx, fullPrefix, clientv3.WithPrefix())
-	if err != nil {
-		return fmt.Errorf("etcd delete all error: %w", err)
-	}
-	return nil
+	return err
 }
 
 // Close закрывает соединение с ETCD

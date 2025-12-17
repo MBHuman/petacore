@@ -53,17 +53,9 @@ func NewSynchronizer(kvStore KVStore, mvcc *core.MVCC, logicalClock *core.LClock
 
 // Start запускает синхронизацию
 func (s *Synchronizer) Start() error {
-	// Инициализируем локальный MVCC данными из ETCD
-	if err := s.initialSync(); err != nil {
-		s.setStatus(SyncStatusError)
-		return fmt.Errorf("initial sync failed: %w", err)
-	}
-
-	s.setStatus(SyncStatusSynced)
-
-	// Запускаем watch для непрерывной синхронизации
+	// Запускаем sync для непрерывной синхронизации с initial load
 	s.wg.Add(1)
-	go s.watchLoop()
+	go s.syncLoop()
 
 	return nil
 }
@@ -107,55 +99,20 @@ func (s *Synchronizer) setLastSyncRevision(revision int64) {
 	s.lastSyncRevision = revision
 }
 
-// initialSync загружает все данные из ETCD в локальный MVCC
-func (s *Synchronizer) initialSync() error {
-	// log.Println("[Synchronizer] Starting initial sync...")
-
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
-
-	// Получаем все данные из ETCD
-	entries, err := s.kvStore.GetAll(ctx, "")
-	if err != nil {
-		return fmt.Errorf("failed to get all entries: %w", err)
-	}
-
-	// log.Printf("[Synchronizer] Loaded %d entries from ETCD", len(entries))
-
-	// Загружаем в локальный MVCC
-	maxRevision := int64(0)
-	for _, entry := range entries {
-		// Синхронизируем HLC с версией из ETCD
-		s.logicalClock.Recv(uint64(entry.Version))
-
-		// Записываем в локальный MVCC
-		s.mvcc.Write(entry.Key, entry.Value, entry.Version)
-
-		if entry.Revision > maxRevision {
-			maxRevision = entry.Revision
-		}
-	}
-
-	s.setLastSyncRevision(maxRevision)
-	// log.Printf("[Synchronizer] Initial sync completed, last revision: %d", maxRevision)
-
-	return nil
-}
-
-// watchLoop непрерывно следит за изменениями в ETCD
-func (s *Synchronizer) watchLoop() {
+// syncLoop непрерывно синхронизирует изменения через SyncIterator
+func (s *Synchronizer) syncLoop() {
 	defer s.wg.Done()
 
 	for {
 		select {
 		case <-s.ctx.Done():
-			// log.Println("[Synchronizer] Watch loop stopped")
+			// log.Println("[Synchronizer] Sync loop stopped")
 			return
 		default:
 		}
 
-		if err := s.watchOnce(); err != nil {
-			// log.Printf("[Synchronizer] Watch error: %v, retrying in 5s...", err)
+		if err := s.syncOnce(); err != nil {
+			// log.Printf("[Synchronizer] Sync error: %v, retrying in 5s...", err)
 			s.setStatus(SyncStatusError)
 
 			select {
@@ -168,15 +125,15 @@ func (s *Synchronizer) watchLoop() {
 	}
 }
 
-// watchOnce выполняет один цикл наблюдения за изменениями
-func (s *Synchronizer) watchOnce() error {
-	watchCtx, cancel := context.WithCancel(s.ctx)
+// syncOnce выполняет один цикл синхронизации через SyncIterator
+func (s *Synchronizer) syncOnce() error {
+	syncCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	// log.Println("[Synchronizer] Starting watch...")
-	eventChan, err := s.kvStore.Watch(watchCtx, "")
+	// log.Println("[Synchronizer] Starting sync...")
+	eventChan, err := s.kvStore.SyncIterator(syncCtx, "")
 	if err != nil {
-		return fmt.Errorf("failed to start watch: %w", err)
+		return fmt.Errorf("failed to start sync iterator: %w", err)
 	}
 
 	s.setStatus(SyncStatusSynced)
@@ -188,7 +145,7 @@ func (s *Synchronizer) watchOnce() error {
 
 		case event, ok := <-eventChan:
 			if !ok {
-				return fmt.Errorf("watch channel closed")
+				return fmt.Errorf("sync iterator channel closed")
 			}
 
 			if err := s.handleWatchEvent(event); err != nil {

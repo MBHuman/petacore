@@ -49,17 +49,9 @@ func NewSynchronizerVClock(kvStore KVStore, mvccVClock *core.MVCCWithVClock, log
 
 // Start запускает синхронизацию
 func (s *SynchronizerVClock) Start() error {
-	// Инициализируем локальный MVCC данными из ETCD
-	if err := s.initialSyncVClock(); err != nil {
-		s.setStatus(SyncStatusError)
-		return fmt.Errorf("initial sync failed: %w", err)
-	}
-
-	s.setStatus(SyncStatusSynced)
-
-	// Запускаем watch для непрерывной синхронизации
+	// Запускаем sync для непрерывной синхронизации с initial load
 	s.wg.Add(1)
-	go s.watchLoopVClock()
+	go s.syncLoopVClock()
 
 	return nil
 }
@@ -103,87 +95,55 @@ type VClockEntry struct {
 	VectorClock map[string]uint64 `json:"vclock"`
 }
 
-// initialSyncVClock загружает все данные из ETCD в локальный MVCC с VClock
-func (s *SynchronizerVClock) initialSyncVClock() error {
-	// log.Printf("[SynchronizerVClock] Starting initial sync for node %s...", s.nodeID)
-
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
-
-	// Получаем все данные из ETCD
-	entries, err := s.kvStore.GetAll(ctx, "")
-	if err != nil {
-		return fmt.Errorf("failed to get all entries: %w", err)
-	}
-
-	// log.Printf("[SynchronizerVClock] Loaded %d entries from ETCD", len(entries))
-
-	// Загружаем в локальный MVCC
-	maxRevision := int64(0)
-	for _, entry := range entries {
-		// Парсим VClockEntry из value
-		var vclockEntry VClockEntry
-		if err := json.Unmarshal([]byte(entry.Value), &vclockEntry); err != nil {
-			// log.Printf("[SynchronizerVClock] Warning: failed to parse VClock entry for key %s: %v", entry.Key, err)
-			// Пропускаем некорректные записи
-			continue
-		}
-
-		// Синхронизируем HLC
-		s.logicalClock.Recv(vclockEntry.Timestamp)
-
-		// Создаем Vector Clock из map
-		vclock := core.NewVectorClock()
-		vclock.UpdateFromMap(vclockEntry.VectorClock)
-
-		// Обновляем глобальный Vector Clock
-		s.vclockMu.Lock()
-		s.globalVClock.Update(vclock)
-		s.vclockMu.Unlock()
-
-		// Записываем в локальный MVCC
-		s.mvccVClock.WriteWithVClock(entry.Key, vclockEntry.Value, vclockEntry.Timestamp, vclock)
-
-		if entry.Revision > maxRevision {
-			maxRevision = entry.Revision
-		}
-	}
-
-	s.setLastSyncRevision(maxRevision)
-	// log.Printf("[SynchronizerVClock] Initial sync completed, last revision: %d", maxRevision)
-
-	return nil
-}
-
-// watchLoopVClock непрерывно следит за изменениями в ETCD
-func (s *SynchronizerVClock) watchLoopVClock() {
+// syncLoopVClock непрерывно синхронизирует изменения через SyncIterator
+func (s *SynchronizerVClock) syncLoopVClock() {
 	defer s.wg.Done()
 
-	// log.Printf("[SynchronizerVClock] Starting watch for node %s...", s.nodeID)
-
-	// Начинаем watch
-	watchChan, err := s.kvStore.Watch(s.ctx, "")
-	if err != nil {
-		// log.Printf("[SynchronizerVClock] Failed to start watch: %v", err)
-		return
-	}
+	// log.Printf("[SynchronizerVClock] Starting sync for node %s...", s.nodeID)
 
 	for {
 		select {
 		case <-s.ctx.Done():
-			// log.Println("[SynchronizerVClock] Watch loop stopped")
+			// log.Println("[SynchronizerVClock] Sync loop stopped")
 			return
+		default:
+		}
 
-		case event, ok := <-watchChan:
-			if !ok {
-				// log.Println("[SynchronizerVClock] Watch channel closed, reconnecting...")
-				time.Sleep(1 * time.Second)
-				watchChan, err = s.kvStore.Watch(s.ctx, "")
-				if err != nil {
-					// log.Printf("[SynchronizerVClock] Failed to reconnect watch: %v", err)
-					return
-				}
+		if err := s.syncOnceVClock(); err != nil {
+			// log.Printf("[SynchronizerVClock] Sync error: %v, retrying in 5s...", err)
+			s.setStatus(SyncStatusError)
+
+			select {
+			case <-time.After(5 * time.Second):
 				continue
+			case <-s.ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+// syncOnceVClock выполняет один цикл синхронизации через SyncIterator
+func (s *SynchronizerVClock) syncOnceVClock() error {
+	syncCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	// log.Printf("[SynchronizerVClock] Starting sync iterator for node %s...", s.nodeID)
+	eventChan, err := s.kvStore.SyncIterator(syncCtx, "")
+	if err != nil {
+		return fmt.Errorf("failed to start sync iterator: %w", err)
+	}
+
+	s.setStatus(SyncStatusSynced)
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return nil
+
+		case event, ok := <-eventChan:
+			if !ok {
+				return fmt.Errorf("sync iterator channel closed")
 			}
 
 			// Обрабатываем событие
