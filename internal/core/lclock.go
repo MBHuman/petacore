@@ -35,22 +35,22 @@ func getPhysicalTime() uint64 {
 // Get возвращает текущее HLC timestamp как единое значение
 // Комбинируем wallTime и logical в одно uint64 значение для обратной совместимости
 func (lc *LClock) Get() uint64 {
-	pt := getPhysicalTime()
 	for {
+		pt := getPhysicalTime()
 		currentWallTime := atomic.LoadUint64(&lc.wallTime)
 		currentLogical := atomic.LoadUint64(&lc.logical)
 
 		if pt > currentWallTime {
-			// Если физическое время больше, обновляем wallTime и сбрасываем logical
+			// Физическое время продвинулось: обновляем wallTime, сбрасываем logical
 			if atomic.CompareAndSwapUint64(&lc.wallTime, currentWallTime, pt) {
 				atomic.StoreUint64(&lc.logical, 0)
 				return pt
 			}
 		} else {
-			// Если физическое время не продвинулось, увеличиваем logical
-			if atomic.CompareAndSwapUint64(&lc.wallTime, currentWallTime, currentWallTime) {
-				atomic.StoreUint64(&lc.logical, currentLogical+1)
-				return currentWallTime + currentLogical + 1
+			// Физическое время не изменилось: инкрементируем logical
+			newLogical := currentLogical + 1
+			if atomic.CompareAndSwapUint64(&lc.logical, currentLogical, newLogical) {
+				return currentWallTime + newLogical
 			}
 		}
 	}

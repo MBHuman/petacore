@@ -3,11 +3,14 @@ package distributed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"petacore/internal/core"
 	"sync"
 	"time"
 )
+
+var ErrKeyNotFound = errors.New("key not found")
 
 // SynchronizerVClock синхронизатор с Vector Clock для quorum-based чтения
 type SynchronizerVClock struct {
@@ -241,11 +244,29 @@ func (s *SynchronizerVClock) WriteThroughVClock(ctx context.Context, key string,
 	return nil
 }
 
-// GetLastSyncRevision возвращает последнюю синхронизированную ревизию
-func (s *SynchronizerVClock) GetLastSyncRevision() int64 {
-	s.revisionMu.RLock()
-	defer s.revisionMu.RUnlock()
-	return s.lastSyncRevision
+// GetKVStore возвращает KVStore для прямого доступа
+func (s *SynchronizerVClock) GetKVStore() KVStore {
+	return s.kvStore
+}
+
+// GetCurrentVersion получает текущую версию ключа из KV с Vector Clock
+func (s *SynchronizerVClock) GetCurrentVersion(ctx context.Context, key string) (*core.VectorClock, error) {
+	entry, err := s.kvStore.Get(ctx, key)
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return core.NewVectorClock(), nil
+		}
+		return nil, fmt.Errorf("failed to get current version: %w", err)
+	}
+
+	var vclockEntry VClockEntry
+	if err := json.Unmarshal([]byte(entry.Value), &vclockEntry); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal VClock entry: %w", err)
+	}
+
+	vclock := core.NewVectorClock()
+	vclock.UpdateFromMap(vclockEntry.VectorClock)
+	return vclock, nil
 }
 
 // setLastSyncRevision устанавливает последнюю синхронизированную ревизию

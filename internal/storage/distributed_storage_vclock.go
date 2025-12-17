@@ -282,17 +282,20 @@ func (dtx *DistributedTransactionVClock) Write(key string, value string) {
 // 2. Локально пишет в MVCC с Vector Clock (nodeID инкрементирован)
 // 3. Фоновая синхронизация обновит Vector Clock на других узлах
 func (dtx *DistributedTransactionVClock) Commit() error {
-	// Проверяем OCC: read set не изменился
-	for key, expectedVClock := range dtx.readSet {
-		// Проверяем текущую версию
-		_, currentVClock, ok := dtx.mvccVClock.ReadLatest(key)
-		if !ok {
-			// Ключ исчез - violation
-			return fmt.Errorf("OCC violation: key %s was read but no longer exists", key)
-		}
-		if !currentVClock.Equals(expectedVClock) {
-			// Версия изменилась - violation
-			return fmt.Errorf("OCC violation: key %s version changed from %v to %v", key, expectedVClock, currentVClock)
+	// Проверяем OCC только если есть локальные записи: read set не изменился
+	if len(dtx.localWrites) > 0 {
+		ctx := context.Background() // Или использовать timeout ctx
+		for key, expectedVClock := range dtx.readSet {
+			// Запрашиваем актуальную версию из ETCD через GetCurrentVersion
+			currentVClock, err := dtx.synchronizer.GetCurrentVersion(ctx, key)
+			if err != nil {
+				return fmt.Errorf("OCC violation: key %s was read but error getting current version: %w", key, err)
+			}
+
+			if !currentVClock.Equals(expectedVClock) {
+				// Версия изменилась - violation
+				return fmt.Errorf("OCC violation: key %s version changed from %v to %v", key, expectedVClock, currentVClock)
+			}
 		}
 	}
 
