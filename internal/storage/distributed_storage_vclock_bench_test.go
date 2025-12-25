@@ -4,19 +4,25 @@ import (
 	"fmt"
 	"petacore/internal/core"
 	"petacore/internal/storage"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// BenchmarkVClock_SingleWrite измеряет скорость одиночных записей
+// Unified, idiomatic benchmarks for VClock-based distributed storage.
+// These are intended to be clear and reproducible for plotting with plots.py.
+
+func benchSetup(b *testing.B, nodes int) *storage.DistributedStorageVClock {
+	return SetupDistributedStorageVClock(b, "node1", nodes, core.ReadCommitted, 0)
+}
+
 func BenchmarkVClock_SingleWrite(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key%d", i)
@@ -27,15 +33,14 @@ func BenchmarkVClock_SingleWrite(b *testing.B) {
 	}
 }
 
-// BenchmarkVClock_SingleRead измеряет скорость одиночных чтений с quorum
 func BenchmarkVClock_SingleRead(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	// Подготовка данных
-	for i := 0; i < 1000; i++ {
+	const prepopulate = 1000
+	for i := 0; i < prepopulate; i++ {
 		key := fmt.Sprintf("key%d", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, "value")
@@ -45,7 +50,7 @@ func BenchmarkVClock_SingleRead(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%d", i%1000)
+		key := fmt.Sprintf("key%d", i%prepopulate)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Read(key)
 			return nil
@@ -53,72 +58,67 @@ func BenchmarkVClock_SingleRead(b *testing.B) {
 	}
 }
 
-// BenchmarkVClock_ReadWrite измеряет скорость смешанных операций
-func BenchmarkVClock_ReadWrite(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+func BenchmarkVClock_ReadWriteMix(b *testing.B) {
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	// Подготовка данных
-	for i := 0; i < 100; i++ {
-		key := fmt.Sprintf("key%d", i)
+	const keys = 100
+	for i := 0; i < keys; i++ {
+		k := fmt.Sprintf("key%d", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write(key, "value")
+			tx.Write(k, "init")
 			return nil
 		})
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		k := fmt.Sprintf("key%d", i%keys)
 		if i%2 == 0 {
-			// Чтение
-			key := fmt.Sprintf("key%d", i%100)
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Read(key)
+				tx.Read(k)
 				return nil
 			})
 		} else {
-			// Запись
-			key := fmt.Sprintf("key%d", i%100)
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write(key, "newvalue")
+				tx.Write(k, "val")
 				return nil
 			})
 		}
 	}
 }
 
-// BenchmarkVClock_ConcurrentWrites измеряет throughput параллельных записей
 func BenchmarkVClock_ConcurrentWrites(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
+	var ctr uint64
+	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
 		for pb.Next() {
-			key := fmt.Sprintf("key%d", i)
+			id := atomic.AddUint64(&ctr, 1) - 1
+			key := fmt.Sprintf("key%d", id)
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Write(key, "value")
 				return nil
 			})
-			i++
 		}
 	})
 }
 
-// BenchmarkVClock_ConcurrentReads измеряет throughput параллельных чтений
 func BenchmarkVClock_ConcurrentReads(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	// Подготовка данных
-	for i := 0; i < 1000; i++ {
+	const prepopulate = 1000
+	for i := 0; i < prepopulate; i++ {
 		key := fmt.Sprintf("key%d", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, "value")
@@ -126,49 +126,48 @@ func BenchmarkVClock_ConcurrentReads(b *testing.B) {
 		})
 	}
 
+	var idx uint64
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
 		for pb.Next() {
-			key := fmt.Sprintf("key%d", i%1000)
+			i := atomic.AddUint64(&idx, 1) - 1
+			key := fmt.Sprintf("key%d", i%prepopulate)
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Read(key)
 				return nil
 			})
-			i++
 		}
 	})
 }
 
-// BenchmarkVClock_Transaction измеряет скорость транзакций
 func BenchmarkVClock_Transaction(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		k := fmt.Sprintf("key%d", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write(fmt.Sprintf("key%d", i), "value")
-			tx.Read(fmt.Sprintf("key%d", i))
+			tx.Write(k, "value")
+			tx.Read(k)
 			return nil
 		})
 	}
 }
 
-// BenchmarkVClock_LargeTransaction измеряет скорость больших транзакций
 func BenchmarkVClock_LargeTransaction(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
+	const opsPerTx = 10
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			// 10 операций в одной транзакции
-			for j := 0; j < 10; j++ {
+			for j := 0; j < opsPerTx; j++ {
 				key := fmt.Sprintf("key%d_%d", i, j)
 				tx.Write(key, "value")
 			}
@@ -177,14 +176,12 @@ func BenchmarkVClock_LargeTransaction(b *testing.B) {
 	}
 }
 
-// BenchmarkVClock_HotKey измеряет contention на горячем ключе
 func BenchmarkVClock_HotKey(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	// Инициализация горячего ключа
 	ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		tx.Write("hotkey", "0")
 		return nil
@@ -202,38 +199,33 @@ func BenchmarkVClock_HotKey(b *testing.B) {
 	})
 }
 
-// BenchmarkVClock_QuorumOverhead измеряет overhead от quorum проверки
 func BenchmarkVClock_QuorumOverhead(b *testing.B) {
 	scenarios := []struct {
-		name       string
-		totalNodes int
-	}{
-		{"1node", 1},
-		{"3nodes", 3},
-		{"5nodes", 5},
-	}
+		name  string
+		nodes int
+	}{{"1node", 1}, {"3nodes", 3}, {"5nodes", 5}}
 
-	for _, scenario := range scenarios {
-		b.Run(scenario.name, func(b *testing.B) {
-			ds := SetupDistributedStorageVClock(b, "node1", scenario.totalNodes, core.ReadCommitted, 0)
+	for _, s := range scenarios {
+		b.Run(s.name, func(b *testing.B) {
+			ds := benchSetup(b, s.nodes)
 			if ds == nil {
-				return
+				b.Skip("setup failed")
 			}
 
-			// Подготовка данных
-			for i := 0; i < 100; i++ {
-				key := fmt.Sprintf("key%d", i)
+			const pre = 100
+			for i := 0; i < pre; i++ {
+				k := fmt.Sprintf("key%d", i)
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-					tx.Write(key, "value")
+					tx.Write(k, "v")
 					return nil
 				})
 			}
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				key := fmt.Sprintf("key%d", i%100)
+				k := fmt.Sprintf("key%d", i%pre)
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-					tx.Read(key)
+					tx.Read(k)
 					return nil
 				})
 			}
@@ -241,178 +233,141 @@ func BenchmarkVClock_QuorumOverhead(b *testing.B) {
 	}
 }
 
-// BenchmarkVClock_VectorClockSize измеряет влияние размера VectorClock
 func BenchmarkVClock_VectorClockSize(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 5, core.ReadCommitted, 0)
+	// measure cost when vector clock has more nodes
+	ds := benchSetup(b, 5)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
+	var ctr uint64
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
 		for pb.Next() {
-			key := fmt.Sprintf("key%d", i)
+			id := atomic.AddUint64(&ctr, 1) - 1
+			key := fmt.Sprintf("key%d", id)
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write(key, "value")
+				tx.Write(key, "v")
 				return nil
 			})
-			i++
 		}
 	})
 }
 
-// BenchmarkVClock_Latency измеряет распределение латентности
-func BenchmarkVClock_Latency(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+func BenchmarkVClock_LatencyAvg(b *testing.B) {
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	latencies := make([]time.Duration, b.N)
+	// sample latencies (avoid storing huge slices for large b.N)
+	var total time.Duration
+	var sampleCount int64
+	const maxSamples = 10000
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		start := time.Now()
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write(fmt.Sprintf("key%d", i), "value")
+			tx.Write(fmt.Sprintf("key%d", i), "v")
 			return nil
 		})
-		latencies[i] = time.Since(start)
+		if sampleCount < maxSamples {
+			total += time.Since(start)
+			sampleCount++
+		}
 	}
-
 	b.StopTimer()
 
-	// Вычисляем перцентили
-	if b.N > 0 {
-		// Простая сортировка для малых N
-		for i := 0; i < len(latencies)-1; i++ {
-			for j := i + 1; j < len(latencies); j++ {
-				if latencies[i] > latencies[j] {
-					latencies[i], latencies[j] = latencies[j], latencies[i]
-				}
-			}
-		}
-
-		p50 := latencies[b.N/2]
-		p95 := latencies[b.N*95/100]
-		p99 := latencies[b.N*99/100]
-
-		b.ReportMetric(float64(p50.Microseconds()), "p50_us")
-		b.ReportMetric(float64(p95.Microseconds()), "p95_us")
-		b.ReportMetric(float64(p99.Microseconds()), "p99_us")
+	if sampleCount > 0 {
+		avg := total / time.Duration(sampleCount)
+		b.ReportMetric(float64(avg.Microseconds()), "avg_latency_us")
 	}
 }
 
-// BenchmarkVClock_Throughput измеряет максимальный throughput
 func BenchmarkVClock_Throughput(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
 	var ops int64
-	done := make(chan struct{})
-
-	// Запускаем измерение throughput
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				current := atomic.LoadInt64(&ops)
-				b.ReportMetric(float64(current), "ops/sec")
-				atomic.StoreInt64(&ops, 0)
-			case <-done:
-				return
-			}
-		}
-	}()
-
+	start := time.Now()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := 0
 		for pb.Next() {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write(fmt.Sprintf("key%d", i), "value")
+				tx.Write("tput_key", "v")
 				return nil
 			})
 			atomic.AddInt64(&ops, 1)
-			i++
 		}
 	})
-
-	close(done)
+	elapsed := time.Since(start)
+	if elapsed > 0 {
+		b.ReportMetric(float64(ops)/elapsed.Seconds(), "ops/s")
+	}
 }
 
-// BenchmarkVClock_MemoryUsage измеряет использование памяти
 func BenchmarkVClock_MemoryUsage(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
-
-	// Записываем много данных для измерения памяти
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key%d", i)
-		value := fmt.Sprintf("value_%d_with_some_data", i)
+		val := fmt.Sprintf("value_%d_with_some_data", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write(key, value)
+			tx.Write(key, val)
 			return nil
 		})
 	}
 }
 
-// BenchmarkVClock_Scalability проверяет масштабируемость с разным числом горутин
 func BenchmarkVClock_Scalability(b *testing.B) {
-	goroutines := []int{1, 2, 4, 8, 16, 32}
-
-	for _, numGoroutines := range goroutines {
-		b.Run(fmt.Sprintf("goroutines_%d", numGoroutines), func(b *testing.B) {
-			ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	goroutines := []int{1, 2, 4, 8, 16}
+	for _, g := range goroutines {
+		b.Run(fmt.Sprintf("goroutines_%d", g), func(b *testing.B) {
+			ds := benchSetup(b, 1)
 			if ds == nil {
-				return
+				b.Skip("setup failed")
 			}
 
-			b.SetParallelism(numGoroutines)
+			b.SetParallelism(g)
+			var idx uint64
 			b.ResetTimer()
-
 			b.RunParallel(func(pb *testing.PB) {
-				i := 0
 				for pb.Next() {
-					key := fmt.Sprintf("key%d", i)
+					i := atomic.AddUint64(&idx, 1) - 1
+					k := fmt.Sprintf("key%d", i)
 					ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-						tx.Write(key, "value")
+						tx.Write(k, "v")
 						return nil
 					})
-					i++
 				}
 			})
 		})
 	}
 }
 
-// BenchmarkVClock_BatchWrite измеряет скорость пакетной записи
 func BenchmarkVClock_BatchWrite(b *testing.B) {
 	batchSizes := []int{1, 10, 50, 100}
 
-	for _, batchSize := range batchSizes {
-		b.Run(fmt.Sprintf("batch_%d", batchSize), func(b *testing.B) {
-			ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	for _, bs := range batchSizes {
+		b.Run(fmt.Sprintf("batch_%d", bs), func(b *testing.B) {
+			ds := benchSetup(b, 1)
 			if ds == nil {
-				return
+				b.Skip("setup failed")
 			}
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-					for j := 0; j < batchSize; j++ {
-						key := fmt.Sprintf("key%d_%d", i, j)
-						tx.Write(key, "value")
+					for j := 0; j < bs; j++ {
+						tx.Write(fmt.Sprintf("key%d_%d", i, j), "v")
 					}
 					return nil
 				})
@@ -421,7 +376,6 @@ func BenchmarkVClock_BatchWrite(b *testing.B) {
 	}
 }
 
-// BenchmarkVClock_ContentionLevel измеряет производительность при разных уровнях contention
 func BenchmarkVClock_ContentionLevel(b *testing.B) {
 	contentionLevels := []struct {
 		name     string
@@ -434,49 +388,41 @@ func BenchmarkVClock_ContentionLevel(b *testing.B) {
 
 	for _, level := range contentionLevels {
 		b.Run(level.name, func(b *testing.B) {
-			ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+			ds := benchSetup(b, 1)
 			if ds == nil {
-				return
+				b.Skip("setup failed")
 			}
 
+			var idx uint64
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
-				i := 0
 				for pb.Next() {
-					key := fmt.Sprintf("key%d", i%level.keyRange)
+					i := atomic.AddUint64(&idx, 1) - 1
+					key := fmt.Sprintf("key%d", i%uint64(level.keyRange))
 					ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-						tx.Write(key, "value")
+						tx.Write(key, "v")
 						return nil
 					})
-					i++
 				}
 			})
 		})
 	}
 }
 
-// BenchmarkVClock_SynchronizationOverhead измеряет overhead синхронизации
 func BenchmarkVClock_SynchronizationOverhead(b *testing.B) {
-	ds := SetupDistributedStorageVClock(b, "node1", 1, core.ReadCommitted, 0)
+	ds := benchSetup(b, 1)
 	if ds == nil {
-		return
+		b.Skip("setup failed")
 	}
 
-	var wg sync.WaitGroup
-
+	// Measure synchronization overhead by running parallel transactions
 	b.ResetTimer()
-
-	// Измеряем время с учетом синхронизации watch
-	for i := 0; i < b.N; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write(fmt.Sprintf("key%d", i), "value")
+				tx.Write("sync_key", "v")
 				return nil
 			})
-		}(i)
-	}
-
-	wg.Wait()
+		}
+	})
 }
