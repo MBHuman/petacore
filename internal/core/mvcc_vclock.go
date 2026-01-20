@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -14,20 +15,20 @@ type MVCCVersion struct {
 // MVCCWithVClock расширенный MVCC с поддержкой Vector Clock
 type MVCCWithVClock struct {
 	// версии данных: key -> (timestamp -> MVCCVersion)
-	versions *ConcurrentHashMap
+	versions *ConcurrentSkipListMap[*ConcurrentSkipListMap[*MVCCVersion]]
 }
 
 // NewMVCCWithVClock создаёт новый MVCC с Vector Clock
 func NewMVCCWithVClock() *MVCCWithVClock {
 	return &MVCCWithVClock{
-		versions: NewConcurrentHashMap(),
+		versions: NewConcurrentSkipListMap[*ConcurrentSkipListMap[*MVCCVersion]](),
 	}
 }
 
 // WriteWithVClock записывает значение с Vector Clock
-func (m *MVCCWithVClock) WriteWithVClock(key string, value string, timestamp uint64, vclock *VectorClock) {
-	skipList := m.versions.ComputeIfAbsent(key, func() *ConcurrentSkipListMap {
-		return NewConcurrentSkipListMap()
+func (m *MVCCWithVClock) WriteWithVClock(key []byte, value string, timestamp uint64, vclock *VectorClock) {
+	skipList := m.versions.ComputeIfAbsent(key, func() *ConcurrentSkipListMap[*MVCCVersion] {
+		return NewConcurrentSkipListMap[*MVCCVersion]()
 	})
 
 	version := &MVCCVersion{
@@ -37,12 +38,12 @@ func (m *MVCCWithVClock) WriteWithVClock(key string, value string, timestamp uin
 	}
 
 	// Сохраняем MVCCVersion под timestamp
-	skipList.PutVersion(int64(timestamp), version)
+	skipList.Put([]byte(fmt.Sprintf("%d", timestamp)), version)
 }
 
 // ReadWithSnapshot читает значение с snapshot isolation
 // snapshotVClock != nil для SI, snapshotTimestamp для RC
-func (m *MVCCWithVClock) ReadWithSnapshot(key string, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string) (string, *VectorClock, bool) {
+func (m *MVCCWithVClock) ReadWithSnapshot(key []byte, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string) (string, *VectorClock, bool) {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
 		return "", nil, false
@@ -81,7 +82,7 @@ func (m *MVCCWithVClock) ReadWithSnapshot(key string, snapshotVClock *VectorCloc
 
 // ReadLatest читает последнюю версию без проверки quorum
 // (используется для внутренних целей)
-func (m *MVCCWithVClock) ReadLatest(key string) (string, *VectorClock, bool) {
+func (m *MVCCWithVClock) ReadLatest(key []byte) (string, *VectorClock, bool) {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
 		return "", nil, false
@@ -105,21 +106,21 @@ func (m *MVCCWithVClock) ReadLatest(key string) (string, *VectorClock, bool) {
 }
 
 // GetVectorClock возвращает Vector Clock для последней версии ключа
-func (m *MVCCWithVClock) GetVectorClock(key string) (*VectorClock, bool) {
+func (m *MVCCWithVClock) GetVectorClock(key []byte) (*VectorClock, bool) {
 	_, vclock, ok := m.ReadLatest(key)
 	return vclock, ok
 }
 
 // UpdateVectorClock обновляет Vector Clock для существующей версии
 // Это нужно когда другой узел подтверждает запись
-func (m *MVCCWithVClock) UpdateVectorClock(key string, timestamp uint64, nodeID string) bool {
+func (m *MVCCWithVClock) UpdateVectorClock(key []byte, timestamp uint64, nodeID string) bool {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
 		return false
 	}
 
-	version := skipList.GetVersion(int64(timestamp))
-	if version == nil {
+	version, ok := skipList.Get(fmt.Appendf(nil, "%d", timestamp))
+	if !ok {
 		return false
 	}
 
@@ -128,107 +129,87 @@ func (m *MVCCWithVClock) UpdateVectorClock(key string, timestamp uint64, nodeID 
 	return true
 }
 
-// ConcurrentSkipListMap расширенный для хранения MVCCVersion
-func (sl *ConcurrentSkipListMap) PutVersion(key int64, version *MVCCVersion) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
-
-	update := make([]*skipListNode, maxLevel)
-	current := sl.head
-
-	// Find position to insert
-	for i := sl.level - 1; i >= 0; i-- {
-		for current.forward[i] != nil && current.forward[i].key < key {
-			current = current.forward[i]
-		}
-		update[i] = current
-	}
-
-	current = current.forward[0]
-
-	// Update existing key
-	if current != nil && current.key == key {
-		current.versionData = version
-		return
-	}
-
-	// Insert new node
-	newLevel := sl.randomLevel()
-	if newLevel > sl.level {
-		for i := sl.level; i < newLevel; i++ {
-			update[i] = sl.head
-		}
-		sl.level = newLevel
-	}
-
-	newNode := &skipListNode{
-		key:         key,
-		value:       version.Value,
-		versionData: version,
-		forward:     make([]*skipListNode, maxLevel),
-	}
-
-	for i := 0; i < newLevel; i++ {
-		newNode.forward[i] = update[i].forward[i]
-		update[i].forward[i] = newNode
-	}
-}
-
-// GetVersion получает MVCCVersion по timestamp
-func (sl *ConcurrentSkipListMap) GetVersion(key int64) *MVCCVersion {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	current := sl.head
-
-	for i := sl.level - 1; i >= 0; i-- {
-		for current.forward[i] != nil && current.forward[i].key < key {
-			current = current.forward[i]
-		}
-	}
-
-	current = current.forward[0]
-
-	if current != nil && current.key == key {
-		return current.versionData
-	}
-
-	return nil
+// GetIterator возвращает итератор для версий ключа
+func (m *MVCCWithVClock) GetIterator(key []byte, it IteratorType) *SkipListIterator[*ConcurrentSkipListMap[*MVCCVersion]] {
+	iterator := m.versions.NewIterator(key, it)
+	return iterator
 }
 
 // VersionIterator итератор для версий в ConcurrentSkipListMap
-type VersionIterator struct {
-	current *skipListNode
+type VersionIterator[V any] struct {
+	current *skipListNode[V]
 	mu      *sync.RWMutex // Для управления блокировкой
 }
 
 // NewVersionIterator создаёт итератор для версий (от старых к новым)
-func (sl *ConcurrentSkipListMap) NewVersionIterator() *VersionIterator {
+func (sl *ConcurrentSkipListMap[V]) NewVersionIterator() *VersionIterator[V] {
 	sl.mu.RLock() // Блокируем на чтение для всего итератора
-	return &VersionIterator{
-		current: sl.head.forward[0],
+	return &VersionIterator[V]{
+		current: sl.head,
 		mu:      &sl.mu,
 	}
 }
 
 // Next переходит к следующей версии, возвращает true если есть следующая
-func (it *VersionIterator) Next() bool {
-	if it.current == nil {
-		return false
-	}
+func (it *VersionIterator[V]) Next() bool {
 	it.current = it.current.forward[0]
-	return it.current != nil && it.current.versionData != nil
+	return it.current != nil
 }
 
 // Value возвращает текущую версию
-func (it *VersionIterator) Value() *MVCCVersion {
+func (it *VersionIterator[V]) Value() V {
 	if it.current == nil {
-		return nil
+		var zero V
+		return zero
 	}
-	return it.current.versionData
+	return it.current.value
 }
 
 // Close разблокирует мьютекс
-func (it *VersionIterator) Close() {
+func (it *VersionIterator[V]) Close() {
 	it.mu.RUnlock()
+}
+
+// ScanWithSnapshot сканирует ключи с префиксом и возвращает последние безопасные версии
+func (m *MVCCWithVClock) ScanWithSnapshot(prefix []byte, it IteratorType, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string, limit int) map[string]string {
+	iterator := m.versions.NewIterator(prefix, it)
+	if iterator == nil {
+		return make(map[string]string)
+	}
+	defer iterator.Close()
+
+	result := make(map[string]string)
+	count := 0
+	for iterator.Next() {
+		if limit > 0 && count >= limit {
+			break
+		}
+		key := iterator.Key()
+		// Для каждого ключа применяем логику ReadWithSnapshot
+		skipList := iterator.Value()
+		versionIterator := skipList.NewVersionIterator()
+		defer versionIterator.Close()
+
+		var latestSafe *MVCCVersion
+		for versionIterator.Next() {
+			version := versionIterator.Value()
+			safe := version.VectorClock.IsSafeToRead(minAcks, totalNodes, currentNodeID)
+			if snapshotVClock != nil {
+				// SI: check VClock
+				safe = safe && !version.VectorClock.HappensAfter(snapshotVClock)
+			} else {
+				// RC: check timestamp
+				safe = safe && version.Timestamp <= snapshotTimestamp
+			}
+			if safe {
+				latestSafe = version
+			}
+		}
+
+		if latestSafe != nil {
+			result[string(key)] = latestSafe.Value
+			count++
+		}
+	}
+	return result
 }

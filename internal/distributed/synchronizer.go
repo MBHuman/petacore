@@ -131,7 +131,7 @@ func (s *Synchronizer) syncOnce() error {
 	defer cancel()
 
 	// log.Println("[Synchronizer] Starting sync...")
-	eventChan, err := s.kvStore.SyncIterator(syncCtx, "")
+	eventChan, err := s.kvStore.SyncIterator(syncCtx, []byte{})
 	if err != nil {
 		return fmt.Errorf("failed to start sync iterator: %w", err)
 	}
@@ -171,7 +171,7 @@ func (s *Synchronizer) handleWatchEvent(event *WatchEvent) error {
 		s.logicalClock.Recv(uint64(event.Entry.Version))
 
 		// Записываем в локальный MVCC
-		s.mvcc.Write(event.Entry.Key, event.Entry.Value, event.Entry.Version)
+		s.mvcc.Write([]byte(event.Entry.Key), event.Entry.Value, event.Entry.Version)
 
 		// Обновляем ревизию
 		s.setLastSyncRevision(event.Entry.Revision)
@@ -184,7 +184,7 @@ func (s *Synchronizer) handleWatchEvent(event *WatchEvent) error {
 		// log.Printf("[Synchronizer] Received DELETE: key=%s", event.Entry.Key)
 
 		// Удаляем из локального MVCC
-		s.mvcc.Delete(event.Entry.Key)
+		s.mvcc.Delete([]byte(event.Entry.Key))
 	}
 
 	return nil
@@ -192,7 +192,7 @@ func (s *Synchronizer) handleWatchEvent(event *WatchEvent) error {
 
 // WriteThrough записывает данные в ETCD и локальный MVCC
 // Это метод для записи, который гарантирует консистентность
-func (s *Synchronizer) WriteThrough(ctx context.Context, key string, value string) error {
+func (s *Synchronizer) WriteThrough(ctx context.Context, key []byte, value string) error {
 	// Генерируем новую версию с помощью HLC
 	version := int64(s.logicalClock.SendOrLocal())
 
@@ -211,6 +211,6 @@ func (s *Synchronizer) WriteThrough(ctx context.Context, key string, value strin
 }
 
 // ReadLocal читает из локального MVCC кеша
-func (s *Synchronizer) ReadLocal(key string, version int64) (string, bool) {
+func (s *Synchronizer) ReadLocal(key []byte, version int64) (string, bool) {
 	return s.mvcc.Read(key, version)
 }

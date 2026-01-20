@@ -57,9 +57,9 @@ func (tx *Transaction) Begin() {
 	}
 }
 
-func (tx *Transaction) Read(key string) (string, bool) {
+func (tx *Transaction) Read(key []byte) (string, bool) {
 	// Сначала проверяем локальные записи
-	if value, ok := tx.localWrites[key]; ok {
+	if value, ok := tx.localWrites[string(key)]; ok {
 		return value, true
 	}
 
@@ -76,11 +76,11 @@ func (tx *Transaction) Read(key string) (string, bool) {
 	return tx.mvcc.Read(key, int64(*tx.snapshotVersion))
 }
 
-func (tx *Transaction) Write(key string, value string) {
+func (tx *Transaction) Write(key []byte, value string) {
 	if tx.localWrites == nil {
 		tx.localWrites = make(map[string]string)
 	}
-	tx.localWrites[key] = value
+	tx.localWrites[string(key)] = value
 }
 
 func (tx *Transaction) Commit() error {
@@ -92,7 +92,7 @@ func (tx *Transaction) Commit() error {
 	// Записываем все локальные изменения в MVCC с новыми версиями
 	for key, value := range tx.localWrites {
 		newVersion := int64(tx.logicalClock.SendOrLocal())
-		tx.mvcc.Write(key, value, newVersion)
+		tx.mvcc.Write([]byte(key), value, newVersion)
 	}
 
 	return nil

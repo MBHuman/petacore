@@ -30,8 +30,8 @@ func TestDistributedStorageBasicReadWrite(t *testing.T) {
 
 	// Записываем данные
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("key1", "value1")
-		tx.Write("key2", "value2")
+		tx.Write([]byte("key1"), "value1")
+		tx.Write([]byte("key2"), "value2")
 		return nil
 	})
 	if err != nil {
@@ -43,7 +43,7 @@ func TestDistributedStorageBasicReadWrite(t *testing.T) {
 
 	// Читаем данные
 	err = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		value1, ok := tx.Read("key1")
+		value1, ok := tx.Read([]byte("key1"))
 		if !ok {
 			t.Error("key1 not found")
 		}
@@ -51,7 +51,7 @@ func TestDistributedStorageBasicReadWrite(t *testing.T) {
 			t.Errorf("Expected value1, got %s", value1)
 		}
 
-		value2, ok := tx.Read("key2")
+		value2, ok := tx.Read([]byte("key2"))
 		if !ok {
 			t.Error("key2 not found")
 		}
@@ -84,7 +84,7 @@ func TestDistributedStorageReadCommitted(t *testing.T) {
 
 	// Записываем начальное значение
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("key", "value1")
+		tx.Write([]byte("key"), "value1")
 		return nil
 	})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestDistributedStorageReadCommitted(t *testing.T) {
 
 	// Обновляем значение
 	err = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("key", "value2")
+		tx.Write([]byte("key"), "value2")
 		return nil
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestDistributedStorageReadCommitted(t *testing.T) {
 
 	// Читаем - должны получить последнее значение
 	err = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		value, ok := tx.Read("key")
+		value, ok := tx.Read([]byte("key"))
 		if !ok {
 			t.Fatal("Key not found")
 		}
@@ -138,7 +138,7 @@ func TestDistributedStorageSnapshotIsolation(t *testing.T) {
 
 	// Записываем начальное значение
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("key", "value1")
+		tx.Write([]byte("key"), "value1")
 		return nil
 	})
 	if err != nil {
@@ -150,7 +150,7 @@ func TestDistributedStorageSnapshotIsolation(t *testing.T) {
 	// Записываем несколько версий
 	for i := 2; i <= 5; i++ {
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write("key", "value"+string(rune('0'+i)))
+			tx.Write([]byte("key"), "value"+string(rune('0'+i)))
 			return nil
 		})
 		if err != nil {
@@ -161,7 +161,7 @@ func TestDistributedStorageSnapshotIsolation(t *testing.T) {
 
 	// Проверяем, что получаем актуальную версию
 	err = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		value, ok := tx.Read("key")
+		value, ok := tx.Read([]byte("key"))
 		if !ok {
 			t.Fatal("Key not found")
 		}
@@ -194,10 +194,10 @@ func TestDistributedStorageLocalWrites(t *testing.T) {
 
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 		// Записываем локально
-		tx.Write("key1", "value1")
+		tx.Write([]byte("key1"), "value1")
 
 		// Читаем - должны получить локальное значение
-		value, ok := tx.Read("key1")
+		value, ok := tx.Read([]byte("key1"))
 		if !ok {
 			t.Error("key1 not found in local writes")
 		}
@@ -206,10 +206,10 @@ func TestDistributedStorageLocalWrites(t *testing.T) {
 		}
 
 		// Перезаписываем
-		tx.Write("key1", "value2")
+		tx.Write([]byte("key1"), "value2")
 
 		// Читаем снова
-		value, ok = tx.Read("key1")
+		value, ok = tx.Read([]byte("key1"))
 		if !ok {
 			t.Error("key1 not found after rewrite")
 		}
@@ -269,7 +269,7 @@ func TestDistributedStorageMultipleKeys(t *testing.T) {
 	const numKeys = 100
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 		for i := 0; i < numKeys; i++ {
-			key := "key" + string(rune('0'+i%10))
+			key := []byte("key" + string(rune('0'+i%10)))
 			value := "value" + string(rune('0'+i%10))
 			tx.Write(key, value)
 		}
@@ -284,7 +284,7 @@ func TestDistributedStorageMultipleKeys(t *testing.T) {
 	// Читаем и проверяем
 	err = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 		for i := 0; i < 10; i++ {
-			key := "key" + string(rune('0'+i))
+			key := []byte("key" + string(rune('0'+i)))
 			value, ok := tx.Read(key)
 			if !ok {
 				t.Errorf("Key %s not found", key)
@@ -329,7 +329,7 @@ func TestDistributedStorageConcurrentTransactions(t *testing.T) {
 
 			for j := 0; j < numOpsPerGoroutine; j++ {
 				err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					key := "key" + string(rune('0'+id))
+					key := []byte("key" + string(rune('0'+id)))
 					value := "value" + string(rune('0'+j))
 					tx.Write(key, value)
 					return nil
@@ -347,7 +347,7 @@ func TestDistributedStorageConcurrentTransactions(t *testing.T) {
 	// Проверяем, что все ключи записались
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 		for i := 0; i < numGoroutines; i++ {
-			key := "key" + string(rune('0'+i))
+			key := []byte("key" + string(rune('0'+i)))
 			_, ok := tx.Read(key)
 			if !ok {
 				t.Errorf("Key %s not found after concurrent writes", key)
@@ -414,7 +414,7 @@ func TestDistributedStorageTransactionError(t *testing.T) {
 	// Транзакция с ошибкой не должна применять изменения
 	testError := errors.New("test error")
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("key", "value")
+		tx.Write([]byte("key"), "value")
 		return testError
 	})
 
@@ -440,7 +440,7 @@ func TestDistributedStorageReadNonExistentKey(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		_, ok := tx.Read("nonexistent")
+		_, ok := tx.Read([]byte("nonexistent"))
 		if ok {
 			t.Error("Expected nonexistent key to return false")
 		}
@@ -461,8 +461,8 @@ func TestDistributedStorageInitialData(t *testing.T) {
 
 	// Предварительно заполняем kvStore
 	ctx := context.Background()
-	kvStore.Put(ctx, "existing1", "value1", 1)
-	kvStore.Put(ctx, "existing2", "value2", 2)
+	kvStore.Put(ctx, []byte("existing1"), "value1", 1)
+	kvStore.Put(ctx, []byte("existing2"), "value2", 2)
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
 	if err := ds.Start(); err != nil {
@@ -474,7 +474,7 @@ func TestDistributedStorageInitialData(t *testing.T) {
 
 	// Читаем предзагруженные данные
 	err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		value1, ok := tx.Read("existing1")
+		value1, ok := tx.Read([]byte("existing1"))
 		if !ok {
 			t.Error("existing1 not found")
 		}
@@ -482,7 +482,7 @@ func TestDistributedStorageInitialData(t *testing.T) {
 			t.Errorf("Expected value1, got %s", value1)
 		}
 
-		value2, ok := tx.Read("existing2")
+		value2, ok := tx.Read([]byte("existing2"))
 		if !ok {
 			t.Error("existing2 not found")
 		}

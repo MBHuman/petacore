@@ -95,13 +95,13 @@ func NewDistributedTransaction(mvcc *core.MVCC, logicalClock *core.LClock,
 
 // Read читает из локального MVCC кеша
 // CP модель: если узел не синхронизирован, возвращаем старые данные
-func (dtx *DistributedTransaction) Read(key string) (string, bool) {
+func (dtx *DistributedTransaction) Read(key []byte) (string, bool) {
 	// Просто делегируем базовой транзакции - она читает из локального MVCC
 	return dtx.Transaction.Read(key)
 }
 
 // Write записывает в локальный буфер (как обычно)
-func (dtx *DistributedTransaction) Write(key string, value string) {
+func (dtx *DistributedTransaction) Write(key []byte, value string) {
 	dtx.Transaction.Write(key, value)
 }
 
@@ -122,7 +122,7 @@ func (dtx *DistributedTransaction) Commit() error {
 
 	for key, value := range localWrites {
 		// WriteThrough записывает в ETCD и локальный MVCC
-		if err := dtx.synchronizer.WriteThrough(ctx, key, value); err != nil {
+		if err := dtx.synchronizer.WriteThrough(ctx, []byte(key), value); err != nil {
 			return fmt.Errorf("failed to write key %s: %w", key, err)
 		}
 	}

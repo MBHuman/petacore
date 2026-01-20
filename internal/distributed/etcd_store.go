@@ -39,17 +39,17 @@ func NewETCDStore(endpoints []string, prefix string) (*ETCDStore, error) {
 }
 
 // makeKey создает полный ключ с префиксом
-func (e *ETCDStore) makeKey(key string) string {
+func (e *ETCDStore) makeKey(key []byte) []byte {
 	if e.prefix == "" {
 		return key
 	}
-	return e.prefix + "/" + key
+	return []byte(e.prefix + "/" + string(key))
 }
 
 // Get получает значение по ключу
-func (e *ETCDStore) Get(ctx context.Context, key string) (*KVEntry, error) {
+func (e *ETCDStore) Get(ctx context.Context, key []byte) (*KVEntry, error) {
 	fullKey := e.makeKey(key)
-	resp, err := e.client.Get(ctx, fullKey, clientv3.WithSerializable())
+	resp, err := e.client.Get(ctx, string(fullKey), clientv3.WithSerializable())
 	if err != nil {
 		return nil, fmt.Errorf("etcd get error: %w", err)
 	}
@@ -73,7 +73,7 @@ func (e *ETCDStore) Get(ctx context.Context, key string) (*KVEntry, error) {
 }
 
 // Put записывает значение по ключу с версией
-func (e *ETCDStore) Put(ctx context.Context, key string, value string, version int64) error {
+func (e *ETCDStore) Put(ctx context.Context, key []byte, value string, version int64) error {
 	fullKey := e.makeKey(key)
 
 	val := etcdValue{
@@ -86,7 +86,7 @@ func (e *ETCDStore) Put(ctx context.Context, key string, value string, version i
 		return fmt.Errorf("failed to marshal value: %w", err)
 	}
 
-	_, err = e.client.Put(ctx, fullKey, string(data))
+	_, err = e.client.Put(ctx, string(fullKey), string(data))
 	if err != nil {
 		return fmt.Errorf("etcd put error: %w", err)
 	}
@@ -95,9 +95,9 @@ func (e *ETCDStore) Put(ctx context.Context, key string, value string, version i
 }
 
 // Delete удаляет ключ
-func (e *ETCDStore) Delete(ctx context.Context, key string) error {
+func (e *ETCDStore) Delete(ctx context.Context, key []byte) error {
 	fullKey := e.makeKey(key)
-	_, err := e.client.Delete(ctx, fullKey)
+	_, err := e.client.Delete(ctx, string(fullKey))
 	if err != nil {
 		return fmt.Errorf("etcd delete error: %w", err)
 	}
@@ -106,7 +106,7 @@ func (e *ETCDStore) Delete(ctx context.Context, key string) error {
 
 // SyncIterator возвращает итератор для синхронизации ключей с префиксом
 // Сначала отправляет все существующие ключи как PUT события, затем переключается на watch
-func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *WatchEvent, error) {
+func (e *ETCDStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *WatchEvent, error) {
 	fullPrefix := e.makeKey(prefix)
 	eventChan := make(chan *WatchEvent, 1000) // Увеличен буфер для большого количества ключей
 
@@ -114,7 +114,7 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *Wa
 		defer close(eventChan)
 
 		// Фаза 1: Получить все существующие ключи
-		resp, err := e.client.Get(ctx, fullPrefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+		resp, err := e.client.Get(ctx, string(fullPrefix), clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
 		if err != nil {
 			// Отправить ошибку как событие? Или просто закрыть канал
 			return
@@ -127,9 +127,9 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *Wa
 				continue
 			}
 
-			key := string(kv.Key)
-			if e.prefix != "" && strings.HasPrefix(key, e.prefix+"/") {
-				key = key[len(e.prefix)+1:]
+			key := kv.Key
+			if e.prefix != "" && strings.HasPrefix(string(key), e.prefix+"/") {
+				key = []byte(string(key)[len(e.prefix)+1:])
 			}
 
 			event := &WatchEvent{
@@ -149,8 +149,18 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *Wa
 			}
 		}
 
+		// Отправить событие завершения синхронизации начальных данных
+		syncCompleteEvent := &WatchEvent{
+			Type: EventTypeSyncComplete,
+		}
+		select {
+		case eventChan <- syncCompleteEvent:
+		case <-ctx.Done():
+			return
+		}
+
 		// Фаза 2: Запустить watch для инкрементальных обновлений
-		watchChan := e.client.Watch(ctx, fullPrefix, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
+		watchChan := e.client.Watch(ctx, string(fullPrefix), clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
 
 		for wresp := range watchChan {
 			if wresp.Canceled {
@@ -160,9 +170,9 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *Wa
 			for _, ev := range wresp.Events {
 				event := &WatchEvent{}
 
-				key := string(ev.Kv.Key)
-				if e.prefix != "" && strings.HasPrefix(key, e.prefix+"/") {
-					key = key[len(e.prefix)+1:]
+				key := ev.Kv.Key
+				if e.prefix != "" && strings.HasPrefix(string(key), e.prefix+"/") {
+					key = []byte(string(key)[len(e.prefix)+1:])
 				}
 
 				switch ev.Type {
@@ -223,10 +233,40 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix string) (<-chan *Wa
 }
 
 // DeleteAll удаляет все ключи с префиксом (для тестирования)
-func (e *ETCDStore) DeleteAll(ctx context.Context, prefix string) error {
+func (e *ETCDStore) DeleteAll(ctx context.Context, prefix []byte) error {
 	fullPrefix := e.makeKey(prefix)
-	_, err := e.client.Delete(ctx, fullPrefix, clientv3.WithPrefix())
+	_, err := e.client.Delete(ctx, string(fullPrefix), clientv3.WithPrefix())
 	return err
+}
+
+// ScanPrefix сканирует все ключи с префиксом
+func (e *ETCDStore) ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEntry, error) {
+	fullPrefix := e.makeKey(prefix)
+	resp, err := e.client.Get(ctx, string(fullPrefix), clientv3.WithPrefix(), clientv3.WithSerializable())
+	if err != nil {
+		return nil, fmt.Errorf("etcd scan error: %w", err)
+	}
+
+	var entries []*KVEntry
+	for _, kv := range resp.Kvs {
+		var val etcdValue
+		if err := json.Unmarshal(kv.Value, &val); err != nil {
+			continue // skip invalid
+		}
+
+		key := kv.Key
+		if e.prefix != "" && strings.HasPrefix(string(key), e.prefix+"/") {
+			key = []byte(string(key)[len(e.prefix)+1:])
+		}
+
+		entries = append(entries, &KVEntry{
+			Key:      key,
+			Value:    val.Value,
+			Version:  val.Version,
+			Revision: kv.ModRevision,
+		})
+	}
+	return entries, nil
 }
 
 // Close закрывает соединение с ETCD
