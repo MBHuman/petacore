@@ -2,31 +2,26 @@ grammar sql;
 
 // Parser Rules
 query
-    : (selectStatement | createTableStatement | insertStatement | dropTableStatement | setStatement | describeStatement | showStatement) SEMICOLON?
+    : statement SEMICOLON?
     ;
+
+statement
+    : selectStatement 
+    | createTableStatement 
+    | insertStatement 
+    | dropTableStatement 
+    | truncateTableStatement 
+    | setStatement 
+    | describeStatement 
+    | showStatement 
+    ;
+
+// ============ CREATE TABLE ======================
 
 createTableStatement
-    : CREATE TABLE (IF NOT EXISTS)? tableName LPAREN columnDefinition (COMMA columnDefinition)* COMMA? RPAREN
-    ;
-
-insertStatement
-    : INSERT INTO tableName LPAREN columnList RPAREN VALUES valueList (COMMA valueList)*
-    ;
-
-dropTableStatement
-    : DROP TABLE tableName
-    ;
-
-setStatement
-    : SET IDENTIFIER (TO | EQ) value
-    ;
-
-describeStatement
-    : DESCRIBE TABLE tableName
-    ;
-
-showStatement
-    : SHOW IDENTIFIER (IDENTIFIER)*
+    : CREATE TABLE (IF NOT EXISTS)? tableName LPAREN 
+        columnDefinition (COMMA columnDefinition)* COMMA? 
+    RPAREN
     ;
 
 columnDefinition
@@ -40,59 +35,90 @@ columnConstraints
     ;
 
 dataType
-    : STRING_TYPE | INT_TYPE | FLOAT_TYPE | BOOL_TYPE | TEXT_TYPE | VARCHAR_TYPE (LPAREN NUMBER RPAREN)? | SERIAL_TYPE | TIMESTAMP_TYPE
+    : STRING_TYPE 
+    | INT_TYPE 
+    | FLOAT_TYPE 
+    | BOOL_TYPE 
+    | TEXT_TYPE 
+    | VARCHAR_TYPE (LPAREN NUMBER RPAREN)? 
+    | SERIAL_TYPE 
+    | TIMESTAMP_TYPE
     ;
 
-selectStatement
-    : SELECT columnList (FROM fromClause (WHERE whereClause)? (ORDER BY orderByClause)? (LIMIT limitValue)?)?
-    ;
+// ============ INSERT ======================
 
-fromClause
-    : tableName (AS IDENTIFIER)? (joinClause)*
-    ;
-
-joinClause
-    : (INNER | LEFT | RIGHT | FULL | CROSS | MERGE)? JOIN tableName (AS IDENTIFIER)? ON expression
+insertStatement
+    : INSERT INTO tableName LPAREN 
+        columnList 
+    RPAREN VALUES valueList (COMMA valueList)*
     ;
 
 columnList
-    : STAR | selectItem (COMMA selectItem)*
-    ;
-
-selectItem
-    : expression (AS IDENTIFIER)?
-    ;
-
-qualifiedName
-    : IDENTIFIER (DOT IDENTIFIER)*
-    ;
-
-functionCall
-    : qualifiedName LPAREN (expression (COMMA expression)*)? RPAREN
-    ;
-
-extractFunction
-    : EXTRACT LPAREN IDENTIFIER FROM expression RPAREN
-    ;
-
-atTimeZoneExpression
-    : primaryExpression AT TIME ZONE STRING_LITERAL
-    ;
-
-castExpression
-    : primaryExpression COLON_COLON IDENTIFIER
-    ;
-
-caseExpression
-    : CASE (WHEN expression THEN expression)+ (ELSE expression)? END
+    : IDENTIFIER (COMMA IDENTIFIER)*
     ;
 
 valueList
     : LPAREN expression (COMMA expression)* RPAREN
     ;
 
-tableName
-    : IDENTIFIER (DOT IDENTIFIER)?
+// ============ DROP TABLE ======================
+
+dropTableStatement
+    : DROP TABLE tableName
+    ;
+
+// ============ TRUNCATE TABLE ======================
+
+truncateTableStatement
+    : TRUNCATE TABLE? tableName
+    ;
+
+// ============ SET ======================
+
+setStatement
+    : SET IDENTIFIER (TO | EQ) value
+    ;
+
+// ============ DESCRIBE ======================
+
+describeStatement
+    : DESCRIBE TABLE tableName
+    ;
+
+// ============ SHOW ======================
+
+showStatement
+    : SHOW IDENTIFIER (IDENTIFIER)*
+    ;
+
+// ============ SELECT ======================
+
+selectStatement
+    : SELECT selectList 
+        (FROM fromClause 
+            (WHERE whereClause)? 
+            (ORDER BY orderByClause)? 
+            (LIMIT limitValue)?
+            (OFFSET offsetValue)?
+        )?
+    ;
+
+selectList
+    : STAR
+    | selectItem (COMMA selectItem)*
+    ;
+
+selectItem
+    : expression alias?
+    ;
+
+fromClause
+    : tableName alias? (joinClause)*
+    ;
+
+joinClause
+    : (INNER | LEFT | RIGHT | FULL | CROSS)? JOIN tableName alias? 
+        ON expression
     ;
 
 whereClause
@@ -107,11 +133,47 @@ orderByItem
     : expression (ASC | DESC)?
     ;
 
+limitValue
+    : NUMBER
+    ;
+
+offsetValue
+    : NUMBER
+    ;
+
+alias
+    : AS? IDENTIFIER
+    ;
+
+// ============ EXPRESSIONS (no left recursion) ======================
+
 expression
-    : castExpression
-    | atTimeZoneExpression
-    | caseExpression
-    | additiveExpression (operator additiveExpression)*
+    : orExpression
+    ;
+
+orExpression
+    : andExpression (OR andExpression)*
+    ;
+
+andExpression
+    : notExpression (AND notExpression)*
+    ;
+
+notExpression
+    : NOT? comparisonExpression
+    ;
+
+comparisonExpression
+    : concatExpression (
+        (operator concatExpression)
+        | (NOT? IN LPAREN expression (COMMA expression)* RPAREN)
+        | (NOT? LIKE concatExpression)
+        | (IS NOT? NULL)
+    )?
+    ;
+
+concatExpression
+    : additiveExpression (CONCAT additiveExpression)*
     ;
 
 additiveExpression
@@ -119,42 +181,78 @@ additiveExpression
     ;
 
 multiplicativeExpression
-    : primaryExpression ((STAR | SLASH) primaryExpression)*
+    : castExpression ((STAR | SLASH) castExpression)*
+    ;
+
+castExpression
+    : atTimeZoneExpression (COLON_COLON IDENTIFIER)?
+    ;
+
+atTimeZoneExpression
+    : primaryExpression (AT TIME ZONE STRING_LITERAL)?
     ;
 
 primaryExpression
     : LPAREN expression RPAREN
+    | caseExpression
     | functionCall
     | extractFunction
     | columnName
     | value
+    | PARAMETER
     ;
 
-operator
-    : EQ | GT | LT | GE | LE | NE | LIKE | NOT LIKE | ILIKE
+caseExpression
+    : CASE 
+        (WHEN expression THEN expression)+ 
+        (ELSE expression)? 
+    END
     ;
 
-value
-    : STRING_LITERAL | NUMBER | CURRENT_TIMESTAMP | TRUE | FALSE
+functionCall
+    : qualifiedName LPAREN (expression (COMMA expression)*)? RPAREN
     ;
 
-limitValue
-    : NUMBER
+extractFunction
+    : EXTRACT LPAREN IDENTIFIER FROM expression RPAREN
+    ;
+
+qualifiedName
+    : IDENTIFIER (DOT IDENTIFIER)*
     ;
 
 columnName
-    : IDENTIFIER
+    : qualifiedName
     ;
 
-// Lexer Rules
+tableName
+    : qualifiedName
+    ;
+
+operator
+    : EQ | GT | LT | GE | LE | NE
+    ;
+
+value
+    : STRING_LITERAL 
+    | NUMBER 
+    | CURRENT_TIMESTAMP 
+    | TRUE 
+    | FALSE
+    | NULL
+    ;
+
+// ======= LEXER RULES ====================
+
 CREATE : 'CREATE' | 'create';
-TABLE : 'TABLE';
+TABLE : 'TABLE' | 'table';
 INSERT : 'INSERT' | 'insert';
 INTO : 'INTO' | 'into';
 VALUES : 'VALUES' | 'values';
-PRIMARY : 'PRIMARY';
-KEY : 'KEY';
+PRIMARY : 'PRIMARY' | 'primary';
+KEY : 'KEY' | 'key';
 DROP : 'DROP' | 'drop';
+TRUNCATE : 'TRUNCATE' | 'truncate';
 DESCRIBE : 'DESCRIBE' | 'describe';
 SET : 'SET' | 'set';
 TO : 'TO' | 'to';
@@ -165,9 +263,43 @@ NULL : 'NULL' | 'null';
 UNIQUE : 'UNIQUE' | 'unique';
 DEFAULT : 'DEFAULT' | 'default';
 SHOW : 'SHOW' | 'show';
-LPAREN : '(';
-RPAREN : ')';
-SEMICOLON : ';';
+SELECT : 'SELECT' | 'select';
+FROM : 'FROM' | 'from';
+WHERE : 'WHERE' | 'where';
+LIMIT : 'LIMIT' | 'limit';
+OFFSET : 'OFFSET' | 'offset';
+ORDER : 'ORDER' | 'order';
+BY : 'BY' | 'by';
+ASC : 'ASC' | 'asc';
+DESC : 'DESC' | 'desc';
+
+JOIN : 'JOIN' | 'join';
+INNER : 'INNER' | 'inner';
+LEFT : 'LEFT' | 'left';
+RIGHT : 'RIGHT' | 'right';
+FULL : 'FULL' | 'full';
+CROSS : 'CROSS' | 'cross';
+ON : 'ON' | 'on';
+
+IN : 'IN' | 'in';
+AND : 'AND' | 'and';
+OR : 'OR' | 'or';
+IS : 'IS' | 'is';
+LIKE : 'LIKE' | 'like';
+ILIKE : 'ILIKE' | 'ilike';
+
+CASE : 'CASE' | 'case';
+WHEN : 'WHEN' | 'when';
+THEN : 'THEN' | 'then';
+ELSE : 'ELSE' | 'else';
+END : 'END' | 'end';
+
+AS : 'AS' | 'as';
+AT : 'AT' | 'at';
+TIME : 'TIME' | 'time';
+ZONE : 'ZONE' | 'zone';
+EXTRACT : 'EXTRACT' | 'extract';
+
 STRING_TYPE : 'STRING' | 'string';
 INT_TYPE : 'INT' | 'int';
 FLOAT_TYPE : 'FLOAT' | 'float';
@@ -176,57 +308,32 @@ TEXT_TYPE : 'TEXT' | 'text';
 VARCHAR_TYPE : 'VARCHAR' | 'varchar';
 SERIAL_TYPE : 'SERIAL' | 'serial';
 TIMESTAMP_TYPE : 'TIMESTAMP' | 'timestamp';
-CURRENT_TIMESTAMP : 'CURRENT_TIMESTAMP' | 'current_timestamp';
 
+CURRENT_TIMESTAMP : 'CURRENT_TIMESTAMP' | 'current_timestamp';
 TRUE : 'TRUE' | 'true';
 FALSE : 'FALSE' | 'false';
-EXTRACT : 'EXTRACT' | 'extract';
 
-SELECT : 'SELECT' | 'select';
-FROM : 'FROM' | 'from';
-WHERE : 'WHERE' | 'where';
-LIMIT : 'LIMIT' | 'limit';
-STAR : '*';
+LPAREN : '(';
+RPAREN : ')';
+SEMICOLON : ';';
 COMMA : ',';
 DOT : '.';
+STAR : '*';
+PLUS : '+';
+MINUS : '-';
+SLASH : '/';
+CONCAT : '||';
 COLON_COLON : '::';
+
 EQ : '=';
 GT : '>';
 LT : '<';
 GE : '>=';
 LE : '<=';
 NE : '!=' | '<>';
-LIKE : 'LIKE' | 'like';
-ILIKE : 'ILIKE' | 'ilike';
-AS : 'AS' | 'as';
-AT : 'AT' | 'at';
-TIME : 'TIME' | 'time';
-ZONE : 'ZONE' | 'zone';
-
-JOIN : 'JOIN' | 'join';
-INNER : 'INNER' | 'inner';
-LEFT : 'LEFT' | 'left';
-RIGHT : 'RIGHT' | 'right';
-FULL : 'FULL' | 'full';
-CROSS : 'CROSS' | 'cross';
-MERGE : 'MERGE' | 'merge';
-ON : 'ON' | 'on';
-
-ORDER : 'ORDER' | 'order';
-BY : 'BY' | 'by';
-WHEN : 'WHEN' | 'when';
-THEN : 'THEN' | 'then';
-ELSE : 'ELSE' | 'else';
-CASE : 'CASE' | 'case';
-END : 'END' | 'end';
-ASC : 'ASC' | 'asc';
-DESC : 'DESC' | 'desc';
-
-PLUS : '+';
-MINUS : '-';
-SLASH : '/';
 
 IDENTIFIER : [a-zA-Z_][a-zA-Z0-9_]*;
+PARAMETER : '$' [0-9]+;
 STRING_LITERAL : '\'' (~['\\] | '\\' .)* '\'';
 NUMBER : [0-9]+ ('.' [0-9]+)?;
 

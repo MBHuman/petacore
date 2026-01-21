@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"petacore/internal/utils"
 	"sync"
 )
 
@@ -181,10 +182,14 @@ func (m *MVCCWithVClock) ScanWithSnapshot(prefix []byte, it IteratorType, snapsh
 	result := make(map[string]string)
 	count := 0
 	for iterator.Next() {
+		// log.Printf("DEBUG: Scanning key: %s", iterator.Key())
 		if limit > 0 && count >= limit {
 			break
 		}
 		key := iterator.Key()
+		if !utils.HasPrefix(key, prefix) {
+			break
+		}
 		// Для каждого ключа применяем логику ReadWithSnapshot
 		skipList := iterator.Value()
 		versionIterator := skipList.NewVersionIterator()

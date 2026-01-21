@@ -7,12 +7,16 @@ import (
 )
 
 // CreateTable создает новую таблицу
-func (t *Table) CreateTable(name string, columns []ColumnDef) error {
+func (t *Table) CreateTable(name string, columns []ColumnDef, ifNotExists bool) error {
 	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		// Проверяем, существует ли таблица
 		metaPrefixKey := t.getMetadataPrefixKey()
 		existing, found := tx.Read([]byte(metaPrefixKey))
 		if found && existing != "" {
+			if ifNotExists {
+				// Table exists, but IF NOT EXISTS was specified - return success
+				return nil
+			}
 			return fmt.Errorf("table %s already exists", name)
 		}
 
@@ -29,6 +33,7 @@ func (t *Table) CreateTable(name string, columns []ColumnDef) error {
 				IsNullable:   col.IsNullable,
 				DefaultValue: col.DefaultValue,
 				IsSerial:     col.IsSerial,
+				IsUnique:     col.IsUnique,
 			}
 		}
 

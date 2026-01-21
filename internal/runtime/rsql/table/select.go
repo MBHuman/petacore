@@ -11,7 +11,7 @@ import (
 
 // Select выполняет SELECT запрос
 func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName string, columns []string, where map[string]interface{}, limit int) ([]map[string]interface{}, []string, []ColType, error) {
-	fmt.Printf("DEBUG: Select from %s, columns: %v, where: %+v, limit: %d\n", tableName, columns, where, limit)
+	// fmt.Printf("DEBUG: Select from %s, columns: %v, where: %+v, limit: %d\n", tableName, columns, where, limit)
 	var results []map[string]interface{}
 
 	// Получаем метаданные таблицы
@@ -26,12 +26,12 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 		return nil, nil, nil, err
 	}
 
-	fmt.Printf("DEBUG: Table metadata: %+v\n", meta)
+	log.Printf("DEBUG: Table metadata: %+v\n", meta)
 
 	// Определяем columns и columnTypes
 	var finalColumns []string
 	var columnTypes []ColType
-	if len(columns) == 1 && columns[0] == "*" {
+	if columns == nil || (len(columns) == 1 && columns[0] == "*") {
 		finalColumns = make([]string, 0, len(meta.Columns))
 		for name := range meta.Columns {
 			finalColumns = append(finalColumns, name)
@@ -55,12 +55,13 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 
 	// Сканируем все строки
 	prefix := t.getRowPrefixKey()
+	// log.Printf("DEBUG: Scanning rows with prefix: %s\n", prefix)
 	kvMap, err := tx.Scan([]byte(prefix), core.IteratorTypeAll, limit)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	log.Printf("DEBUG: Scanned with prefix: %s and limit: %d, rows: %+v\n", prefix, limit, kvMap)
+	// log.Printf("DEBUG: Scanned with prefix: %s and limit: %d, rows: %+v\n", prefix, limit, kvMap)
 
 	// TODO переписать, сейчас неправильно работает Scan в Tx, не через транзакции
 	// Нужен итератор по MVCC дереву, с pk, IteratorType
@@ -70,41 +71,44 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 			// Try as single row
 			var singleRow map[string]interface{}
 			if err2 := json.Unmarshal([]byte(value), &singleRow); err2 != nil {
+				// log.Printf("DEBUG: Failed to unmarshal row data: %v\n", err)
 				continue
 			}
 			rowData = []map[string]interface{}{singleRow}
 		}
 
+		// log.Printf("DEBUG: Unmarshaled row data: %+v\n", rowData)
+
 		for _, row := range rowData {
 			if len(row) == 0 {
 				continue
 			}
-			// Skip rows that are missing key columns
-			if _, hasName := row["name"]; !hasName {
-				continue
-			}
-			fmt.Printf("DEBUG: Processing row: %+v\n", row)
-			// Применяем WHERE фильтр
-			if t.matchesWhere(row, where) {
-				if len(columns) == 1 && columns[0] == "*" {
-					results = append(results, row)
-				} else {
-					filtered := make(map[string]interface{})
-					for _, col := range columns {
-						if val, ok := row[col]; ok {
-							filtered[col] = val
-						}
+			// fmt.Printf("DEBUG: Processing row: %+v\n", row)
+			// No WHERE filtering here, done in executor
+			if columns == nil || (len(columns) == 1 && columns[0] == "*") {
+				// log.Printf("DEBUG: Adding full row: %+v\n", row)
+				results = append(results, row)
+			} else {
+				filtered := make(map[string]interface{})
+				for _, col := range columns {
+					if val, ok := row[col]; ok {
+						filtered[col] = val
 					}
-					results = append(results, filtered)
 				}
+				// log.Printf("DEBUG: Adding filtered row: %+v\n", filtered)
+				results = append(results, filtered)
 			}
 		}
 	}
+
+	// log.Println("DEBUG: Pre final selected results: ", results)
 
 	// Применяем LIMIT
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
+
+	// log.Println("DEBUG: Final selected results:", results)
 
 	return results, finalColumns, columnTypes, nil
 }

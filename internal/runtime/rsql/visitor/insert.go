@@ -31,7 +31,7 @@ func (l *sqlListener) EnterInsertStatement(ctx *parser.InsertStatementContext) {
 	for _, vl := range ctx.AllValueList() {
 		var rowValues []interface{}
 		for _, expr := range vl.AllExpression() {
-			value := rhelpers.ParseExpression(expr)
+			value := rhelpers.ParseExpression(expr, nil)
 			if value == nil {
 				l.err = fmt.Errorf("invalid expression in INSERT")
 				return

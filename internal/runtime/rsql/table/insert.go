@@ -3,6 +3,7 @@ package table
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"petacore/internal/core"
 	"petacore/internal/storage"
 	"time"
@@ -10,7 +11,7 @@ import (
 
 // Insert вставляет строку в таблицу
 func (t *Table) Insert(tableName string, values []map[string]interface{}) error {
-	fmt.Printf("DEBUG: Insert into %s: %+v\n", tableName, values)
+	log.Printf("DEBUG: Insert into %s: %+v\n", tableName, values)
 	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		// Получаем метаданные таблицы
 		metaPrefixKey := t.getMetadataPrefixKey()
@@ -24,7 +25,7 @@ func (t *Table) Insert(tableName string, values []map[string]interface{}) error 
 			return err
 		}
 
-		fmt.Printf("DEBUG: Table metadata: %+v\n", meta)
+		log.Printf("DEBUG: Table metadata: %+v\n", meta)
 
 		for _, value := range values {
 			// Применяем defaults и генерируем SERIAL значения
@@ -98,7 +99,7 @@ func (t *Table) Insert(tableName string, values []map[string]interface{}) error 
 				return err
 			}
 			tx.Write([]byte(rowKey), string(rowData))
-			fmt.Printf("DEBUG: Saved row %s: %s\n", rowKey, string(rowData))
+			log.Printf("DEBUG: Saved row %s: %s\n", rowKey, string(rowData))
 		}
 
 		return nil

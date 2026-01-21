@@ -28,6 +28,8 @@ func ExecuteStatement(stmt statements.SQLStatement, storage *storage.Distributed
 		return ExecuteSelect(s, storage, exCtx)
 	case *statements.DropTableStatement:
 		return nil, ExecuteDropTable(s, storage, exCtx)
+	case *statements.TruncateTableStatement:
+		return nil, ExecuteTruncateTable(s, storage, exCtx)
 	case *statements.SetStatement:
 		return nil, ExecuteSet(s, storage, sessionParams, exCtx)
 	case *statements.DescribeStatement:

@@ -1,7 +1,9 @@
 package table
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"petacore/internal/storage"
 	"petacore/internal/utils"
 	"sort"
@@ -9,7 +11,7 @@ import (
 )
 
 type ITable interface {
-	CreateTable(name string, columns []ColumnDef) error
+	CreateTable(name string, columns []ColumnDef, ifNotExists bool) error
 	Insert(tableName string, values map[string]interface{}) error
 	Select(tableName string, columns []string, where map[string]interface{}, limit int) ([]map[string]interface{}, error)
 	DropTable(name string) error
@@ -157,7 +159,6 @@ func (t *Table) getAllSequencePrefixKey() string {
 
 func (t *Table) genSequenceKey(tx *storage.DistributedTransactionVClock, colName string) uint64 {
 	sequencePrefixKey := t.getSequencePrefixKey(colName)
-	sequencePrefixKey = utils.GenSequencePrefix(sequencePrefixKey)
 
 	seqValueStr, found := tx.Read([]byte(sequencePrefixKey))
 	seqValue := uint64(1)
@@ -167,6 +168,7 @@ func (t *Table) genSequenceKey(tx *storage.DistributedTransactionVClock, colName
 		}
 	}
 
+	log.Printf("Using sequence prefix key %s with value %d", sequencePrefixKey, seqValue)
 	tx.Write([]byte(sequencePrefixKey), strconv.FormatUint(seqValue+1, 10))
 	return seqValue
 }
@@ -181,4 +183,30 @@ func (t *Table) getRowPrefixKey() string {
 	tablePrefixKey := t.getTablePrefixKey()
 	rowPrefixKey := utils.GenTableRowPrefix(tablePrefixKey)
 	return rowPrefixKey
+}
+
+// TableExists проверяет, существует ли таблица
+func (t *Table) TableExists(tx *storage.DistributedTransactionVClock) bool {
+	var exists bool
+	metaPrefixKey := t.getMetadataPrefixKey()
+	_, found := tx.Read([]byte(metaPrefixKey))
+	exists = found
+	return exists
+}
+
+// GetTableMetadataInTx получает метаданные таблицы в транзакции
+func (t *Table) GetTableMetadataInTx(tx *storage.DistributedTransactionVClock) (*TableMetadata, error) {
+	metaPrefixKey := t.getMetadataPrefixKey()
+	metaDataStr, found := tx.Read([]byte(metaPrefixKey))
+	if !found || metaDataStr == "" {
+		return nil, fmt.Errorf("table %s does not exist", t.Name)
+	}
+
+	var meta TableMetadata
+	err := json.Unmarshal([]byte(metaDataStr), &meta)
+	if err != nil {
+		return nil, err
+	}
+
+	return &meta, nil
 }

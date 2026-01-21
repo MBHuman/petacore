@@ -16,6 +16,10 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 	if ctx.TableName() != nil {
 		stmt.TableName = ctx.TableName().GetText()
 	}
+	// Check for IF NOT EXISTS
+	if ctx.IF() != nil && ctx.NOT() != nil && ctx.EXISTS() != nil {
+		stmt.IfNotExists = true
+	}
 
 	// Columns
 	for _, colDef := range ctx.AllColumnDefinition() {

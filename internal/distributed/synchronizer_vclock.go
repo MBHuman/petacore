@@ -174,7 +174,7 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	// Обработка завершения синхронизации
 	if event.Type == EventTypeSyncComplete {
 		s.setStatus(SyncStatusSynced)
-		fmt.Printf("[SynchronizerVClock] Sync complete for node %s\n", s.nodeID)
+		log.Printf("[SynchronizerVClock] Sync complete for node %s\n", s.nodeID)
 		log.Printf("[SynchronizerVClock] Node mvccVclock: %v is now synced", s.mvccVClock)
 		val, _, _ := s.mvccVClock.ReadLatest([]byte("a"))
 		log.Printf("[SynchronizerVClock] Node mvccVclock: key 'a' has value: %s", val)
@@ -189,11 +189,11 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	// Парсим VClockEntry
 	var vclockEntry VClockEntry
 	if err := json.Unmarshal([]byte(event.Entry.Value), &vclockEntry); err != nil {
-		fmt.Printf("[SynchronizerVClock] Warning: failed to parse VClock entry for key %s: %v\n", event.Entry.Key, err)
+		log.Printf("[SynchronizerVClock] Warning: failed to parse VClock entry for key %s: %v\n", event.Entry.Key, err)
 		return
 	}
 
-	fmt.Printf("[SynchronizerVClock] Loaded key %s, value %s, vclock %v\n", event.Entry.Key, vclockEntry.Value, vclockEntry.VectorClock)
+	log.Printf("[SynchronizerVClock] Loaded key %s, value %s, vclock %v\n", event.Entry.Key, vclockEntry.Value, vclockEntry.VectorClock)
 
 	// Создаем Vector Clock
 	vclock := core.NewVectorClock()

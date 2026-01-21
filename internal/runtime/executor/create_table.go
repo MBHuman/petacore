@@ -23,5 +23,5 @@ func ExecuteCreateTable(stmt *statements.CreateTableStatement, store *storage.Di
 		}
 	}
 
-	return tbl.CreateTable(stmt.TableName, columns)
+	return tbl.CreateTable(stmt.TableName, columns, stmt.IfNotExists)
 }

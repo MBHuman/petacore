@@ -2,36 +2,8 @@ package rhelpers
 
 import (
 	"fmt"
-	"petacore/internal/runtime/rsql/items"
 	"strings"
 )
-
-// matchesWhere checks if a row matches the WHERE clause condition
-func matchesWhere(row map[string]interface{}, where *items.WhereClause) bool {
-	fieldValue, exists := row[where.Field]
-	if !exists {
-		return false
-	}
-
-	switch where.Operator {
-	case "=":
-		return compareValues(fieldValue, where.Value) == 0
-	case "!=":
-		return compareValues(fieldValue, where.Value) != 0
-	case "<>":
-		return compareValues(fieldValue, where.Value) != 0
-	case ">":
-		return compareValues(fieldValue, where.Value) > 0
-	case "<":
-		return compareValues(fieldValue, where.Value) < 0
-	case ">=":
-		return compareValues(fieldValue, where.Value) >= 0
-	case "<=":
-		return compareValues(fieldValue, where.Value) <= 0
-	default:
-		return false
-	}
-}
 
 // compareValues compares two values for sorting
 func compareValues(a, b interface{}) int {

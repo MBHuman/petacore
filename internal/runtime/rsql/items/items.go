@@ -3,6 +3,7 @@ package items
 import "petacore/internal/runtime/parser"
 
 type SelectItem struct {
+	TableAlias        string
 	ColumnName        string
 	Function          *FunctionCall
 	ExpressionContext parser.IExpressionContext
@@ -11,9 +12,7 @@ type SelectItem struct {
 
 // WhereClause представляет WHERE условие
 type WhereClause struct {
-	Field    string
-	Operator string
-	Value    interface{}
+	ExpressionContext parser.IExpressionContext
 }
 
 type OrderByItem struct {

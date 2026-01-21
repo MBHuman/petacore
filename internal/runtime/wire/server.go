@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"petacore/internal/runtime/executor"
+	"strconv"
 
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
@@ -19,22 +20,34 @@ import (
 	"github.com/jackc/pgproto3/v2"
 )
 
+// Session represents a client session with prepared statements and portals
+type Session struct {
+	preparedStatements map[string]*PreparedStatement
+	portals            map[string]*PreparedStatement
+	params             map[string]string
+}
+
+// NewSession creates a new session
+func NewSession() *Session {
+	return &Session{
+		preparedStatements: make(map[string]*PreparedStatement),
+		portals:            make(map[string]*PreparedStatement),
+		params:             make(map[string]string),
+	}
+}
+
 // WireServer представляет PostgreSQL wire protocol сервер
 type WireServer struct {
-	storage            *storage.DistributedStorageVClock
-	listener           net.Listener
-	port               string
-	preparedStatements map[string]*PreparedStatement
-	sessionParams      map[string]string
+	storage  *storage.DistributedStorageVClock
+	listener net.Listener
+	port     string
 }
 
 // NewWireServer создает новый wire сервер
 func NewWireServer(storage *storage.DistributedStorageVClock, port string) *WireServer {
 	return &WireServer{
-		storage:            storage,
-		port:               port,
-		preparedStatements: make(map[string]*PreparedStatement),
-		sessionParams:      make(map[string]string),
+		storage: storage,
+		port:    port,
 	}
 }
 
@@ -75,6 +88,8 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 
 	log.Println("Accepted connection")
 
+	session := NewSession()
+
 	// Set timeout
 	conn.SetDeadline(time.Now().Add(5 * time.Minute))
 
@@ -100,13 +115,13 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 			return
 		}
 		if sm, ok := startupMessage.(*pgproto3.StartupMessage); ok {
-			ws.handleStartup(backend, sm)
+			ws.handleStartup(backend, sm, session)
 		} else {
 			log.Printf("Unexpected message after SSL: %T", startupMessage)
 			return
 		}
 	case *pgproto3.StartupMessage:
-		ws.handleStartup(backend, m)
+		ws.handleStartup(backend, m, session)
 	default:
 		log.Printf("Unexpected first message: %T", m)
 		return
@@ -117,25 +132,26 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 		msg, err := backend.Receive()
 		if err != nil {
 			if err == io.EOF {
-				log.Println("Connection closed")
+				log.Println("Connection closed by client")
 				return
 			}
-			log.Printf("Error reading message: %v", err)
-			continue
+			// Any other error (including unexpected EOF) means connection is broken
+			log.Printf("Connection error: %v", err)
+			return
 		}
 
 		switch msg := msg.(type) {
 		case *pgproto3.Query:
 			log.Printf("Query: %s", msg.String)
-			ws.handleQuery(backend, msg.String)
+			ws.handleQuery(backend, msg.String, session)
 		case *pgproto3.Parse:
-			ws.handleParse(backend, msg)
+			ws.handleParse(backend, msg, session)
 		case *pgproto3.Bind:
-			ws.handleBind(backend, msg)
+			ws.handleBind(backend, msg, session)
 		case *pgproto3.Describe:
-			ws.handleDescribe(backend, msg)
+			ws.handleDescribe(backend, msg, session)
 		case *pgproto3.Execute:
-			ws.handleExecute(backend, msg)
+			ws.handleExecute(backend, msg, session)
 		case *pgproto3.Sync:
 			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		case *pgproto3.Flush:
@@ -156,7 +172,7 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 	}
 }
 
-func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *pgproto3.StartupMessage) {
+func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *pgproto3.StartupMessage, session *Session) {
 	// log.Printf("Handling startup message: user='%s', database='%s'", startupMessage.ProtocolVersion, startupMessage.Parameters)
 	// Send AuthenticationOk
 	backend.Send(&pgproto3.AuthenticationOk{})
@@ -178,7 +194,7 @@ func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *p
 	log.Println("Startup complete")
 }
 
-func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse) {
+func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse, session *Session) {
 	log.Printf("Parse name: '%s', query: '%s'", msg.Name, msg.Query)
 	var stmt statements.SQLStatement
 	if strings.TrimSpace(msg.Query) == "" {
@@ -198,17 +214,62 @@ func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse
 			return
 		}
 	}
-	ws.preparedStatements[msg.Name] = &PreparedStatement{
-		Query: msg.Query,
-		Stmt:  stmt,
+
+	// Count parameters in query and determine their types
+	paramCount := 0
+	for i := 1; ; i++ {
+		paramStr := fmt.Sprintf("$%d", i)
+		if strings.Contains(msg.Query, paramStr) {
+			paramCount = i
+		} else {
+			break
+		}
+	}
+
+	// Determine parameter types from statement context
+	paramOIDs := ws.inferParameterTypes(stmt, paramCount)
+
+	session.preparedStatements[msg.Name] = &PreparedStatement{
+		Query:     msg.Query,
+		Stmt:      stmt,
+		ParamOIDs: paramOIDs,
 	}
 	// Populate columns for description
-	ws.preparedStatements[msg.Name].Columns = ws.getFieldDescriptions(stmt)
+	session.preparedStatements[msg.Name].Columns = ws.getFieldDescriptions(stmt)
 	log.Printf("Prepared statement '%s' created", msg.Name)
 	backend.Send(&pgproto3.ParseComplete{})
 }
 
-func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string) {
+// inferParameterTypes attempts to determine parameter types from statement context
+func (ws *WireServer) inferParameterTypes(stmt statements.SQLStatement, paramCount int) []uint32 {
+	paramOIDs := make([]uint32, paramCount)
+
+	// Default to INT4 for all parameters as most common use case
+	// This allows numeric IDs to work without type conversion
+	for i := range paramOIDs {
+		paramOIDs[i] = 23 // INT4
+	}
+
+	return paramOIDs
+}
+
+// colTypeToOID converts internal column type to PostgreSQL OID
+func (ws *WireServer) colTypeToOID(colType table.ColType) uint32 {
+	switch colType {
+	case table.ColTypeInt:
+		return 23 // INT4
+	case table.ColTypeFloat:
+		return 701 // FLOAT8
+	case table.ColTypeBool:
+		return 16 // BOOL
+	case table.ColTypeString:
+		return 25 // TEXT
+	default:
+		return 25 // TEXT
+	}
+}
+
+func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, session *Session) {
 	// Handle keep-alive queries and empty queries
 	trimmedQuery := strings.TrimSpace(query)
 	if trimmedQuery == "" || trimmedQuery == ";" || strings.ToLower(trimmedQuery) == "select 1" || strings.ToLower(trimmedQuery) == "keep alive" {
@@ -230,7 +291,7 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string) {
 		return
 	}
 
-	result, err := executor.ExecuteStatement(stmt, ws.storage, ws.sessionParams)
+	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
 	if err != nil {
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
@@ -252,6 +313,9 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string) {
 	case *statements.DropTableStatement:
 		// DDL - send CommandComplete
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("DROP TABLE")})
+	case *statements.TruncateTableStatement:
+		// DDL - send CommandComplete
+		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("TRUNCATE TABLE")})
 	case *statements.SelectStatement:
 		ws.sendSelectResult(backend, s, result, true)
 	case *statements.DescribeStatement:
@@ -266,11 +330,11 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string) {
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 }
 
-func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.Describe) {
+func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.Describe, session *Session) {
 	switch msg.ObjectType {
 	case 'S':
 		// Describe prepared statement
-		ps, ok := ws.preparedStatements[msg.Name]
+		ps, ok := session.preparedStatements[msg.Name]
 		if !ok {
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
@@ -286,7 +350,7 @@ func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.De
 		backend.Send(&pgproto3.RowDescription{Fields: ps.Columns})
 	case 'P':
 		// Describe portal
-		ps, ok := ws.preparedStatements[msg.Name]
+		ps, ok := session.portals[msg.Name]
 		if !ok {
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
@@ -301,9 +365,9 @@ func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.De
 	}
 }
 
-func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind) {
+func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind, session *Session) {
 	log.Printf("Bind prepared: '%s', portal: '%s'", msg.PreparedStatement, msg.DestinationPortal)
-	ps, ok := ws.preparedStatements[msg.PreparedStatement]
+	ps, ok := session.preparedStatements[msg.PreparedStatement]
 	if !ok {
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
@@ -313,8 +377,64 @@ func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind) 
 		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		return
 	}
-	// For now, just copy the prepared statement to the portal
-	ws.preparedStatements[msg.DestinationPortal] = ps
+
+	// Check parameter count
+	expectedParams := len(ps.ParamOIDs)
+	providedParams := len(msg.Parameters)
+	if providedParams != expectedParams {
+		backend.Send(&pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "08P01",
+			Message:  fmt.Sprintf("Prepared statement \"%s\" requires %d parameters, but %d were provided", msg.PreparedStatement, expectedParams, providedParams),
+		})
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		return
+	}
+
+	// Parse parameters from binary/text format
+	params := make([]interface{}, len(msg.Parameters))
+	for i, paramBytes := range msg.Parameters {
+		if paramBytes == nil {
+			params[i] = nil
+		} else {
+			// Determine format for this parameter
+			format := int16(0) // default text
+			if len(msg.ParameterFormatCodes) == 1 {
+				// Single format applies to all parameters
+				format = msg.ParameterFormatCodes[0]
+			} else if i < len(msg.ParameterFormatCodes) {
+				// Per-parameter format
+				format = msg.ParameterFormatCodes[i]
+			}
+
+			if format == 0 {
+				// Text format - just convert to string
+				params[i] = string(paramBytes)
+			} else {
+				// Binary format - decode based on OID
+				// For simplicity, decode as int32 if length is 4 bytes
+				if len(paramBytes) == 4 {
+					// INT4 binary format
+					val := int32(paramBytes[0])<<24 | int32(paramBytes[1])<<16 | int32(paramBytes[2])<<8 | int32(paramBytes[3])
+					params[i] = fmt.Sprintf("%d", val)
+				} else {
+					// Unknown binary format, treat as string
+					params[i] = string(paramBytes)
+				}
+			}
+		}
+	}
+
+	// Copy the prepared statement to the portal with result format codes and parameters
+	portalPS := &PreparedStatement{
+		Query:             ps.Query,
+		Stmt:              ps.Stmt,
+		Params:            params,
+		Columns:           ps.Columns,
+		ParamOIDs:         ps.ParamOIDs,
+		ResultFormatCodes: msg.ResultFormatCodes,
+	}
+	session.portals[msg.DestinationPortal] = portalPS
 	backend.Send(&pgproto3.BindComplete{})
 }
 
@@ -384,9 +504,9 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 	}
 }
 
-func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Execute) {
+func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Execute, session *Session) {
 	log.Printf("Execute portal: '%s'", msg.Portal)
-	ps, ok := ws.preparedStatements[msg.Portal]
+	ps, ok := session.portals[msg.Portal]
 	if !ok {
 		log.Printf("Portal %s does not exist", msg.Portal)
 		backend.Send(&pgproto3.ErrorResponse{
@@ -399,8 +519,58 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	}
 	log.Printf("Executing prepared statement: %s", ps.Query)
 	log.Printf("Statement AST: %+v", ps.Stmt)
+	log.Printf("Parameters: %+v", ps.Params)
+
+	// If there are parameters, we need to re-parse with substituted values
+	var stmt statements.SQLStatement
+	if len(ps.Params) > 0 {
+		// Substitute parameters in query
+		substitutedQuery := ps.Query
+		for i, param := range ps.Params {
+			placeholder := fmt.Sprintf("$%d", i+1)
+			var replacement string
+			if param == nil {
+				replacement = "NULL"
+			} else {
+				// Check if it's a string parameter - only quote strings
+				paramStr, isString := param.(string)
+				if isString {
+					// Try to parse as number first
+					if _, err := strconv.Atoi(paramStr); err == nil {
+						// It's a numeric string, don't quote
+						replacement = paramStr
+					} else {
+						// It's a text string, quote it
+						replacement = fmt.Sprintf("'%v'", param)
+					}
+				} else {
+					// It's already a non-string type (int, float, etc), don't quote
+					replacement = fmt.Sprintf("%v", param)
+				}
+			}
+			substitutedQuery = strings.ReplaceAll(substitutedQuery, placeholder, replacement)
+		}
+		log.Printf("Substituted query: %s", substitutedQuery)
+
+		// Re-parse with substituted values
+		var err error
+		stmt, err = visitor.ParseSQL(substitutedQuery)
+		if err != nil {
+			log.Printf("Parse error after substitution: %v", err)
+			backend.Send(&pgproto3.ErrorResponse{
+				Severity: "ERROR",
+				Code:     "42601",
+				Message:  err.Error(),
+			})
+			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+			return
+		}
+	} else {
+		stmt = ps.Stmt
+	}
+
 	// Execute the statement
-	result, err := executor.ExecuteStatement(ps.Stmt, ws.storage, ws.sessionParams)
+	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
 	if err != nil {
 		log.Printf("Execute error: %v", err)
 		backend.Send(&pgproto3.ErrorResponse{
@@ -425,7 +595,13 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	case *statements.DropTableStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("DROP TABLE")})
 	case *statements.SelectStatement:
-		ws.sendSelectResult(backend, s, result, false)
+		// Force text format for system tables since we can't reliably encode them in binary
+		formatCodes := ps.ResultFormatCodes
+		if system.IsSystemTable(s.TableName) {
+			// Override to text format for system tables
+			formatCodes = []int16{0}
+		}
+		ws.sendSelectResultWithFormats(backend, s, result, true, formatCodes)
 	case *statements.DescribeStatement:
 		ws.sendDescribeResult(backend, result)
 	case *statements.SetStatement:
@@ -435,8 +611,9 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	}
 }
 
-func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statements.SelectStatement, result interface{}, sendRowDesc bool) {
-	fmt.Printf("DEBUG: Select result: %+v\n", result)
+func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stmt *statements.SelectStatement, result interface{}, sendRowDesc bool, formatCodes []int16) {
+	log.Printf("DEBUG sendSelectResultWithFormats: formatCodes=%v", formatCodes)
+	log.Printf("DEBUG: Select result: %+v\n", result)
 	var rows []map[string]interface{}
 	var columns []string
 	var columnTypes []table.ColType
@@ -500,6 +677,17 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 						oid = 25 // TEXT
 					}
 				}
+
+				// Determine format for this column
+				format := int16(0) // default text
+				if len(formatCodes) == 1 {
+					// Single format applies to all columns
+					format = formatCodes[0]
+				} else if i < len(formatCodes) {
+					// Per-column format
+					format = formatCodes[i]
+				}
+
 				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
 					Name:                 []byte(colName),
 					TableOID:             0,
@@ -507,7 +695,7 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 					DataTypeOID:          oid,
 					DataTypeSize:         -1,
 					TypeModifier:         -1,
-					Format:               0,
+					Format:               format,
 				})
 			}
 			backend.Send(rowDesc)
@@ -533,6 +721,17 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 					oid = 25 // TEXT
 				}
 			}
+
+			// Determine format for this column
+			format := int16(0) // default text
+			if len(formatCodes) == 1 {
+				// Single format applies to all columns
+				format = formatCodes[0]
+			} else if i < len(formatCodes) {
+				// Per-column format
+				format = formatCodes[i]
+			}
+
 			rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
 				Name:                 []byte(colName),
 				TableOID:             0,
@@ -540,7 +739,7 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 				DataTypeOID:          oid,
 				DataTypeSize:         -1,
 				TypeModifier:         -1,
-				Format:               0,
+				Format:               format,
 			})
 		}
 		backend.Send(rowDesc)
@@ -549,9 +748,25 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 	// Data rows
 	for _, row := range rows {
 		dataRow := &pgproto3.DataRow{}
-		for _, colName := range columns {
+		for i, colName := range columns {
 			if v, ok := row[colName]; ok {
-				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+				// Determine format for this column
+				format := int16(0) // default text
+				if len(formatCodes) == 1 {
+					// Single format applies to all columns
+					format = formatCodes[0]
+				} else if i < len(formatCodes) {
+					// Per-column format
+					format = formatCodes[i]
+				}
+
+				if format == 1 {
+					// Binary format
+					dataRow.Values = append(dataRow.Values, encodeBinary(v, i, columnTypes))
+				} else {
+					// Text format
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+				}
 			} else {
 				dataRow.Values = append(dataRow.Values, nil)
 			}
@@ -560,6 +775,56 @@ func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statemen
 	}
 
 	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", len(rows)))})
+}
+
+// sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
+func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statements.SelectStatement, result interface{}, sendRowDesc bool) {
+	ws.sendSelectResultWithFormats(backend, stmt, result, sendRowDesc, []int16{0})
+}
+
+// encodeBinary encodes a value in PostgreSQL binary format
+func encodeBinary(v interface{}, colIdx int, columnTypes []table.ColType) []byte {
+	if colIdx >= len(columnTypes) {
+		// Fallback to text
+		return []byte(fmt.Sprintf("%v", v))
+	}
+
+	log.Printf("DEBUG encodeBinary: colIdx=%d, type=%v, value=%v (Go type %T)", colIdx, columnTypes[colIdx], v, v)
+
+	switch columnTypes[colIdx] {
+	case table.ColTypeInt:
+		// INT4 - 4 bytes, big-endian
+		var val int32
+		switch v := v.(type) {
+		case int:
+			val = int32(v)
+		case int32:
+			val = v
+		case int64:
+			val = int32(v)
+		case float64:
+			val = int32(v)
+		case float32:
+			val = int32(v)
+		default:
+			return []byte(fmt.Sprintf("%v", v))
+		}
+		buf := make([]byte, 4)
+		buf[0] = byte(val >> 24)
+		buf[1] = byte(val >> 16)
+		buf[2] = byte(val >> 8)
+		buf[3] = byte(val)
+		return buf
+	case table.ColTypeString:
+		// TEXT binary format is just the string bytes
+		if s, ok := v.(string); ok {
+			return []byte(s)
+		}
+		return []byte(fmt.Sprintf("%v", v))
+	default:
+		// For other types, convert to string
+		return []byte(fmt.Sprintf("%v", v))
+	}
 }
 
 func (ws *WireServer) sendDescribeResult(backend *pgproto3.Backend, result interface{}) {

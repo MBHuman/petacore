@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"log"
 	"math/rand"
 	"sync"
 )
@@ -414,8 +413,7 @@ func (sl *ConcurrentSkipListMap[V]) NewIterator(seekKey []byte, typ IteratorType
 	switch typ {
 	case IteratorTypeAll:
 		it.forward = true
-		it.cur = sl.head.forward[0]
-		log.Println("Started IteratorTypeAll")
+		it.cur = sl.findFirstGE(seekKey)
 
 	case IteratorTypeEq:
 		it.forward = true
