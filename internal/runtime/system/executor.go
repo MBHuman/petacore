@@ -64,6 +64,8 @@ func ExecuteSystemTableSelect(stmt *statements.SelectStatement, store *storage.D
 			rows, err = pgcatalog.ExecutePgStatSsl(stmt)
 		case "pg_shdescription":
 			rows, err = pgcatalog.ExecutePgShdescription(stmt)
+		case "pg_am":
+			rows, err = pgcatalog.ExecutePgAmExpanded(stmt)
 		default:
 			return nil, fmt.Errorf("unknown system table: %s", tableName)
 		}

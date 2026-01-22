@@ -225,11 +225,17 @@ func (s *BasesqlListener) EnterCastExpression(ctx *CastExpressionContext) {}
 // ExitCastExpression is called when production castExpression is exited.
 func (s *BasesqlListener) ExitCastExpression(ctx *CastExpressionContext) {}
 
-// EnterAtTimeZoneExpression is called when production atTimeZoneExpression is entered.
-func (s *BasesqlListener) EnterAtTimeZoneExpression(ctx *AtTimeZoneExpressionContext) {}
+// EnterPostfix is called when production postfix is entered.
+func (s *BasesqlListener) EnterPostfix(ctx *PostfixContext) {}
 
-// ExitAtTimeZoneExpression is called when production atTimeZoneExpression is exited.
-func (s *BasesqlListener) ExitAtTimeZoneExpression(ctx *AtTimeZoneExpressionContext) {}
+// ExitPostfix is called when production postfix is exited.
+func (s *BasesqlListener) ExitPostfix(ctx *PostfixContext) {}
+
+// EnterTypeName is called when production typeName is entered.
+func (s *BasesqlListener) EnterTypeName(ctx *TypeNameContext) {}
+
+// ExitTypeName is called when production typeName is exited.
+func (s *BasesqlListener) ExitTypeName(ctx *TypeNameContext) {}
 
 // EnterPrimaryExpression is called when production primaryExpression is entered.
 func (s *BasesqlListener) EnterPrimaryExpression(ctx *PrimaryExpressionContext) {}
@@ -255,6 +261,12 @@ func (s *BasesqlListener) EnterExtractFunction(ctx *ExtractFunctionContext) {}
 // ExitExtractFunction is called when production extractFunction is exited.
 func (s *BasesqlListener) ExitExtractFunction(ctx *ExtractFunctionContext) {}
 
+// EnterNamePart is called when production namePart is entered.
+func (s *BasesqlListener) EnterNamePart(ctx *NamePartContext) {}
+
+// ExitNamePart is called when production namePart is exited.
+func (s *BasesqlListener) ExitNamePart(ctx *NamePartContext) {}
+
 // EnterQualifiedName is called when production qualifiedName is entered.
 func (s *BasesqlListener) EnterQualifiedName(ctx *QualifiedNameContext) {}
 
@@ -278,6 +290,12 @@ func (s *BasesqlListener) EnterOperator(ctx *OperatorContext) {}
 
 // ExitOperator is called when production operator is exited.
 func (s *BasesqlListener) ExitOperator(ctx *OperatorContext) {}
+
+// EnterOperatorExpr is called when production operatorExpr is entered.
+func (s *BasesqlListener) EnterOperatorExpr(ctx *OperatorExprContext) {}
+
+// ExitOperatorExpr is called when production operatorExpr is exited.
+func (s *BasesqlListener) ExitOperatorExpr(ctx *OperatorExprContext) {}
 
 // EnterValue is called when production value is entered.
 func (s *BasesqlListener) EnterValue(ctx *ValueContext) {}

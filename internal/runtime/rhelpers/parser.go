@@ -3,6 +3,7 @@ package rhelpers
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 
 	"petacore/internal/runtime/functions"
@@ -313,6 +314,16 @@ func parseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		return evaluateComparison(left, right, op)
 	}
 
+	// Check for operatorExpr
+	if compExpr.OperatorExpr() != nil {
+		if len(concatExprs) < 2 {
+			return left
+		}
+		opExpr := compExpr.OperatorExpr()
+		right := parseConcatExpression(concatExprs[1], row)
+		return evaluateOperator(left, right, opExpr)
+	}
+
 	// Check for IN
 	if compExpr.IN() != nil {
 		not := compExpr.NOT() != nil
@@ -471,6 +482,34 @@ func evaluateComparison(left, right interface{}, op string) bool {
 				return strings.Contains(la, ra) // simple like
 			}
 		}
+	case "~":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString(ra, la)
+				return matched
+			}
+		}
+	case "!~":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString(ra, la)
+				return !matched
+			}
+		}
+	case "~*":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString("(?i)"+ra, la)
+				return matched
+			}
+		}
+	case "!~*":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString("(?i)"+ra, la)
+				return !matched
+			}
+		}
 	}
 	return false
 }
@@ -558,11 +597,11 @@ func parsePrimaryExpression(primExpr parser.IPrimaryExpressionContext, row map[s
 		fc := primExpr.FunctionCall()
 		funcName := ""
 		if qn := fc.QualifiedName(); qn != nil {
-			ids := qn.AllIDENTIFIER()
-			if len(ids) > 0 {
+			nameParts := qn.AllNamePart()
+			if len(nameParts) > 0 {
 				parts := []string{}
-				for _, id := range ids {
-					parts = append(parts, id.GetText())
+				for _, np := range nameParts {
+					parts = append(parts, np.GetText())
 				}
 				funcName = parts[len(parts)-1]
 			}
@@ -697,113 +736,35 @@ func parseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionCont
 	return result
 }
 
-// parseCastExpression handles type casting with ::<type>
+// parseCastExpression handles type casting with ::<type>, COLLATE, AT TIME ZONE
 func parseCastExpression(castExpr parser.ICastExpressionContext, row map[string]interface{}) interface{} {
 	if castExpr == nil {
 		return nil
 	}
 
-	// Get the atTimeZoneExpression
-	atExpr := castExpr.AtTimeZoneExpression()
-	if atExpr == nil {
-		return nil
-	}
-
-	// Get the value
-	value := parseAtTimeZoneExpression(atExpr, row)
-
-	// Check if there's a cast operator
-	if castExpr.COLON_COLON() != nil && castExpr.IDENTIFIER() != nil {
-		// Get the target type
-		typeName := strings.ToLower(castExpr.IDENTIFIER().GetText())
-
-		// Perform type casting based on target type
-		switch typeName {
-		case "int", "int4", "integer":
-			if f, ok := toFloat64(value); ok {
-				return int(f)
-			}
-			if s, ok := value.(string); ok {
-				if i, err := strconv.Atoi(s); err == nil {
-					return i
-				}
-			}
-			return 0 // fallback
-		case "bigint", "int8":
-			if f, ok := toFloat64(value); ok {
-				return int64(f)
-			}
-			if s, ok := value.(string); ok {
-				if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-					return i
-				}
-			}
-			return int64(0) // fallback
-		case "float", "float8", "double precision":
-			if f, ok := toFloat64(value); ok {
-				return f
-			}
-			if s, ok := value.(string); ok {
-				if f, err := strconv.ParseFloat(s, 64); err == nil {
-					return f
-				}
-			}
-			return 0.0 // fallback
-		case "text", "varchar", "character varying":
-			return fmt.Sprintf("%v", value)
-		case "bool", "boolean":
-			if b, ok := value.(bool); ok {
-				return b
-			}
-			if s, ok := value.(string); ok {
-				if strings.ToLower(s) == "true" {
-					return true
-				} else if strings.ToLower(s) == "false" {
-					return false
-				}
-			}
-			if i, ok := toFloat64(value); ok && i != 0 {
-				return true
-			}
-			return false // fallback
-		case "oid":
-			// OID is typically int4
-			if f, ok := toFloat64(value); ok {
-				return int(f)
-			}
-			return 0
-		case "name":
-			// name is like text but limited
-			return fmt.Sprintf("%v", value)
-		default:
-			// For unknown types, return as is
-			return value
-		}
-	}
-
-	// No cast, return the value as is
-	return value
-}
-
-// parseAtTimeZoneExpression handles AT TIME ZONE expressions
-func parseAtTimeZoneExpression(atExpr parser.IAtTimeZoneExpressionContext, row map[string]interface{}) interface{} {
-	if atExpr == nil {
-		return nil
-	}
-
-	// Get the primary expression (timestamp)
-	primExpr := atExpr.PrimaryExpression()
+	// Get the primary expression
+	primExpr := castExpr.PrimaryExpression()
 	if primExpr == nil {
 		return nil
 	}
 
+	// Parse the primary expression
 	value := parsePrimaryExpression(primExpr, row)
 
-	// If there's an AT TIME ZONE clause, handle it
-	if atExpr.AT() != nil && atExpr.STRING_LITERAL() != nil {
-		// For simplicity, just return the value - proper timezone conversion would require more logic
-		// In a real implementation, you'd convert the timestamp to the specified timezone
-		return value
+	// Apply postfixes
+	postfixes := castExpr.AllPostfix()
+	for _, postfix := range postfixes {
+		if postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil && postfix.STRING_LITERAL() != nil {
+			// AT TIME ZONE
+			value = applyTimeZone(value, postfix.STRING_LITERAL().GetText())
+		} else if postfix.COLLATE() != nil && postfix.QualifiedName() != nil {
+			// COLLATE - for now, ignore
+			// value = applyCollate(value, postfix.QualifiedName().GetText())
+		} else if postfix.COLON_COLON() != nil && postfix.TypeName() != nil {
+			// Type cast
+			typeName := strings.ToLower(postfix.TypeName().QualifiedName().GetText())
+			value = castValue(value, typeName)
+		}
 	}
 
 	return value
@@ -813,4 +774,119 @@ func parseAtTimeZoneExpression(atExpr parser.IAtTimeZoneExpressionContext, row m
 func applyTimeZone(value interface{}, tzStr string) interface{} {
 	// For simplicity, just return the value, ignore timezone
 	return value
+}
+
+// castValue performs type casting to the specified type
+func castValue(value interface{}, typeName string) interface{} {
+	switch typeName {
+	case "int", "int4", "integer":
+		if f, ok := toFloat64(value); ok {
+			return int(f)
+		}
+		if s, ok := value.(string); ok {
+			if i, err := strconv.Atoi(s); err == nil {
+				return i
+			}
+		}
+		return 0 // fallback
+	case "bigint", "int8":
+		if f, ok := toFloat64(value); ok {
+			return int64(f)
+		}
+		if s, ok := value.(string); ok {
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return i
+			}
+		}
+		return int64(0) // fallback
+	case "float", "float8", "double precision":
+		if f, ok := toFloat64(value); ok {
+			return f
+		}
+		if s, ok := value.(string); ok {
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return f
+			}
+		}
+		return 0.0 // fallback
+	case "text", "varchar", "character varying":
+		return fmt.Sprintf("%v", value)
+	case "bool", "boolean":
+		if b, ok := value.(bool); ok {
+			return b
+		}
+		if s, ok := value.(string); ok {
+			if strings.ToLower(s) == "true" {
+				return true
+			} else if strings.ToLower(s) == "false" {
+				return false
+			}
+		}
+		if i, ok := toFloat64(value); ok && i != 0 {
+			return true
+		}
+		return false // fallback
+	case "oid":
+		// OID is typically int4
+		if f, ok := toFloat64(value); ok {
+			return int(f)
+		}
+		return 0
+	case "name":
+		// name is like text but limited
+		return fmt.Sprintf("%v", value)
+	default:
+		// For unknown types, return as is
+		return value
+	}
+}
+
+// evaluateOperator evaluates an operator expression like OPERATOR(pg_catalog.~)
+func evaluateOperator(left, right interface{}, opExpr parser.IOperatorExprContext) bool {
+	if opExpr == nil {
+		return false
+	}
+
+	// Get the qualified name of the operator
+	qualName := opExpr.QualifiedName()
+	if qualName == nil {
+		return false
+	}
+
+	// Get the operator name (e.g., "pg_catalog.~")
+	opName := qualName.GetText()
+
+	// For now, handle specific operators
+	switch opName {
+	case "pg_catalog.~":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString(ra, la)
+				return matched
+			}
+		}
+	case "pg_catalog.!~":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString(ra, la)
+				return !matched
+			}
+		}
+	case "pg_catalog.~*":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString("(?i)"+ra, la)
+				return matched
+			}
+		}
+	case "pg_catalog.!~*":
+		if la, ok := left.(string); ok {
+			if ra, ok := right.(string); ok {
+				matched, _ := regexp.MatchString("(?i)"+ra, la)
+				return !matched
+			}
+		}
+	}
+
+	return false
 }

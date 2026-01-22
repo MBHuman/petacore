@@ -40,8 +40,8 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 			} else {
 				join.Type = "INNER" // default
 			}
-			if jc.TableName() != nil {
-				join.TableName = jc.TableName().GetText()
+			if jc.QualifiedName() != nil {
+				join.TableName = jc.QualifiedName().GetText()
 			}
 			if alias := jc.Alias(); alias != nil {
 				if id := alias.IDENTIFIER(); id != nil {
@@ -80,10 +80,10 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 							fc := primExpr.FunctionCall()
 							funcCall := &items.FunctionCall{}
 							if qn := fc.QualifiedName(); qn != nil {
-								ids := qn.AllIDENTIFIER()
+								nameParts := qn.AllNamePart()
 								parts := []string{}
-								for _, id := range ids {
-									parts = append(parts, id.GetText())
+								for _, np := range nameParts {
+									parts = append(parts, np.GetText())
 								}
 								funcCall.Name = parts[len(parts)-1]
 							}
@@ -227,20 +227,13 @@ func extractPrimaryExpression(expr parser.IExpressionContext) parser.IPrimaryExp
 	}
 
 	castExpr := castExprs[0]
-	if castExpr.COLON_COLON() != nil {
-		return nil // has cast operator
+	if len(castExpr.AllPostfix()) > 0 {
+		return nil // has postfix (cast, collate, at time zone)
 	}
 
-	// castExpression -> atTimeZoneExpression
-	atExpr := castExpr.AtTimeZoneExpression()
-	if atExpr == nil {
-		return nil
-	}
-
-	if atExpr.AT() != nil {
-		return nil // has AT TIME ZONE
-	}
+	// castExpression -> primaryExpression
+	primExpr := castExpr.PrimaryExpression()
 
 	// atTimeZoneExpression -> primaryExpression
-	return atExpr.PrimaryExpression()
+	return primExpr
 }

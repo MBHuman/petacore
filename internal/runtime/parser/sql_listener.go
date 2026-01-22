@@ -110,8 +110,11 @@ type sqlListener interface {
 	// EnterCastExpression is called when entering the castExpression production.
 	EnterCastExpression(c *CastExpressionContext)
 
-	// EnterAtTimeZoneExpression is called when entering the atTimeZoneExpression production.
-	EnterAtTimeZoneExpression(c *AtTimeZoneExpressionContext)
+	// EnterPostfix is called when entering the postfix production.
+	EnterPostfix(c *PostfixContext)
+
+	// EnterTypeName is called when entering the typeName production.
+	EnterTypeName(c *TypeNameContext)
 
 	// EnterPrimaryExpression is called when entering the primaryExpression production.
 	EnterPrimaryExpression(c *PrimaryExpressionContext)
@@ -125,6 +128,9 @@ type sqlListener interface {
 	// EnterExtractFunction is called when entering the extractFunction production.
 	EnterExtractFunction(c *ExtractFunctionContext)
 
+	// EnterNamePart is called when entering the namePart production.
+	EnterNamePart(c *NamePartContext)
+
 	// EnterQualifiedName is called when entering the qualifiedName production.
 	EnterQualifiedName(c *QualifiedNameContext)
 
@@ -136,6 +142,9 @@ type sqlListener interface {
 
 	// EnterOperator is called when entering the operator production.
 	EnterOperator(c *OperatorContext)
+
+	// EnterOperatorExpr is called when entering the operatorExpr production.
+	EnterOperatorExpr(c *OperatorExprContext)
 
 	// EnterValue is called when entering the value production.
 	EnterValue(c *ValueContext)
@@ -242,8 +251,11 @@ type sqlListener interface {
 	// ExitCastExpression is called when exiting the castExpression production.
 	ExitCastExpression(c *CastExpressionContext)
 
-	// ExitAtTimeZoneExpression is called when exiting the atTimeZoneExpression production.
-	ExitAtTimeZoneExpression(c *AtTimeZoneExpressionContext)
+	// ExitPostfix is called when exiting the postfix production.
+	ExitPostfix(c *PostfixContext)
+
+	// ExitTypeName is called when exiting the typeName production.
+	ExitTypeName(c *TypeNameContext)
 
 	// ExitPrimaryExpression is called when exiting the primaryExpression production.
 	ExitPrimaryExpression(c *PrimaryExpressionContext)
@@ -257,6 +269,9 @@ type sqlListener interface {
 	// ExitExtractFunction is called when exiting the extractFunction production.
 	ExitExtractFunction(c *ExtractFunctionContext)
 
+	// ExitNamePart is called when exiting the namePart production.
+	ExitNamePart(c *NamePartContext)
+
 	// ExitQualifiedName is called when exiting the qualifiedName production.
 	ExitQualifiedName(c *QualifiedNameContext)
 
@@ -268,6 +283,9 @@ type sqlListener interface {
 
 	// ExitOperator is called when exiting the operator production.
 	ExitOperator(c *OperatorContext)
+
+	// ExitOperatorExpr is called when exiting the operatorExpr production.
+	ExitOperatorExpr(c *OperatorExprContext)
 
 	// ExitValue is called when exiting the value production.
 	ExitValue(c *ValueContext)

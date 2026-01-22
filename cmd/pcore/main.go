@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -14,7 +13,7 @@ import (
 )
 
 func main() {
-	log.SetOutput(io.Discard)
+	// log.SetOutput(io.Discard)
 	var kv distributed.KVStore
 	var err error
 

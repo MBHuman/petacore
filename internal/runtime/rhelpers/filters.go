@@ -1,7 +1,6 @@
 package rhelpers
 
 import (
-	"log"
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
 )
@@ -61,15 +60,15 @@ func FilterRowsByWhere(rows []map[string]interface{}, where *items.WhereClause) 
 		return rows
 	}
 
-	log.Printf("DEBUG FilterRowsByWhere: filtering %d rows with WHERE: %+v", len(rows), where)
+	// log.Printf("DEBUG FilterRowsByWhere: filtering %d rows with WHERE: %+v", len(rows), where)
 	var filteredRows []map[string]interface{}
 	for _, row := range rows {
 		matches := EvaluateWhereCondition(where, row)
-		log.Printf("DEBUG FilterRowsByWhere: row %v matches: %v", row, matches)
+		// log.Printf("DEBUG FilterRowsByWhere: row %v matches: %v", row, matches)
 		if matches {
 			filteredRows = append(filteredRows, row)
 		}
 	}
-	log.Printf("DEBUG FilterRowsByWhere: filtered to %d rows", len(filteredRows))
+	// log.Printf("DEBUG FilterRowsByWhere: filtered to %d rows", len(filteredRows))
 	return filteredRows
 }

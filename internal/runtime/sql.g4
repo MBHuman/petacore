@@ -41,6 +41,7 @@ dataType
     | BOOL_TYPE 
     | TEXT_TYPE 
     | VARCHAR_TYPE (LPAREN NUMBER RPAREN)? 
+    | CHAR_TYPE (LPAREN NUMBER RPAREN)?
     | SERIAL_TYPE 
     | TIMESTAMP_TYPE
     ;
@@ -117,7 +118,7 @@ fromClause
     ;
 
 joinClause
-    : (INNER | LEFT | RIGHT | FULL | CROSS)? JOIN tableName alias? 
+    : (INNER | LEFT | RIGHT | FULL | CROSS)? JOIN qualifiedName alias? 
         ON expression
     ;
 
@@ -165,7 +166,7 @@ notExpression
 
 comparisonExpression
     : concatExpression (
-        (operator concatExpression)
+        ((operator | operatorExpr) concatExpression)
         | (NOT? IN LPAREN expression (COMMA expression)* RPAREN)
         | (NOT? LIKE concatExpression)
         | (IS NOT? NULL)
@@ -185,11 +186,17 @@ multiplicativeExpression
     ;
 
 castExpression
-    : atTimeZoneExpression (COLON_COLON IDENTIFIER)?
+    : primaryExpression postfix*
     ;
 
-atTimeZoneExpression
-    : primaryExpression (AT TIME ZONE STRING_LITERAL)?
+postfix
+    : AT TIME ZONE STRING_LITERAL
+    | COLLATE qualifiedName
+    | COLON_COLON typeName
+    ;
+
+typeName
+    : qualifiedName
     ;
 
 primaryExpression
@@ -217,10 +224,16 @@ extractFunction
     : EXTRACT LPAREN IDENTIFIER FROM expression RPAREN
     ;
 
-qualifiedName
-    : IDENTIFIER (DOT IDENTIFIER)*
+namePart
+    : IDENTIFIER
+    | DEFAULT        // чтобы работало pg_catalog.default
+    | TEXT_TYPE      // for pg_catalog.text
     ;
 
+qualifiedName
+    : namePart (DOT (namePart | TILDE))*
+    ;
+    
 columnName
     : qualifiedName
     ;
@@ -231,6 +244,11 @@ tableName
 
 operator
     : EQ | GT | LT | GE | LE | NE
+    | TILDE | NREGEX | IREGEX | NIREGEX
+    ;
+
+operatorExpr
+    : OPERATOR_KW LPAREN qualifiedName RPAREN
     ;
 
 value
@@ -301,11 +319,12 @@ ZONE : 'ZONE' | 'zone';
 EXTRACT : 'EXTRACT' | 'extract';
 
 STRING_TYPE : 'STRING' | 'string';
-INT_TYPE : 'INT' | 'int';
+INT_TYPE : 'INT' | 'int' | 'INTEGER' | 'integer';
 FLOAT_TYPE : 'FLOAT' | 'float';
-BOOL_TYPE : 'BOOL' | 'bool';
+BOOL_TYPE : 'BOOL' | 'bool' | 'BOOLEAN' | 'boolean';
 TEXT_TYPE : 'TEXT' | 'text';
 VARCHAR_TYPE : 'VARCHAR' | 'varchar';
+CHAR_TYPE : 'CHAR' | 'char';
 SERIAL_TYPE : 'SERIAL' | 'serial';
 TIMESTAMP_TYPE : 'TIMESTAMP' | 'timestamp';
 
@@ -324,6 +343,10 @@ MINUS : '-';
 SLASH : '/';
 CONCAT : '||';
 COLON_COLON : '::';
+TILDE       : '~';
+NREGEX  : '!~';
+IREGEX  : '~*';
+NIREGEX : '!~*';
 
 EQ : '=';
 GT : '>';
@@ -331,6 +354,9 @@ LT : '<';
 GE : '>=';
 LE : '<=';
 NE : '!=' | '<>';
+
+OPERATOR_KW : 'OPERATOR' | 'operator';
+COLLATE     : 'COLLATE'  | 'collate';
 
 IDENTIFIER : [a-zA-Z_][a-zA-Z0-9_]*;
 PARAMETER : '$' [0-9]+;

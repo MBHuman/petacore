@@ -11,12 +11,6 @@ import (
 func NewPgConnection(t testing.TB) *pgx.ConnPool {
 	t.Helper()
 
-	// connConfig := pgx.ConnConfig{
-	// 	Host:     "localhost",
-	// 	Port:     5432,
-	// 	User:     "testuser",
-	// 	Database: "testdb",
-	// }
 	conn, err := pgx.NewConnPool(
 		pgx.ConnPoolConfig{
 			ConnConfig: pgx.ConnConfig{
@@ -42,12 +36,51 @@ func NewPgConnection(t testing.TB) *pgx.ConnPool {
 		t.Fatalf("Failed to create table: %v", err)
 	}
 
+	_, err = conn.Exec(`
+		CREATE TABLE IF NOT EXISTS test_orders (
+			order_id INTEGER PRIMARY KEY,
+			customer_id INTEGER,
+			amount INTEGER
+		);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to clear table: %v", err)
+	}
+
+	_, err = conn.Exec(`
+		CREATE TABLE IF NOT EXISTS test_customers (
+			customer_id INTEGER PRIMARY KEY,
+			name TEXT
+		);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to clear table: %v", err)
+	}
+
 	_, err = conn.Exec(`TRUNCATE TABLE test_table;`)
 	if err != nil {
 		t.Fatalf("Failed to truncate table: %v", err)
 	}
+	_, err = conn.Exec(`TRUNCATE TABLE test_orders;`)
+	if err != nil {
+		t.Fatalf("Failed to truncate table: %v", err)
+	}
+	_, err = conn.Exec(`TRUNCATE TABLE test_customers;`)
+	if err != nil {
+		t.Fatalf("Failed to truncate table: %v", err)
+	}
 
-	_, err = conn.Exec(`INSERT INTO test_table (value) VALUES ('test1'), ('test2'), ('test3');`)
+	_, err = conn.Exec(`INSERT INTO test_table (order_id, value) VALUES (1, 'test1'), (2, 'test2'), (3, 'test3');`)
+	if err != nil {
+		t.Fatalf("Failed to insert test data: %v", err)
+	}
+
+	_, err = conn.Exec(`INSERT INTO test_customers (customer_id, name) VALUES (1, 'Alice'), (2, 'Bob');`)
+	if err != nil {
+		t.Fatalf("Failed to insert test data: %v", err)
+	}
+
+	_, err = conn.Exec(`INSERT INTO test_orders (order_id, customer_id, amount) VALUES (1, 1, 100), (2, 2, 200), (3, 1, 50);`)
 	if err != nil {
 		t.Fatalf("Failed to insert test data: %v", err)
 	}
@@ -79,166 +112,125 @@ func TestPreparedStatements(t *testing.T) {
 	}
 }
 
-// func TestSelectWithCaseWhen(t *testing.T) {
-// 	conn := NewPgConnection(t)
-// 	defer conn.Close()
+func TestRegexSelect(t *testing.T) {
+	conn := NewPgConnection(t)
+	defer conn.Close()
 
-// 	// Test CASE WHEN expression
-// 	rows, err := conn.Query(`
-// 		SELECT id, value,
-// 			CASE
-// 				WHEN id = 1 THEN 'first'
-// 				WHEN id = 2 THEN 'second'
-// 				ELSE 'other'
-// 			END as position
-// 		FROM test_table
-// 		ORDER BY id
-// 	`)
-// 	if err != nil {
-// 		t.Fatalf("Failed to execute CASE WHEN query: %v", err)
-// 	}
-// 	defer rows.Close()
+	// Test regex SELECT query
+	rows, err := conn.Query(`
+		SELECT value
+		FROM test_table
+		WHERE value OPERATOR(pg_catalog.~) '^test[12]$' COLLATE pg_catalog.default
+		ORDER BY value;
+	`)
+	if err != nil {
+		t.Fatalf("Failed to execute regex SELECT query: %v", err)
+	}
+	defer rows.Close()
 
-// 	expected := []struct {
-// 		id       int
-// 		value    string
-// 		position string
-// 	}{
-// 		{1, "test1", "first"},
-// 		{2, "test2", "second"},
-// 		{3, "test3", "other"},
-// 	}
+	expectedValues := []string{"test1", "test2"}
+	i := 0
+	for rows.Next() {
+		var value string
+		err := rows.Scan(&value)
+		if err != nil {
+			t.Fatalf("Failed to scan row %d: %v", i, err)
+		}
 
-// 	i := 0
-// 	for rows.Next() {
-// 		var id int
-// 		var value, position string
-// 		err := rows.Scan(&id, &value, &position)
-// 		if err != nil {
-// 			t.Fatalf("Failed to scan row %d: %v", i, err)
-// 		}
+		if i >= len(expectedValues) {
+			t.Fatalf("Too many rows returned")
+		}
 
-// 		if i >= len(expected) {
-// 			t.Fatalf("Too many rows returned")
-// 		}
+		if value != expectedValues[i] {
+			t.Fatalf("Row %d: got %s, want %s", i, value, expectedValues[i])
+		}
+		i++
+	}
 
-// 		if id != expected[i].id || value != expected[i].value || position != expected[i].position {
-// 			t.Fatalf("Row %d: got (%d, %s, %s), want (%d, %s, %s)",
-// 				i, id, value, position, expected[i].id, expected[i].value, expected[i].position)
-// 		}
-// 		i++
-// 	}
+	if i != len(expectedValues) {
+		t.Fatalf("Expected %d rows, got %d", len(expectedValues), i)
+	}
+}
 
-// 	if i != len(expected) {
-// 		t.Fatalf("Expected %d rows, got %d", len(expected), i)
-// 	}
-// }
+// Test simple SELECT query
 
-// func TestSelectWithJoin(t *testing.T) {
-// 	conn := NewPgConnection(t)
-// 	defer conn.Close()
+func TestSelectWithCaseWhen(t *testing.T) {
+	t.Skip()
+	conn := NewPgConnection(t)
+	defer conn.Close()
 
-// 	// Create a second table for JOIN testing
-// 	_, err := conn.Exec(`
-// 		CREATE TABLE IF NOT EXISTS categories (
-// 			id SERIAL PRIMARY KEY,
-// 			name TEXT,
-// 			parent_id INTEGER
-// 		)
-// 	`)
-// 	if err != nil {
-// 		t.Fatalf("Failed to create categories table: %v", err)
-// 	}
+	// Test CASE WHEN expression
+	rows, err := conn.Query(`
+		SELECT id, value,
+			CASE
+				WHEN id = 1 THEN 'first'
+				WHEN id = 2 THEN 'second'
+				ELSE 'other'
+			END as position
+		FROM test_table
+		ORDER BY id
+	`)
+	if err != nil {
+		t.Fatalf("Failed to execute CASE WHEN query: %v", err)
+	}
+	defer rows.Close()
 
-// 	_, err = conn.Exec(`TRUNCATE TABLE categories;`)
-// 	if err != nil {
-// 		t.Fatalf("Failed to truncate categories table: %v", err)
-// 	}
+	expected := []struct {
+		id       int
+		value    string
+		position string
+	}{
+		{1, "test1", "first"},
+		{2, "test2", "second"},
+		{3, "test3", "other"},
+	}
 
-// 	_, err = conn.Exec(`
-// 		INSERT INTO categories (name, parent_id) VALUES
-// 		('Electronics', NULL),
-// 		('Phones', 1),
-// 		('Laptops', 1)
-// 	`)
-// 	if err != nil {
-// 		t.Fatalf("Failed to insert categories: %v", err)
-// 	}
+	i := 0
+	for rows.Next() {
+		var id int
+		var value, position string
+		err := rows.Scan(&id, &value, &position)
+		if err != nil {
+			t.Fatalf("Failed to scan row %d: %v", i, err)
+		}
 
-// 	// Test JOIN query
-// 	rows, err := conn.Query(`
-// 		SELECT c.id, c.name, p.name as parent_name
-// 		FROM categories c
-// 		LEFT JOIN categories p ON c.parent_id = p.id
-// 		ORDER BY c.id
-// 	`)
-// 	if err != nil {
-// 		t.Fatalf("Failed to execute JOIN query: %v", err)
-// 	}
-// 	defer rows.Close()
+		if i >= len(expected) {
+			t.Fatalf("Too many rows returned")
+		}
 
-// 	expected := []struct {
-// 		id          int
-// 		name        string
-// 		parent_name *string
-// 	}{
-// 		{1, "Electronics", nil},
-// 		{2, "Phones", stringPtr("Electronics")},
-// 		{3, "Laptops", stringPtr("Electronics")},
-// 	}
+		if id != expected[i].id || value != expected[i].value || position != expected[i].position {
+			t.Fatalf("Row %d: got (%d, %s, %s), want (%d, %s, %s)",
+				i, id, value, position, expected[i].id, expected[i].value, expected[i].position)
+		}
+		i++
+	}
 
-// 	i := 0
-// 	for rows.Next() {
-// 		var id int
-// 		var name string
-// 		var parentName *string
-// 		err := rows.Scan(&id, &name, &parentName)
-// 		if err != nil {
-// 			t.Fatalf("Failed to scan row %d: %v", i, err)
-// 		}
+	if i != len(expected) {
+		t.Fatalf("Expected %d rows, got %d", len(expected), i)
+	}
+}
 
-// 		if i >= len(expected) {
-// 			t.Fatalf("Too many rows returned")
-// 		}
+func TestSelectWithSubquery(t *testing.T) {
+	t.Skip()
+	conn := NewPgConnection(t)
+	defer conn.Close()
 
-// 		if id != expected[i].id || name != expected[i].name {
-// 			t.Fatalf("Row %d: got (%d, %s), want (%d, %s)",
-// 				i, id, name, expected[i].id, expected[i].name)
-// 		}
+	// Test subquery in WHERE clause
+	var id int
+	var value string
+	err := conn.QueryRow(`
+		SELECT id, value
+		FROM test_table
+		WHERE id = (SELECT MAX(id) FROM test_table)
+	`).Scan(&id, &value)
+	if err != nil {
+		t.Fatalf("Failed to execute subquery: %v", err)
+	}
 
-// 		if (expected[i].parent_name == nil && parentName != nil) ||
-// 			(expected[i].parent_name != nil && parentName == nil) ||
-// 			(expected[i].parent_name != nil && parentName != nil && *expected[i].parent_name != *parentName) {
-// 			t.Fatalf("Row %d parent_name: got %v, want %v", i, parentName, expected[i].parent_name)
-// 		}
-// 		i++
-// 	}
-
-// 	if i != len(expected) {
-// 		t.Fatalf("Expected %d rows, got %d", len(expected), i)
-// 	}
-// }
-
-// func TestSelectWithSubquery(t *testing.T) {
-// 	conn := NewPgConnection(t)
-// 	defer conn.Close()
-
-// 	// Test subquery in WHERE clause
-// 	var id int
-// 	var value string
-// 	err := conn.QueryRow(`
-// 		SELECT id, value
-// 		FROM test_table
-// 		WHERE id = (SELECT MAX(id) FROM test_table)
-// 	`).Scan(&id, &value)
-// 	if err != nil {
-// 		t.Fatalf("Failed to execute subquery: %v", err)
-// 	}
-
-// 	if id != 3 || value != "test3" {
-// 		t.Fatalf("Subquery result: got (%d, %s), want (3, test3)", id, value)
-// 	}
-// }
+	if id != 3 || value != "test3" {
+		t.Fatalf("Subquery result: got (%d, %s), want (3, test3)", id, value)
+	}
+}
 
 func stringPtr(s string) *string {
 	return &s

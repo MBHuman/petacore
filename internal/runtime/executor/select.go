@@ -345,7 +345,18 @@ func ExecuteSelect(
 
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		var err error
-		rows, finalColumns, columnTypes, err = tbl.Select(tx, stmt.TableName, nil, nil, 0) // get all columns, no where, no limit
+		// Собираем список колонок для выборки
+		var selectColumns []string
+		if len(stmt.Columns) == 1 && stmt.Columns[0].ColumnName == "*" {
+			selectColumns = nil // все колонки
+		} else {
+			for _, col := range stmt.Columns {
+				if col.ColumnName != "" {
+					selectColumns = append(selectColumns, col.ColumnName)
+				}
+			}
+		}
+		rows, finalColumns, columnTypes, err = tbl.Select(tx, stmt.TableName, selectColumns, nil, 0)
 		return err
 	})
 	if err != nil {
@@ -364,16 +375,16 @@ func ExecuteSelect(
 	for _, row := range rows {
 		filteredRow := make(map[string]interface{})
 
+		// Только явно выбранные поля, даже если row содержит больше
 		for _, col := range stmt.Columns {
+			var colName string
+			var value interface{}
 			if col.ColumnName == "*" {
-				// copy all columns
+				// SELECT * — копируем все поля
 				for k, v := range row {
 					filteredRow[k] = v
 				}
 			} else {
-				var colName string
-				var value interface{}
-
 				if col.ColumnName != "" {
 					if val, ok := row[col.ColumnName]; ok {
 						value = val
@@ -387,7 +398,6 @@ func ExecuteSelect(
 					}
 					value = v
 				}
-
 				if col.Alias != "" {
 					colName = col.Alias
 				} else if col.ColumnName != "" {
@@ -395,7 +405,6 @@ func ExecuteSelect(
 				} else {
 					colName = "?column?"
 				}
-
 				filteredRow[colName] = value
 			}
 		}

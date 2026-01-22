@@ -143,6 +143,15 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 		}
 		log.Printf("Function %s result: %v", name, maxVal)
 		return maxVal, nil
+	case "PG_TABLE_IS_VISIBLE":
+		// pg_table_is_visible(oid) - check if table is visible in search path
+		// For simplicity, always return true
+		if len(args) != 1 {
+			return nil, fmt.Errorf("pg_table_is_visible requires exactly one argument")
+		}
+		result := true
+		log.Printf("Function %s result: %v", name, result)
+		return result, nil
 	default:
 		log.Printf("Unknown function: %s", name)
 		return nil, fmt.Errorf("unknown function: %s", name)
