@@ -10,6 +10,7 @@ import (
 )
 
 // Select выполняет SELECT запрос
+// TODO переписать, чтобы Select генерировал план запроса, а не просто что-то сканировал. Всё должно проходить в транзакции на этапе executor
 func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName string, columns []string, where map[string]interface{}, limit int) ([]map[string]interface{}, []string, []ColType, error) {
 	// fmt.Printf("DEBUG: Select from %s, columns: %v, where: %+v, limit: %d\n", tableName, columns, where, limit)
 	var results []map[string]interface{}
@@ -61,10 +62,6 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 		return nil, nil, nil, err
 	}
 
-	// log.Printf("DEBUG: Scanned with prefix: %s and limit: %d, rows: %+v\n", prefix, limit, kvMap)
-
-	// TODO переписать, сейчас неправильно работает Scan в Tx, не через транзакции
-	// Нужен итератор по MVCC дереву, с pk, IteratorType
 	for _, value := range kvMap {
 		var rowData []map[string]interface{}
 		if err := json.Unmarshal([]byte(value), &rowData); err != nil {
@@ -77,16 +74,12 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 			rowData = []map[string]interface{}{singleRow}
 		}
 
-		// log.Printf("DEBUG: Unmarshaled row data: %+v\n", rowData)
-
 		for _, row := range rowData {
 			if len(row) == 0 {
 				continue
 			}
-			// fmt.Printf("DEBUG: Processing row: %+v\n", row)
 			// No WHERE filtering here, done in executor
 			if columns == nil || (len(columns) == 1 && columns[0] == "*") {
-				// log.Printf("DEBUG: Adding full row: %+v\n", row)
 				results = append(results, row)
 			} else {
 				filtered := make(map[string]interface{})
@@ -95,20 +88,16 @@ func (t *Table) Select(tx *storage.DistributedTransactionVClock, tableName strin
 						filtered[col] = val
 					}
 				}
-				// log.Printf("DEBUG: Adding filtered row: %+v\n", filtered)
+
 				results = append(results, filtered)
 			}
 		}
 	}
 
-	// log.Println("DEBUG: Pre final selected results: ", results)
-
 	// Применяем LIMIT
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
-
-	// log.Println("DEBUG: Final selected results:", results)
 
 	return results, finalColumns, columnTypes, nil
 }

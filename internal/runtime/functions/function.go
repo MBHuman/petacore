@@ -9,6 +9,8 @@ import (
 )
 
 // ExecuteFunction executes a built-in function
+// TODO добавить поддержку функций с помощью SDK плагинов
+// TODO добавить поддержку SQL функций, определенных пользователем, должна быть поддержка CREATE FUNCTION И CREATE PROCEDURE
 func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 	log.Printf("Executing function: %s with args: %v", name, args)
 	switch strings.ToUpper(name) {

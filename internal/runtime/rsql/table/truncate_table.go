@@ -7,6 +7,8 @@ import (
 )
 
 // TruncateTable удаляет все строки из таблицы, но оставляет структуру
+// TODO сделать эффективную реализацию с учётом больших таблиц, чтобы он флаг ставил truncate
+// а не все строки по одной удалял
 func (t *Table) TruncateTable(name string) error {
 	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		// Get table metadata to find SERIAL columns

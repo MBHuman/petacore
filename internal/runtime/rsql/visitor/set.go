@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// TODO пересмотреть хардкодинг интевалов
 func (l *sqlListener) EnterSetStatement(ctx *parser.SetStatementContext) {
 	stmt := &statements.SetStatement{}
 	if ctx.IDENTIFIER() != nil {

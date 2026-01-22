@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+// TODO пропал concatenation в evaluate - нужно добавить обратно
+
 func ParseDataType(typeStr string) table.ColType {
 	switch strings.ToUpper(typeStr) {
 	case "STRING", "TEXT":
@@ -89,9 +91,9 @@ func ParseAdditiveExpression(addExpr parser.IAdditiveExpressionContext, row map[
 		nextValue := parseMultiplicativeExpression(multExprs[i+1], row)
 
 		if op.op == "+" {
-			result = addValues(result, nextValue)
+			result = AddValues(result, nextValue)
 		} else if op.op == "-" {
-			result = subtractValues(result, nextValue)
+			result = SubtractValues(result, nextValue)
 		}
 	}
 
@@ -156,25 +158,6 @@ func ParseExtractFunction(extractExpr parser.IExtractFunctionContext, row map[st
 	value, _ := functions.ExecuteFunction("EXTRACT", args)
 	return value
 }
-
-// // parseConcatExpression handles concatenation
-// func parseConcatExpression(concatExpr parser.IConcatExpressionContext, row map[string]interface{}) interface{} {
-// 	if concatExpr == nil {
-// 		return nil
-// 	}
-
-// 	result := ParseAdditiveExpression(concatExpr.AdditiveExpression(0), row)
-
-// 	// Handle additional concatenations
-// 	addExprs := concatExpr.AllAdditiveExpression()
-// 	// Skip the first one
-// 	for i := 1; i < len(addExprs); i++ {
-// 		next := ParseAdditiveExpression(addExprs[i], row)
-// 		result = fmt.Sprintf("%v%v", result, next) // simple concatenation
-// 	}
-
-// 	return result
-// }
 
 // parseOrExpression handles OR expressions
 func parseOrExpression(orExpr parser.IOrExpressionContext, row map[string]interface{}) interface{} {
@@ -311,7 +294,7 @@ func parseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		}
 		op := compExpr.Operator().GetText()
 		right := parseConcatExpression(concatExprs[1], row)
-		return evaluateComparison(left, right, op)
+		return EvaluateComparison(left, right, op)
 	}
 
 	// Check for operatorExpr
@@ -321,7 +304,7 @@ func parseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		}
 		opExpr := compExpr.OperatorExpr()
 		right := parseConcatExpression(concatExprs[1], row)
-		return evaluateOperator(left, right, opExpr)
+		return EvaluateOperator(left, right, opExpr)
 	}
 
 	// Check for IN
@@ -381,7 +364,7 @@ func parseComparisonExpressionOLD(compExpr parser.IComparisonExpressionContext, 
 		// Regular comparison
 		op := compExpr.Operator().GetText()
 		right := parseConcatExpression(compExpr.ConcatExpression(1), row)
-		return evaluateComparison(left, right, op)
+		return EvaluateComparison(left, right, op)
 	}
 
 	if compExpr.IN() != nil {
@@ -403,7 +386,7 @@ func parseComparisonExpressionOLD(compExpr parser.IComparisonExpressionContext, 
 }
 
 // evaluateComparison evaluates a comparison operator
-func evaluateComparison(left, right interface{}, op string) bool {
+func EvaluateComparison(left, right interface{}, op string) bool {
 	log.Printf("DEBUG evaluateComparison: left=%v (type %T), right=%v (type %T), op=%s\n", left, left, right, right, op)
 	switch op {
 	case "=":
@@ -727,9 +710,9 @@ func parseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionCont
 
 		switch op.op {
 		case "*":
-			result = multiplyValues(result, nextValue)
+			result = MultiplyValues(result, nextValue)
 		case "/":
-			result = divideValues(result, nextValue)
+			result = DivideValues(result, nextValue)
 		}
 	}
 
@@ -763,7 +746,7 @@ func parseCastExpression(castExpr parser.ICastExpressionContext, row map[string]
 		} else if postfix.COLON_COLON() != nil && postfix.TypeName() != nil {
 			// Type cast
 			typeName := strings.ToLower(postfix.TypeName().QualifiedName().GetText())
-			value = castValue(value, typeName)
+			value = CastValue(value, typeName)
 		}
 	}
 
@@ -771,13 +754,15 @@ func parseCastExpression(castExpr parser.ICastExpressionContext, row map[string]
 }
 
 // applyTimeZone applies time zone to a timestamp
+// TODO реализовать корректную работу с часовыми поясами
 func applyTimeZone(value interface{}, tzStr string) interface{} {
 	// For simplicity, just return the value, ignore timezone
 	return value
 }
 
 // castValue performs type casting to the specified type
-func castValue(value interface{}, typeName string) interface{} {
+// TODO перевести cast в отдельный модуль + пересмотреть работу с типами
+func CastValue(value interface{}, typeName string) interface{} {
 	switch typeName {
 	case "int", "int4", "integer":
 		if f, ok := toFloat64(value); ok {
@@ -842,7 +827,8 @@ func castValue(value interface{}, typeName string) interface{} {
 }
 
 // evaluateOperator evaluates an operator expression like OPERATOR(pg_catalog.~)
-func evaluateOperator(left, right interface{}, opExpr parser.IOperatorExprContext) bool {
+// TODO пересмотреть работу с операторами, убрать хардкодинг
+func EvaluateOperator(left, right interface{}, opExpr parser.IOperatorExprContext) bool {
 	if opExpr == nil {
 		return false
 	}

@@ -6,6 +6,7 @@ import (
 )
 
 // filterColumns filters the rows to only include the requested columns
+// TODO убрать хардкодинг, сделать универсальную логику фильтрации
 func FilterColumns(rows []map[string]interface{}, stmt *statements.SelectStatement) []map[string]interface{} {
 	if len(stmt.Columns) == 0 {
 		return rows

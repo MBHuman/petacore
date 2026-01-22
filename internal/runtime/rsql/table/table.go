@@ -6,14 +6,18 @@ import (
 	"log"
 	"petacore/internal/storage"
 	"petacore/internal/utils"
-	"sort"
 	"strconv"
 )
 
 type ITable interface {
 	CreateTable(name string, columns []ColumnDef, ifNotExists bool) error
 	Insert(tableName string, values map[string]interface{}) error
-	Select(tableName string, columns []string, where map[string]interface{}, limit int) ([]map[string]interface{}, error)
+	Select(
+		tableName string,
+		columns []string,
+		where map[string]interface{},
+		limit int,
+	) ([]map[string]interface{}, error)
 	DropTable(name string) error
 }
 
@@ -80,39 +84,6 @@ func (t *Table) validateValueType(value interface{}, expectedType ColType) error
 		}
 	}
 	return nil
-}
-
-// getNextRowID получает следующий ID для строки
-// getColumnNames возвращает имена колонок в порядке определения
-func getColumnNames(meta TableMetadata) []string {
-	names := make([]string, 0, len(meta.Columns))
-	for name := range meta.Columns {
-		names = append(names, name)
-	}
-	// Сортируем для консистентности
-	sort.Strings(names)
-	return names
-}
-
-// matchesWhere проверяет, соответствует ли строка условию WHERE
-func (t *Table) matchesWhere(row map[string]interface{}, where map[string]interface{}) bool {
-	if len(where) == 0 {
-		return true
-	}
-
-	for key, expectedValue := range where {
-		actualValue, exists := row[key]
-		if !exists {
-			return false
-		}
-
-		// Простое сравнение (в реальности нужно поддерживать операторы)
-		if actualValue != expectedValue {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (t *Table) getTablePrefixKey() string {

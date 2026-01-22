@@ -6,7 +6,7 @@ import (
 )
 
 // compareValues compares two values for sorting
-func compareValues(a, b interface{}) int {
+func СompareValues(a, b interface{}) int {
 	if a == nil && b == nil {
 		return 0
 	}

@@ -11,6 +11,7 @@ import (
 	"petacore/internal/storage"
 )
 
+// TODO рефакторинг: сильно раздутый ExecuteSelect разбить на подфункции по типам выборок
 func ExecuteSelect(
 	stmt *statements.SelectStatement,
 	store *storage.DistributedStorageVClock,

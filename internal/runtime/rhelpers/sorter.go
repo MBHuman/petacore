@@ -7,6 +7,8 @@ import (
 )
 
 // sortRows sorts the rows based on OrderBy items
+// TODO сделать нормальную поддержку сортировки с учётом типов данных колонок
+// не просто через interface{}
 func SortRows(rows []map[string]interface{}, orderBy []items.OrderByItem) {
 	if len(orderBy) == 0 {
 		return
@@ -33,7 +35,7 @@ func SortRows(rows []map[string]interface{}, orderBy []items.OrderByItem) {
 			}
 
 			// Compare values
-			cmp := compareValues(valI, valJ)
+			cmp := СompareValues(valI, valJ)
 			if cmp != 0 {
 				if ob.Direction == "DESC" {
 					return cmp > 0

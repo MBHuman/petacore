@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 )
@@ -10,44 +11,6 @@ const (
 	maxLevel    = 16
 	probability = 0.5
 )
-
-// // Pool для переиспользования update массивов
-// var updatePool = sync.Pool{
-// 	New: func() interface{} {
-// 		return make([]*SkipListNode[interface{}], maxLevel)
-// 	},
-// }
-
-// // Pool для переиспользования forward массивов разных размеров
-// var forwardPools = [maxLevel + 1]sync.Pool{}
-
-// func init() {
-// 	for i := 1; i <= maxLevel; i++ {
-// 		size := i
-// 		forwardPools[i].New = func() interface{} {
-// 			return make([]*SkipListNode[interface{}], size)
-// 		}
-// 	}
-// }
-
-// func getForwardSlice[V any](size int) []*SkipListNode[V] {
-// 	if size <= 0 || size > maxLevel {
-// 		return make([]*SkipListNode[V], size)
-// 	}
-// 	return forwardPools[size].Get().([]*SkipListNode[V])
-// }
-
-// func putForwardSlice[V any](slice []*SkipListNode[V]) {
-// 	size := len(slice)
-// 	if size <= 0 || size > maxLevel {
-// 		return
-// 	}
-// 	// Очищаем slice перед возвратом
-// 	for i := range slice {
-// 		slice[i] = nil
-// 	}
-// 	forwardPools[size].Put(slice)
-// }
 
 // SkipListNode represents a node in the skip list
 type SkipListNode[V any] struct {
@@ -393,8 +356,9 @@ const (
 )
 
 type SkipListIterator[V any] struct {
-	sl  *ConcurrentSkipListMap[V]
-	typ IteratorType
+	isFirst bool
+	sl      *ConcurrentSkipListMap[V]
+	typ     IteratorType
 
 	// current element
 	cur   *SkipListNode[V]
@@ -405,7 +369,8 @@ type SkipListIterator[V any] struct {
 }
 
 func (sl *ConcurrentSkipListMap[V]) NewIterator(seekKey []byte, typ IteratorType) *SkipListIterator[V] {
-	it := &SkipListIterator[V]{sl: sl, typ: typ}
+	it := &SkipListIterator[V]{sl: sl, typ: typ, isFirst: true}
+	log.Println("DEBUG: NewIterator called with seekKey:", string(seekKey), "typ:", typ)
 
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
@@ -414,7 +379,6 @@ func (sl *ConcurrentSkipListMap[V]) NewIterator(seekKey []byte, typ IteratorType
 	case IteratorTypeAll:
 		it.forward = true
 		it.cur = sl.findFirstGE(seekKey)
-
 	case IteratorTypeEq:
 		it.forward = true
 		n := sl.findFirstGE(seekKey)
@@ -468,6 +432,10 @@ func (it *SkipListIterator[V]) Valid() bool {
 
 // Next advances iterator by one. Returns true if now valid, false if ended.
 func (it *SkipListIterator[V]) Next() bool {
+	if it.isFirst {
+		it.isFirst = false
+		return it.Valid()
+	}
 	if it.ended {
 		return false
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 )
 
+// TODO перевести логику выполнения системных таблиц на общий рантайм через планировщик
 func ExecuteSystemTableSelect(stmt *statements.SelectStatement, store *storage.DistributedStorageVClock) ([]map[string]interface{}, error) {
 	originalTableName := strings.ToLower(stmt.TableName)
 	tableName := originalTableName

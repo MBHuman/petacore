@@ -8,6 +8,7 @@ import (
 )
 
 // ExecuteShow выполняет SHOW statement
+// TODO: расширить поддержку других параметров SHOW
 func ExecuteShow(stmt *statements.ShowStatement, storage *storage.DistributedStorageVClock, sessionParams map[string]string, exCtx ExecutorContext) ([]map[string]interface{}, error) {
 	param := strings.ToLower(stmt.Parameter)
 	switch param {

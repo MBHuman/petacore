@@ -70,7 +70,7 @@ func NewPgConnection(t testing.TB) *pgx.ConnPool {
 		t.Fatalf("Failed to truncate table: %v", err)
 	}
 
-	_, err = conn.Exec(`INSERT INTO test_table (order_id, value) VALUES (1, 'test1'), (2, 'test2'), (3, 'test3');`)
+	_, err = conn.Exec(`INSERT INTO test_table (value) VALUES ('test1'), ('test2'), ('test3');`)
 	if err != nil {
 		t.Fatalf("Failed to insert test data: %v", err)
 	}

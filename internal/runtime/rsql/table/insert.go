@@ -10,6 +10,7 @@ import (
 )
 
 // Insert вставляет строку в таблицу
+// TODO убрать хардкодинг, сделать поддержку всех типов данных и ограничений
 func (t *Table) Insert(tableName string, values []map[string]interface{}) error {
 	log.Printf("DEBUG: Insert into %s: %+v\n", tableName, values)
 	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {

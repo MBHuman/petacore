@@ -9,6 +9,7 @@ import (
 	"strconv"
 )
 
+// TODO пересмотреть, возможно можно проще сделать
 func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 	stmt := &statements.SelectStatement{}
 

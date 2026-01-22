@@ -172,7 +172,16 @@ func (it *VersionIterator[V]) Close() {
 }
 
 // ScanWithSnapshot сканирует ключи с префиксом и возвращает последние безопасные версии
-func (m *MVCCWithVClock) ScanWithSnapshot(prefix []byte, it IteratorType, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string, limit int) map[string]string {
+func (m *MVCCWithVClock) ScanWithSnapshot(
+	prefix []byte,
+	it IteratorType,
+	snapshotVClock *VectorClock,
+	snapshotTimestamp uint64,
+	minAcks int,
+	totalNodes int,
+	currentNodeID string,
+	limit int,
+) map[string]string {
 	iterator := m.versions.NewIterator(prefix, it)
 	if iterator == nil {
 		return make(map[string]string)
@@ -182,7 +191,6 @@ func (m *MVCCWithVClock) ScanWithSnapshot(prefix []byte, it IteratorType, snapsh
 	result := make(map[string]string)
 	count := 0
 	for iterator.Next() {
-		// log.Printf("DEBUG: Scanning key: %s", iterator.Key())
 		if limit > 0 && count >= limit {
 			break
 		}

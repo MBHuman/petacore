@@ -11,6 +11,7 @@ import (
 	"github.com/antlr4-go/antlr/v4"
 )
 
+// TODO убрать хардкодинг типов данных и ограничений
 func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatementContext) {
 	stmt := &statements.CreateTableStatement{}
 	if ctx.TableName() != nil {

@@ -54,7 +54,7 @@ func EvaluateCaseExpression(caseExpr *items.CaseExpression, row map[string]inter
 		log.Printf("CASE condition: %v, value: %v", allExpressions[whenIdx].GetText(), condition)
 
 		// Check if true
-		if isTrue(condition) {
+		if IsTrue(condition) {
 			if thenIdx < len(allExpressions) {
 				// Evaluate THEN result
 				result, _ := EvaluateExpressionContext(allExpressions[thenIdx], row)
@@ -76,7 +76,7 @@ func EvaluateCaseExpression(caseExpr *items.CaseExpression, row map[string]inter
 	return nil, nil
 }
 
-func isTrue(value interface{}) bool {
+func IsTrue(value interface{}) bool {
 	if value == nil {
 		return false
 	}
