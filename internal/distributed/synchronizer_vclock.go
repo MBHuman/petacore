@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"petacore/internal/core"
+	"petacore/internal/logger"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 var ErrKeyNotFound = errors.New("key not found")
@@ -116,18 +118,14 @@ type VClockEntry struct {
 func (s *SynchronizerVClock) syncLoopVClock() {
 	defer s.wg.Done()
 
-	// log.Printf("[SynchronizerVClock] Starting sync for node %s...", s.nodeID)
-
 	for {
 		select {
 		case <-s.ctx.Done():
-			// log.Println("[SynchronizerVClock] Sync loop stopped")
 			return
 		default:
 		}
 
 		if err := s.syncOnceVClock(); err != nil {
-			// log.Printf("[SynchronizerVClock] Sync error: %v, retrying in 5s...", err)
 			s.setStatus(SyncStatusError)
 
 			select {
@@ -145,13 +143,10 @@ func (s *SynchronizerVClock) syncOnceVClock() error {
 	syncCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	// log.Printf("[SynchronizerVClock] Starting sync iterator for node %s...", s.nodeID)
 	eventChan, err := s.kvStore.SyncIterator(syncCtx, []byte{})
 	if err != nil {
 		return fmt.Errorf("failed to start sync iterator: %w", err)
 	}
-
-	// s.setStatus(SyncStatusSynced) // Убрано, теперь устанавливается по EventTypeSyncComplete
 
 	for {
 		select {
@@ -174,10 +169,7 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	// Обработка завершения синхронизации
 	if event.Type == EventTypeSyncComplete {
 		s.setStatus(SyncStatusSynced)
-		log.Printf("[SynchronizerVClock] Sync complete for node %s\n", s.nodeID)
-		log.Printf("[SynchronizerVClock] Node mvccVclock: %v is now synced", s.mvccVClock)
-		val, _, _ := s.mvccVClock.ReadLatest([]byte("a"))
-		log.Printf("[SynchronizerVClock] Node mvccVclock: key 'a' has value: %s", val)
+		logger.Info("[SynchronizerVClock] Sync complete", zap.String("nodeID", s.nodeID))
 		return
 	}
 
@@ -189,12 +181,18 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	// Парсим VClockEntry
 	var vclockEntry VClockEntry
 	if err := json.Unmarshal([]byte(event.Entry.Value), &vclockEntry); err != nil {
-		log.Printf("[SynchronizerVClock] Warning: failed to parse VClock entry for key %s: %v\n", event.Entry.Key, err)
+		logger.Warn("[SynchronizerVClock] Warning: failed to parse VClock entry",
+			zap.String("key", string(event.Entry.Key)),
+			zap.Error(err),
+		)
 		return
 	}
 
-	log.Printf("[SynchronizerVClock] Loaded key %s, value %s, vclock %v\n", event.Entry.Key, vclockEntry.Value, vclockEntry.VectorClock)
-
+	logger.Info("[SynchronizerVClock] Loaded key",
+		zap.String("key", string(event.Entry.Key)),
+		zap.String("value", vclockEntry.Value),
+		zap.Any("vclock", vclockEntry.VectorClock),
+	)
 	// Создаем Vector Clock
 	vclock := core.NewVectorClock()
 	vclock.UpdateFromMap(vclockEntry.VectorClock)
@@ -223,8 +221,7 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	// Обновляем ревизию
 	s.setLastSyncRevision(event.Entry.Revision)
 
-	// log.Printf("[SynchronizerVClock] Node %s applied: key=%s, timestamp=%d, vclock=%v, revision=%d",
-	// s.nodeID, event.Entry.Key, vclockEntry.Timestamp, vclock, event.Entry.Revision)
+	// logger.Info("[SynchronizerVClock] Node applied", zap.String("nodeID", s.nodeID), zap.String("key", string(event.Entry.Key)), zap.Int64("timestamp", vclockEntry.Timestamp), zap.Any("vclock", vclock), zap.Int64("revision", event.Entry.Revision))
 }
 
 // WriteThroughVClock записывает в ETCD и локальный MVCC с Vector Clock

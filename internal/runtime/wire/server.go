@@ -4,9 +4,10 @@ package wire
 import (
 	"fmt"
 	"io"
-	"log"
 	"net"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/executor"
+	"regexp"
 	"strconv"
 
 	"petacore/internal/runtime/rsql/statements"
@@ -14,11 +15,11 @@ import (
 	"petacore/internal/runtime/rsql/visitor"
 	"petacore/internal/runtime/system"
 	"petacore/internal/storage"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgproto3/v2"
+	"go.uber.org/zap"
 )
 
 // Session represents a client session with prepared statements and portals
@@ -79,7 +80,7 @@ func (ws *WireServer) acceptConnections() {
 			// Listener closed
 			return
 		}
-		log.Println("Accepted connection")
+		logger.Info("Accepted connection")
 		go ws.handleConnection(conn)
 	}
 }
@@ -87,7 +88,7 @@ func (ws *WireServer) acceptConnections() {
 func (ws *WireServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	log.Println("Accepted connection")
+	logger.Info("Accepted connection")
 
 	session := NewSession()
 
@@ -100,31 +101,31 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 	// Read first message - could be SSL request or startup
 	msg, err := backend.ReceiveStartupMessage()
 	if err != nil {
-		log.Printf("Error reading first message: %v", err)
+		logger.Errorf("Error reading first message: %v", err)
 		return
 	}
 
 	switch m := msg.(type) {
 	case *pgproto3.SSLRequest:
 		// We don't support SSL, send 'N'
-		log.Println("SSL request received, sending 'N'")
+		logger.Info("SSL request received, sending 'N'")
 		conn.Write([]byte{'N'})
 		// Now read startup message
 		startupMessage, err := backend.ReceiveStartupMessage()
 		if err != nil {
-			log.Printf("Error reading startup message after SSL: %v", err)
+			logger.Errorf("Error reading startup message after SSL: %v", err)
 			return
 		}
 		if sm, ok := startupMessage.(*pgproto3.StartupMessage); ok {
 			ws.handleStartup(backend, sm, session)
 		} else {
-			log.Printf("Unexpected message after SSL: %T", startupMessage)
+			logger.Errorf("Unexpected message after SSL: %T", startupMessage)
 			return
 		}
 	case *pgproto3.StartupMessage:
 		ws.handleStartup(backend, m, session)
 	default:
-		log.Printf("Unexpected first message: %T", m)
+		logger.Errorf("Unexpected first message: %T", m)
 		return
 	}
 
@@ -133,17 +134,17 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 		msg, err := backend.Receive()
 		if err != nil {
 			if err == io.EOF {
-				log.Println("Connection closed by client")
+				logger.Info("Connection closed by client")
 				return
 			}
 			// Any other error (including unexpected EOF) means connection is broken
-			log.Printf("Connection error: %v", err)
+			logger.Errorf("Connection error: %v", err)
 			return
 		}
 
 		switch msg := msg.(type) {
 		case *pgproto3.Query:
-			log.Printf("Query: %s", msg.String)
+			logger.Debugf("Query: %s", msg.String)
 			ws.handleQuery(backend, msg.String, session)
 		case *pgproto3.Parse:
 			ws.handleParse(backend, msg, session)
@@ -157,12 +158,12 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		case *pgproto3.Flush:
 			// Flush any pending output - in this implementation, Send() is synchronous
-			log.Println("Flush received")
+			logger.Info("Flush received")
 		case *pgproto3.Terminate:
-			log.Println("Terminate received")
+			logger.Info("Terminate received")
 			return
 		default:
-			log.Printf("Unsupported message type: %T", msg)
+			logger.Errorf("Unsupported message type: %T", msg)
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
 				Code:     "0A000",
@@ -174,7 +175,6 @@ func (ws *WireServer) handleConnection(conn net.Conn) {
 }
 
 func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *pgproto3.StartupMessage, session *Session) {
-	// log.Printf("Handling startup message: user='%s', database='%s'", startupMessage.ProtocolVersion, startupMessage.Parameters)
 	// Send AuthenticationOk
 	backend.Send(&pgproto3.AuthenticationOk{})
 
@@ -192,20 +192,20 @@ func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *p
 
 	// Send ReadyForQuery
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-	log.Println("Startup complete")
+	logger.Info("Startup complete")
 }
 
 func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse, session *Session) {
-	log.Printf("Parse name: '%s', query: '%s'", msg.Name, msg.Query)
+	logger.Debugf("Parse name: '%s', query: '%s'", msg.Name, msg.Query)
 	var stmt statements.SQLStatement
 	if strings.TrimSpace(msg.Query) == "" {
-		log.Printf("Empty query in Parse, creating EmptyStatement")
+		logger.Debug("Empty query in Parse, creating EmptyStatement")
 		stmt = &statements.EmptyStatement{}
 	} else {
 		var err error
 		stmt, err = visitor.ParseSQL(msg.Query)
 		if err != nil {
-			log.Printf("Parse error: %v", err)
+			logger.Errorf("Parse error: %v", err)
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
 				Code:     "42601",
@@ -217,18 +217,10 @@ func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse
 	}
 
 	// Count parameters in query and determine their types
-	paramCount := 0
-	for i := 1; ; i++ {
-		paramStr := fmt.Sprintf("$%d", i)
-		if strings.Contains(msg.Query, paramStr) {
-			paramCount = i
-		} else {
-			break
-		}
-	}
-
-	// Determine parameter types from statement context
+	paramCount := countParams(msg.Query)
 	paramOIDs := ws.inferParameterTypes(stmt, paramCount)
+
+	logger.Debug("paramsOIDs:", zap.Any("paramsOIDs", paramOIDs))
 
 	session.preparedStatements[msg.Name] = &PreparedStatement{
 		Query:     msg.Query,
@@ -237,7 +229,7 @@ func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse
 	}
 	// Populate columns for description
 	session.preparedStatements[msg.Name].Columns = ws.getFieldDescriptions(stmt)
-	log.Printf("Prepared statement '%s' created", msg.Name)
+	logger.Infof("Prepared statement '%s' created", msg.Name)
 	backend.Send(&pgproto3.ParseComplete{})
 }
 
@@ -292,6 +284,8 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 		return
 	}
 
+	logger.Debugf("Parsed statement %+v", stmt)
+
 	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
 	if err != nil {
 		backend.Send(&pgproto3.ErrorResponse{
@@ -319,13 +313,11 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("TRUNCATE TABLE")})
 	case *statements.SelectStatement:
 		ws.sendSelectResult(backend, s, result, true)
-	case *statements.DescribeStatement:
-		ws.sendDescribeResult(backend, result)
 	case *statements.SetStatement:
 		// SET - send CommandComplete
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
-	case *statements.ShowStatement:
-		ws.sendDescribeResult(backend, result)
+		// case *statements.ShowStatement:
+		// 	ws.sendDescribeResult(backend, result)
 	}
 
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
@@ -367,7 +359,7 @@ func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.De
 }
 
 func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind, session *Session) {
-	log.Printf("Bind prepared: '%s', portal: '%s'", msg.PreparedStatement, msg.DestinationPortal)
+	logger.Infof("Bind prepared: '%s', portal: '%s'", msg.PreparedStatement, msg.DestinationPortal)
 	ps, ok := session.preparedStatements[msg.PreparedStatement]
 	if !ok {
 		backend.Send(&pgproto3.ErrorResponse{
@@ -439,11 +431,37 @@ func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind, 
 	backend.Send(&pgproto3.BindComplete{})
 }
 
+var paramRe = regexp.MustCompile(`\$(\d+)`)
+
+func countParams(query string) int {
+	m := paramRe.FindAllStringSubmatch(query, -1)
+	max := 0
+	for _, mm := range m {
+		// mm[1] = digits
+		n, err := strconv.Atoi(mm[1])
+		if err != nil {
+			continue
+		}
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// TODO пересмотреть, сейчас несколько стратегий на FROM в select
 func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgproto3.FieldDescription {
 	switch s := stmt.(type) {
 	case *statements.SelectStatement:
 		var fields []pgproto3.FieldDescription
-		if s.TableName == "" {
+		if s.From == nil {
+			// TODO избавиться от хардкода
+			return fields
+		}
+
+		tableName := s.From.TableName
+
+		if tableName == "" {
 			// System functions
 			for _, col := range s.Columns {
 				var name string
@@ -464,14 +482,14 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 					Format:               0,
 				})
 			}
-		} else if system.IsSystemTable(s.TableName) {
+		} else if system.IsSystemTable(tableName) {
 			// For system tables, determine columns from stmt.Columns
 			for _, col := range s.Columns {
 				var name string
 				var oid uint32 = 25 // Default TEXT
 				if col.ColumnName == "*" {
 					// For SELECT *, assume ssl column for pg_stat_ssl
-					if s.TableName == "pg_stat_ssl" {
+					if tableName == "pg_stat_ssl" {
 						name = "ssl"
 						oid = 16 // BOOL
 					} else {
@@ -506,10 +524,10 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 }
 
 func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Execute, session *Session) {
-	log.Printf("Execute portal: '%s'", msg.Portal)
+	logger.Debugf("Execute portal: '%s'", msg.Portal)
 	ps, ok := session.portals[msg.Portal]
 	if !ok {
-		log.Printf("Portal %s does not exist", msg.Portal)
+		logger.Errorf("Portal %s does not exist", msg.Portal)
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
 			Code:     "26000",
@@ -518,9 +536,9 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		return
 	}
-	log.Printf("Executing prepared statement: %s", ps.Query)
-	log.Printf("Statement AST: %+v", ps.Stmt)
-	log.Printf("Parameters: %+v", ps.Params)
+	logger.Debugf("Executing prepared statement: %s", ps.Query)
+	logger.Debugf("Statement AST: %+v", ps.Stmt)
+	logger.Debugf("Parameters: %+v", ps.Params)
 
 	// If there are parameters, we need to re-parse with substituted values
 	var stmt statements.SQLStatement
@@ -551,13 +569,13 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 			}
 			substitutedQuery = strings.ReplaceAll(substitutedQuery, placeholder, replacement)
 		}
-		log.Printf("Substituted query: %s", substitutedQuery)
+		logger.Debugf("Substituted query: %s", substitutedQuery)
 
 		// Re-parse with substituted values
 		var err error
 		stmt, err = visitor.ParseSQL(substitutedQuery)
 		if err != nil {
-			log.Printf("Parse error after substitution: %v", err)
+			logger.Errorf("Parse error after substitution: %v", err)
 			backend.Send(&pgproto3.ErrorResponse{
 				Severity: "ERROR",
 				Code:     "42601",
@@ -573,7 +591,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	// Execute the statement
 	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
 	if err != nil {
-		log.Printf("Execute error: %v", err)
+		logger.Errorf("Execute error: %v", err)
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
 			Code:     "XX000",
@@ -583,7 +601,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 		return
 	}
 
-	log.Printf("Execute result: %+v", result)
+	logger.Debugf("Execute result: %+v", result)
 
 	// Send result based on statement type (similar to handleQuery)
 	switch s := ps.Stmt.(type) {
@@ -598,85 +616,55 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	case *statements.SelectStatement:
 		// Force text format for system tables since we can't reliably encode them in binary
 		formatCodes := ps.ResultFormatCodes
-		if system.IsSystemTable(s.TableName) {
-			// Override to text format for system tables
-			formatCodes = []int16{0}
-		}
+		// TODO избавиться от постоянных проверок IsSystemTable, вынести в стратегию выполнения
+		// if s.From != nil && system.IsSystemTable(s.From.TableName) {
+		// 	// Override to text format for system tables
+		// 	formatCodes = []int16{0}
+		// }
 		ws.sendSelectResultWithFormats(backend, s, result, true, formatCodes)
-	case *statements.DescribeStatement:
-		ws.sendDescribeResult(backend, result)
 	case *statements.SetStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
-	case *statements.ShowStatement:
-		ws.sendDescribeResult(backend, result)
+		// case *statements.ShowStatement:
+		// 	ws.sendDescribeResult(backend, result)
 	}
 }
 
-func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stmt *statements.SelectStatement, result interface{}, sendRowDesc bool, formatCodes []int16) {
-	log.Printf("DEBUG sendSelectResultWithFormats: formatCodes=%v", formatCodes)
-	log.Printf("DEBUG: Select result: %+v\n", result)
-	var rows []map[string]interface{}
-	var columns []string
-	var columnTypes []table.ColType
+func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stmt *statements.SelectStatement, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16) {
+	logger.Debugf("DEBUG sendSelectResultWithFormats: formatCodes=%v", formatCodes)
+	logger.Debugf("DEBUG: Select result: %+v\n", result)
+	// var rows []map[string]interface{}
+	// var columns []string
+	// var columnTypes []table.ColType
 
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		// New result format
-		columns = resultMap["columns"].([]string)
-		columnTypes = resultMap["columnTypes"].([]table.ColType)
-		rows = resultMap["rows"].([]map[string]interface{})
-	} else if r, ok := result.([]map[string]interface{}); ok {
-		// Old result format
-		rows = r
-		// For old format, infer columns from stmt or rows
-		if len(rows) > 0 {
-			for k := range rows[0] {
-				columns = append(columns, k)
-			}
-			sort.Strings(columns)
-			columnTypes = make([]table.ColType, len(columns))
-			for i, col := range columns {
-				if v, ok := rows[0][col]; ok {
-					switch v.(type) {
-					case int, int32, int64:
-						columnTypes[i] = table.ColTypeInt
-					case float32, float64:
-						columnTypes[i] = table.ColTypeFloat
-					case bool:
-						columnTypes[i] = table.ColTypeBool
-					default:
-						columnTypes[i] = table.ColTypeString
-					}
-				} else {
-					columnTypes[i] = table.ColTypeString
-				}
-			}
-		}
-	} else {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "XX000",
-			Message:  "invalid result type",
-		})
-		return
-	}
+	// if resultMap, ok := result.(map[string]interface{}); ok {
+	// 	// New result format
+	// 	columns = resultMap["columns"].([]string)
+	// 	columnTypes = resultMap["columnTypes"].([]table.ColType)
+	// 	rows = resultMap["rows"].([]map[string]interface{})
+	// } else {
+	// 	backend.Send(&pgproto3.ErrorResponse{
+	// 		Severity: "ERROR",
+	// 		Code:     "XX000",
+	// 		Message:  "invalid result type",
+	// 	})
+	// 	return
+	// }
 
-	if len(rows) == 0 {
+	if len(result.Rows) == 0 {
 		// No data
 		if sendRowDesc {
 			rowDesc := &pgproto3.RowDescription{}
-			for i, colName := range columns {
+			for i, column := range result.Columns {
 				oid := uint32(25) // Default TEXT
-				if i < len(columnTypes) {
-					switch columnTypes[i] {
-					case table.ColTypeInt:
-						oid = 23 // INT4
-					case table.ColTypeFloat:
-						oid = 701 // FLOAT8
-					case table.ColTypeBool:
-						oid = 16 // BOOL
-					case table.ColTypeString:
-						oid = 25 // TEXT
-					}
+				switch column.Type {
+				case table.ColTypeInt:
+					oid = 23 // INT4
+				case table.ColTypeFloat:
+					oid = 701 // FLOAT8
+				case table.ColTypeBool:
+					oid = 16 // BOOL
+				case table.ColTypeString:
+					oid = 25 // TEXT
 				}
 
 				// Determine format for this column
@@ -690,7 +678,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 				}
 
 				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-					Name:                 []byte(colName),
+					Name:                 []byte(column.Name),
 					TableOID:             0,
 					TableAttributeNumber: 0,
 					DataTypeOID:          oid,
@@ -708,19 +696,17 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 	// RowDescription
 	if sendRowDesc {
 		rowDesc := &pgproto3.RowDescription{}
-		for i, colName := range columns {
+		for i, column := range result.Columns {
 			oid := uint32(25) // Default TEXT
-			if i < len(columnTypes) {
-				switch columnTypes[i] {
-				case table.ColTypeInt:
-					oid = 23 // INT4
-				case table.ColTypeFloat:
-					oid = 701 // FLOAT8
-				case table.ColTypeBool:
-					oid = 16 // BOOL
-				case table.ColTypeString:
-					oid = 25 // TEXT
-				}
+			switch column.Type {
+			case table.ColTypeInt:
+				oid = 23 // INT4
+			case table.ColTypeFloat:
+				oid = 701 // FLOAT8
+			case table.ColTypeBool:
+				oid = 16 // BOOL
+			case table.ColTypeString:
+				oid = 25 // TEXT
 			}
 
 			// Determine format for this column
@@ -734,7 +720,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 			}
 
 			rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-				Name:                 []byte(colName),
+				Name:                 []byte(column.Name),
 				TableOID:             0,
 				TableAttributeNumber: 0,
 				DataTypeOID:          oid,
@@ -747,39 +733,35 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 	}
 
 	// Data rows
-	for _, row := range rows {
+	for _, row := range result.Rows {
 		dataRow := &pgproto3.DataRow{}
-		for i, colName := range columns {
-			if v, ok := row[colName]; ok {
-				// Determine format for this column
-				format := int16(0) // default text
-				if len(formatCodes) == 1 {
-					// Single format applies to all columns
-					format = formatCodes[0]
-				} else if i < len(formatCodes) {
-					// Per-column format
-					format = formatCodes[i]
-				}
+		// Determine format for this column
+		// format := int16(0) // default text
+		// if len(formatCodes) == 1 {
+		// 	// Single format applies to all columns
+		// 	format = formatCodes[0]
+		// } else if i < len(formatCodes) {
+		// 	// Per-column format
+		// 	format = formatCodes[i]
+		// }
 
-				if format == 1 {
-					// Binary format
-					dataRow.Values = append(dataRow.Values, encodeBinary(v, i, columnTypes))
-				} else {
-					// Text format
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-				}
-			} else {
-				dataRow.Values = append(dataRow.Values, nil)
-			}
+		// if format == 1 {
+		// 	// Binary format
+		// 	dataRow.Values = append(dataRow.Values, encodeBinary(v, i, columnTypes))
+		// } else {
+		// Text format
+		for _, value := range row {
+			dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
 		}
+		// }
 		backend.Send(dataRow)
 	}
 
-	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", len(rows)))})
+	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", len(result.Rows)))})
 }
 
 // sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
-func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statements.SelectStatement, result interface{}, sendRowDesc bool) {
+func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statements.SelectStatement, result *table.ExecuteResult, sendRowDesc bool) {
 	ws.sendSelectResultWithFormats(backend, stmt, result, sendRowDesc, []int16{0})
 }
 
@@ -790,7 +772,7 @@ func encodeBinary(v interface{}, colIdx int, columnTypes []table.ColType) []byte
 		return []byte(fmt.Sprintf("%v", v))
 	}
 
-	log.Printf("DEBUG encodeBinary: colIdx=%d, type=%v, value=%v (Go type %T)", colIdx, columnTypes[colIdx], v, v)
+	logger.Debugf("DEBUG encodeBinary: colIdx=%d, type=%v, value=%v (Go type %T)", colIdx, columnTypes[colIdx], v, v)
 
 	switch columnTypes[colIdx] {
 	case table.ColTypeInt:
@@ -828,58 +810,58 @@ func encodeBinary(v interface{}, colIdx int, columnTypes []table.ColType) []byte
 	}
 }
 
-func (ws *WireServer) sendDescribeResult(backend *pgproto3.Backend, result interface{}) {
-	rows, ok := result.([]map[string]interface{})
-	if !ok {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "XX000",
-			Message:  "invalid result type for describe",
-		})
-		return
-	}
+// func (ws *WireServer) sendDescribeResult(backend *pgproto3.Backend, result *table.ExecuteResult) {
+// 	rows := result.Rows
+// 	if rows == nil {
+// 		backend.Send(&pgproto3.ErrorResponse{
+// 			Severity: "ERROR",
+// 			Code:     "XX000",
+// 			Message:  "invalid result type for describe",
+// 		})
+// 		return
+// 	}
 
-	if len(rows) == 0 {
-		// No data
-		backend.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{}})
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SHOW 0")})
-		return
-	}
+// 	if len(rows) == 0 {
+// 		// No data
+// 		backend.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{}})
+// 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SHOW 0")})
+// 		return
+// 	}
 
-	// Get columns from first row
-	var columns []string
-	for k := range rows[0] {
-		columns = append(columns, k)
-	}
-	sort.Strings(columns)
+// 	// Get columns from first row
+// 	var columns []string
+// 	for k := range rows[0] {
+// 		columns = append(columns, k)
+// 	}
+// 	sort.Strings(columns)
 
-	// RowDescription
-	rowDesc := &pgproto3.RowDescription{}
-	for _, colName := range columns {
-		rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-			Name:                 []byte(colName),
-			TableOID:             0,
-			TableAttributeNumber: 0,
-			DataTypeOID:          25, // TEXT
-			DataTypeSize:         -1,
-			TypeModifier:         -1,
-			Format:               0,
-		})
-	}
-	backend.Send(rowDesc)
+// 	// RowDescription
+// 	rowDesc := &pgproto3.RowDescription{}
+// 	for _, colName := range columns {
+// 		rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
+// 			Name:                 []byte(colName),
+// 			TableOID:             0,
+// 			TableAttributeNumber: 0,
+// 			DataTypeOID:          25, // TEXT
+// 			DataTypeSize:         -1,
+// 			TypeModifier:         -1,
+// 			Format:               0,
+// 		})
+// 	}
+// 	backend.Send(rowDesc)
 
-	// Send DataRows
-	for _, row := range rows {
-		dataRow := &pgproto3.DataRow{}
-		for _, colName := range columns {
-			if v, exists := row[colName]; exists && v != nil {
-				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-			} else {
-				dataRow.Values = append(dataRow.Values, nil)
-			}
-		}
-		backend.Send(dataRow)
-	}
+// 	// Send DataRows
+// 	for _, row := range rows {
+// 		dataRow := &pgproto3.DataRow{}
+// 		for _, colName := range columns {
+// 			if v, exists := row[colName]; exists && v != nil {
+// 				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+// 			} else {
+// 				dataRow.Values = append(dataRow.Values, nil)
+// 			}
+// 		}
+// 		backend.Send(dataRow)
+// 	}
 
-	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SHOW %d", len(rows)))})
-}
+// 	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SHOW %d", len(rows)))})
+// }

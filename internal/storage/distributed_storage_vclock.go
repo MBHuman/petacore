@@ -247,6 +247,9 @@ func (dtx *DistributedTransactionVClock) Read(key []byte) (string, bool) {
 	if vclock != nil {
 		dtx.readSet[string(key)] = vclock.Clone()
 	}
+	if value == "" {
+		return "", false
+	}
 	return value, true
 }
 

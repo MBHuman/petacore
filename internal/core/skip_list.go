@@ -2,9 +2,11 @@ package core
 
 import (
 	"bytes"
-	"log"
 	"math/rand"
+	"petacore/internal/logger"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -345,6 +347,27 @@ func (sl *ConcurrentSkipListMap[V]) findLastLE(target []byte) *SkipListNode[V] {
 
 type IteratorType int
 
+func (it IteratorType) String() string {
+	switch it {
+	case IteratorTypeEq:
+		return "EQ"
+	case IteratorTypeReq:
+		return "REQ"
+	case IteratorTypeAll:
+		return "ALL"
+	case IteratorTypeGE:
+		return "GE"
+	case IteratorTypeGT:
+		return "GT"
+	case IteratorTypeLE:
+		return "LE"
+	case IteratorTypeLT:
+		return "LT"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 const (
 	IteratorTypeEq IteratorType = iota
 	IteratorTypeReq
@@ -370,7 +393,9 @@ type SkipListIterator[V any] struct {
 
 func (sl *ConcurrentSkipListMap[V]) NewIterator(seekKey []byte, typ IteratorType) *SkipListIterator[V] {
 	it := &SkipListIterator[V]{sl: sl, typ: typ, isFirst: true}
-	log.Println("DEBUG: NewIterator called with seekKey:", string(seekKey), "typ:", typ)
+	logger.Debug("NewIterator called with seekKey:",
+		zap.String("seekKey", string(seekKey)),
+		zap.String("typ", typ.String()))
 
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()

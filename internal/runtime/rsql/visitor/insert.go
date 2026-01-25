@@ -3,7 +3,8 @@ package visitor
 import (
 	"fmt"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rhelpers"
+	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/rparser"
 	"petacore/internal/runtime/rsql/statements"
 	"strings"
 )
@@ -31,12 +32,20 @@ func (l *sqlListener) EnterInsertStatement(ctx *parser.InsertStatementContext) {
 	for _, vl := range ctx.AllValueList() {
 		var rowValues []interface{}
 		for _, expr := range vl.AllExpression() {
-			value := rhelpers.ParseExpression(expr, nil)
+			value, err := rparser.ParseExpression(expr, nil)
+			if err != nil {
+				l.err = err
+				return
+			}
 			if value == nil {
 				l.err = fmt.Errorf("invalid expression in INSERT")
 				return
 			}
-			rowValues = append(rowValues, value)
+			if val, ok := value.(*rmodels.ResultRowsExpression); ok {
+				rowValues = append(rowValues, val.Row.Rows[0][0])
+			} else if val, ok := value.(*rmodels.BoolExpression); ok {
+				rowValues = append(rowValues, val.Value)
+			}
 		}
 		stmt.Values = append(stmt.Values, rowValues)
 	}

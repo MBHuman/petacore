@@ -1,335 +1,119 @@
 package executor
 
 import (
-	"log"
+	"fmt"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/functions"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rhelpers"
+	"petacore/internal/runtime/rhelpers/revaluate"
+	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
-	"petacore/internal/runtime/system"
 	"petacore/internal/storage"
+	"strings"
+
+	"go.uber.org/zap"
 )
 
-// TODO рефакторинг: сильно раздутый ExecuteSelect разбить на подфункции по типам выборок
 func ExecuteSelect(
 	stmt *statements.SelectStatement,
 	store *storage.DistributedStorageVClock,
 	exCtx ExecutorContext,
-) (map[string]interface{}, error) {
-	log.Printf("DEBUG: execute select %v\n", stmt)
+) (*table.ExecuteResult, error) {
+	logger.Debug("execute select", zap.Any("stmt", stmt))
 
 	// --- 1) SELECT без таблицы (функции/выражения) ---
-	if stmt.TableName == "" {
-		row := make(map[string]interface{})
-		for _, col := range stmt.Columns {
-			var colName string
-			var value interface{}
-
-			if col.Function != nil {
-				v, err := functions.ExecuteFunction(col.Function.Name, col.Function.Args)
-				if err != nil {
-					return nil, err
-				}
-				value = v
-				colName = col.Function.Name
-			} else if col.ExpressionContext != nil {
-				v, err := rhelpers.EvaluateExpressionContext(col.ExpressionContext, row)
-				if err != nil {
-					return nil, err
-				}
-				value = v
-				colName = "?column?"
-			} else if col.ColumnName != "" {
-				colName = col.ColumnName
-				value = nil
-			}
-
-			if col.Alias != "" {
-				colName = col.Alias
-			} else if col.ExpressionContext != nil {
-				colName = "?column?"
-			}
-
-			row[colName] = value
-		}
-
-		// Build columns list from SELECT statement to preserve order
-		var cols []string
-		var types []table.ColType
-		for _, col := range stmt.Columns {
-			var colName string
-			if col.Alias != "" {
-				colName = col.Alias
-			} else if col.ColumnName != "" {
-				colName = col.ColumnName
-			} else {
-				colName = "?column?"
-			}
-			cols = append(cols, colName)
-
-			// Get type from row value
-			if v, ok := row[colName]; ok {
-				switch v.(type) {
-				case int, int32, int64:
-					types = append(types, table.ColTypeInt)
-				case float32, float64:
-					types = append(types, table.ColTypeFloat)
-				case bool:
-					types = append(types, table.ColTypeBool)
-				default:
-					types = append(types, table.ColTypeString)
-				}
-			} else {
-				types = append(types, table.ColTypeString)
-			}
-		}
-
-		return map[string]interface{}{
-			"rows":        []map[string]interface{}{row},
-			"columns":     cols,
-			"columnTypes": types,
-		}, nil
+	if stmt.From == nil {
+		return ExecuteSelectWithoutTable(stmt, store, exCtx)
+	} else {
+		// --- 3) Normal table select ---
+		return ExecuteNormalTable(stmt, store, exCtx)
 	}
+}
 
-	// --- 2) System table select ---
-	if system.IsSystemTable(stmt.TableName) {
-		// Check if there are joins - if so, use executeFromClause
-		if stmt.From != nil && len(stmt.From.Joins) > 0 {
-			log.Printf("DEBUG: Executing FROM clause with joins for system table %s", stmt.TableName)
-			fullRows, err := executeFromClause(stmt.From, store, stmt.Limit)
+func ExecuteSelectWithoutTable(
+	stmt *statements.SelectStatement,
+	store *storage.DistributedStorageVClock,
+	exCtx ExecutorContext,
+) (*table.ExecuteResult, error) {
+	resultColumns := make([]table.TableColumn, 0, len(stmt.Columns))
+	row := make([]interface{}, 0, len(stmt.Columns))
+	size := len(stmt.Columns)
+	for i, col := range stmt.Columns {
+		var value *table.ExecuteResult
+
+		logger.Debug("Select without table - processing column", zap.Int("index", i), zap.Any("column", col))
+
+		if col.Function != nil {
+			// Evaluate function args
+			args := make([]interface{}, 0, len(col.Function.Args))
+			for _, argExpr := range col.Function.Args {
+				val, err := revaluate.EvaluateExpressionContext(argExpr, nil)
+				if err != nil {
+					return nil, fmt.Errorf("error evaluating function arg: %w", err)
+				}
+				if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
+					args = append(args, valExpr.Row.Rows[0][0])
+				} else {
+					return nil, fmt.Errorf("invalid function arg")
+				}
+			}
+			v, err := functions.ExecuteFunction(col.Function.Name, args)
 			if err != nil {
 				return nil, err
 			}
-			log.Printf("DEBUG: Got %d rows from executeFromClause", len(fullRows))
-
-			// Apply WHERE filtering after getting rows
-			if stmt.Where != nil {
-				fullRows = rhelpers.FilterRowsByWhere(fullRows, stmt.Where)
+			if len(v.Columns) > 1 && size > 1 {
+				return nil, fmt.Errorf("function %s returns multiple columns, cannot be used in multi-column select", col.Function.Name)
+			} else if len(v.Columns) > 1 && size == 1 {
+				return v, nil
 			}
-
-			// Filter to selected columns
-			var filteredRows []map[string]interface{}
-			for _, row := range fullRows {
-				filteredRow := make(map[string]interface{})
-
-				log.Printf("DEBUG: Processing row with keys: %v", getKeys(row))
-
-				for _, col := range stmt.Columns {
-					log.Printf("DEBUG: Processing column - ColumnName: %q, ExpressionContext: %v", col.ColumnName, col.ExpressionContext != nil)
-					if col.ColumnName == "*" {
-						// copy all columns
-						for k, v := range row {
-							filteredRow[k] = v
-						}
-					} else {
-						var colName string
-						var value interface{}
-
-						if col.ColumnName != "" {
-							if val, ok := row[col.ColumnName]; ok {
-								value = val
-							} else {
-								value = nil
-							}
-						} else if col.ExpressionContext != nil {
-							v, err := rhelpers.EvaluateExpressionContext(col.ExpressionContext, row)
-							if err != nil {
-								return nil, err
-							}
-							value = v
-						}
-
-						if col.Alias != "" {
-							colName = col.Alias
-						} else if col.ColumnName != "" {
-							colName = col.ColumnName
-						} else {
-							colName = "?column?"
-						}
-
-						filteredRow[colName] = value
-					}
-				}
-
-				filteredRows = append(filteredRows, filteredRow)
+			value = v
+		} else if col.ExpressionContext != nil {
+			v, err := revaluate.EvaluateExpressionContext(col.ExpressionContext, nil)
+			if err != nil {
+				return nil, err
 			}
-
-			rhelpers.SortRows(filteredRows, stmt.OrderBy)
-
-			if stmt.Limit > 0 && len(filteredRows) > stmt.Limit {
-				filteredRows = filteredRows[:stmt.Limit]
-			}
-
-			// columns/types: если нет строк — попытаться вывести из stmt (иначе будет пустой RowDescription)
-			var cols []string
-			var types []table.ColType
-			if len(filteredRows) > 0 {
-				cols = rhelpers.GetColumnNamesFromRow(filteredRows[0])
-				types = rhelpers.GetColumnTypesFromRow(filteredRows[0])
+			if execRes, ok := v.(*rmodels.ResultRowsExpression); ok && len(execRes.Row.Rows) > 0 && len(execRes.Row.Rows[0]) > 0 {
+				value = execRes.Row
 			} else {
-				// минимальный фоллбек: из SELECT списка (без типов)
-				for _, item := range stmt.Columns {
-					if item.ColumnName == "*" {
-						// неизвестно какие именно колонки → оставим пусто
-						cols = nil
-						break
-					}
-					if item.ColumnName != "" {
-						cols = append(cols, item.ColumnName)
-					}
-				}
-				if len(cols) > 0 {
-					types = make([]table.ColType, len(cols))
-					for i := range types {
-						types[i] = table.ColTypeString
-					}
-				}
+				return nil, fmt.Errorf("expected ExecuteResult from expression, got %T", v)
 			}
-
-			return map[string]interface{}{
-				"rows":        filteredRows,
-				"columns":     cols,
-				"columnTypes": types,
-			}, nil
-		}
-
-		// No joins, execute normally
-		fullRows, err := system.ExecuteSystemTableSelect(stmt, store)
-		if err != nil {
-			return nil, err
-		}
-
-		// Filter to selected columns
-		var filteredRows []map[string]interface{}
-		for _, row := range fullRows {
-			filteredRow := make(map[string]interface{})
-
-			log.Printf("DEBUG: Processing row with keys: %v", getKeys(row))
-
-			for _, col := range stmt.Columns {
-				log.Printf("DEBUG: Processing column - ColumnName: %q, ExpressionContext: %v", col.ColumnName, col.ExpressionContext != nil)
-				if col.ColumnName == "*" {
-					// copy all columns
-					for k, v := range row {
-						filteredRow[k] = v
-					}
-				} else {
-					var colName string
-					var value interface{}
-
-					if col.ColumnName != "" {
-						if val, ok := row[col.ColumnName]; ok {
-							value = val
-						} else {
-							value = nil
-						}
-					} else if col.ExpressionContext != nil {
-						v, err := rhelpers.EvaluateExpressionContext(col.ExpressionContext, row)
-						if err != nil {
-							return nil, err
-						}
-						value = v
-					}
-
-					if col.Alias != "" {
-						colName = col.Alias
-					} else if col.ColumnName != "" {
-						colName = col.ColumnName
-					} else {
-						colName = "?column?"
-					}
-
-					filteredRow[colName] = value
-				}
-			}
-
-			filteredRows = append(filteredRows, filteredRow)
-		}
-
-		rhelpers.SortRows(filteredRows, stmt.OrderBy)
-
-		if stmt.Limit > 0 && len(filteredRows) > stmt.Limit {
-			filteredRows = filteredRows[:stmt.Limit]
-		}
-
-		// columns/types: если нет строк — попытаться вывести из stmt (иначе будет пустой RowDescription)
-		var cols []string
-		var types []table.ColType
-
-		// Build columns list from SELECT statement to preserve order
-		for _, item := range stmt.Columns {
-			if item.ColumnName == "*" {
-				// For *, get all columns from first row
-				if len(filteredRows) > 0 {
-					for k := range filteredRows[0] {
-						cols = append(cols, k)
-					}
-				}
-			} else {
-				// Use alias if available, otherwise column name or ?column?
-				var colName string
-				if item.Alias != "" {
-					colName = item.Alias
-				} else if item.ColumnName != "" {
-					colName = item.ColumnName
-				} else {
-					colName = "?column?"
-				}
-				cols = append(cols, colName)
-			}
-		}
-
-		// Get types from first row using the column order
-		if len(filteredRows) > 0 {
-			log.Printf("DEBUG: Determining types for cols: %v", cols)
-			for _, colName := range cols {
-				if v, ok := filteredRows[0][colName]; ok {
-					// Fallback to inferring from value
-					log.Printf("DEBUG: Column %q has value %v (type %T)", colName, v, v)
-					switch v.(type) {
-					case int, int32, int64:
-						types = append(types, table.ColTypeInt)
-					case float32, float64:
-						types = append(types, table.ColTypeFloat)
-					case bool:
-						types = append(types, table.ColTypeBool)
-					default:
-						types = append(types, table.ColTypeString)
-					}
-				} else {
-					log.Printf("DEBUG: Column %q not found in row", colName)
-					types = append(types, table.ColTypeString)
-				}
-			}
-			log.Printf("DEBUG: First filtered row: %+v", filteredRows[0])
-			log.Printf("DEBUG: Column names: %v", cols)
-			log.Printf("DEBUG: Column types: %v", types)
 		} else {
-			// минимальный фоллбек: из SELECT списка (без типов)
-			for _, item := range stmt.Columns {
-				if item.ColumnName == "*" {
-					// неизвестно какие именно колонки → оставим пусто
-					cols = nil
-					break
-				}
-				if item.ColumnName != "" {
-					cols = append(cols, item.ColumnName)
-				}
-			}
-			if len(cols) > 0 {
-				types = make([]table.ColType, len(cols))
-				for i := range types {
-					types[i] = table.ColTypeString
-				}
-			}
+			return nil, fmt.Errorf("unsupported select column without table")
 		}
 
-		return map[string]interface{}{
-			"rows":        filteredRows,
-			"columns":     cols,
-			"columnTypes": types,
-		}, nil
+		if col.Alias != "" {
+			value.Columns[0].Name = col.Alias
+		}
+
+		row = append(row, value.Rows[0][0])
+		resultColumns = append(resultColumns, value.Columns[0])
+
+		logger.Debugf("Select without table - processed column %d/%d: %v", i+1, size, row)
+	}
+	if len(row) != len(stmt.Columns) {
+		return nil, fmt.Errorf("mismatch in number of columns and row values")
+	}
+
+	execResult := &table.ExecuteResult{
+		Rows:    [][]interface{}{row},
+		Columns: resultColumns,
+	}
+
+	return execResult, nil
+}
+
+func ExecuteNormalTable(
+	stmt *statements.SelectStatement,
+	store *storage.DistributedStorageVClock,
+	exCtx ExecutorContext,
+) (*table.ExecuteResult, error) {
+
+	tableName := stmt.From.TableName
+
+	// Проверяем есть ли JOIN
+	if stmt.From != nil && len(stmt.From.Joins) > 0 {
+		return ExecuteSelectWithJoins(stmt, store, exCtx)
 	}
 
 	// --- 3) Normal table select ---
@@ -337,152 +121,455 @@ func ExecuteSelect(
 		Storage:  store,
 		Database: exCtx.Database,
 		Schema:   exCtx.Schema,
-		Name:     stmt.TableName,
+		Name:     tableName,
 	}
 
-	var rows []map[string]interface{}
-	var finalColumns []string
-	var columnTypes []table.ColType
+	logger.Debug("Executing normal SELECT on table", zap.String("table", tableName))
+
+	var result *table.ExecuteResult
 
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		var err error
-		// Собираем список колонок для выборки
-		var selectColumns []string
-		if len(stmt.Columns) == 1 && stmt.Columns[0].ColumnName == "*" {
-			selectColumns = nil // все колонки
-		} else {
-			for _, col := range stmt.Columns {
-				if col.ColumnName != "" {
-					selectColumns = append(selectColumns, col.ColumnName)
-				}
+		// Проверяем есть ли только простые колонки без выражений
+		hasExpressions := false
+		for _, col := range stmt.Columns {
+			if col.ExpressionContext != nil || col.Function != nil {
+				hasExpressions = true
+				break
 			}
 		}
-		rows, finalColumns, columnTypes, err = tbl.Select(tx, stmt.TableName, selectColumns, nil, 0)
+
+		// Если есть WHERE или выражения, получаем ВСЕ колонки
+		// потому что WHERE может ссылаться на колонки не в SELECT
+		if stmt.Where != nil || hasExpressions {
+			selectColumns := []table.SelectColumn{{IsAll: true}}
+			logger.Debugf("Executing SELECT with WHERE/expressions on table %s - fetching all columns", tableName)
+			result, err = tbl.Select(tx, tableName, selectColumns, nil, 0)
+		} else {
+			// Простой SELECT без WHERE - собираем список колонок для выборки
+			var selectColumns []table.SelectColumn
+			for _, col := range stmt.Columns {
+				if col.IsSelectAll {
+					selectColumns = append(selectColumns, table.SelectColumn{
+						IsAll: true,
+					})
+				} else {
+					selectColumns = append(selectColumns, table.SelectColumn{
+						Name: col.ColumnName,
+					})
+				}
+			}
+			logger.Debugf("Executing SELECT on table %s with columns: %+v", tableName, selectColumns)
+			result, err = tbl.Select(tx, tableName, selectColumns, nil, 0)
+		}
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("Select fetched %d rows: %v from table %s", len(rows), rows, stmt.TableName)
+	logger.Debugf("Select fetched %d rows: %v from table %s", len(result.Rows), result.Rows, tableName)
+	logger.Debug("Select fetched", zap.Any("columns", result.Columns), zap.Any("rows", result.Rows))
 
 	// Apply WHERE filtering after getting rows
 	if stmt.Where != nil {
-		rows = rhelpers.FilterRowsByWhere(rows, stmt.Where)
+		result = revaluate.EvaluateFilterRowsByWhere(result, stmt.Where)
 	}
 
-	// Filter to selected columns
-	var filteredRows []map[string]interface{}
-	for _, row := range rows {
-		filteredRow := make(map[string]interface{})
+	// Проверяем нужно ли обрабатывать выражения или выбирать конкретные колонки
+	hasExpressions := false
+	needColumnFiltering := false
 
-		// Только явно выбранные поля, даже если row содержит больше
-		for _, col := range stmt.Columns {
-			var colName string
-			var value interface{}
-			if col.ColumnName == "*" {
-				// SELECT * — копируем все поля
-				for k, v := range row {
-					filteredRow[k] = v
-				}
-			} else {
-				if col.ColumnName != "" {
-					if val, ok := row[col.ColumnName]; ok {
-						value = val
-					} else {
-						value = nil
-					}
-				} else if col.ExpressionContext != nil {
-					v, err := rhelpers.EvaluateExpressionContext(col.ExpressionContext, row)
-					if err != nil {
-						return nil, err
-					}
-					value = v
-				}
-				if col.Alias != "" {
-					colName = col.Alias
-				} else if col.ColumnName != "" {
-					colName = col.ColumnName
-				} else {
-					colName = "?column?"
-				}
-				filteredRow[colName] = value
+	for _, col := range stmt.Columns {
+		if col.ExpressionContext != nil || col.Function != nil {
+			hasExpressions = true
+			break
+		}
+		if !col.IsSelectAll {
+			needColumnFiltering = true
+		}
+	}
+
+	if hasExpressions {
+		// Если есть выражения, обрабатываем их
+		result, err = processSelectExpressions(stmt, result)
+		if err != nil {
+			return nil, err
+		}
+	} else if needColumnFiltering && stmt.Where != nil {
+		// Если был WHERE и нужны только конкретные колонки, фильтруем
+		result, err = filterSelectColumns(stmt, result)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Просто применяем алиасы к обычным колонкам
+		for i, col := range stmt.Columns {
+			if col.Alias != "" && i < len(result.Columns) {
+				result.Columns[i].Name = col.Alias
 			}
 		}
-
-		filteredRows = append(filteredRows, filteredRow)
 	}
 
-	rhelpers.SortRows(filteredRows, stmt.OrderBy)
+	revaluate.EvaluateSortRows(result, stmt.OrderBy)
 
-	if stmt.Limit > 0 && len(filteredRows) > stmt.Limit {
-		filteredRows = filteredRows[:stmt.Limit]
+	if stmt.Limit > 0 && len(result.Rows) > stmt.Limit {
+		result.Rows = result.Rows[:stmt.Limit]
 	}
 
-	return map[string]interface{}{
-		"rows":        filteredRows,
-		"columns":     finalColumns,
-		"columnTypes": columnTypes,
+	return result, nil
+}
+
+// filterSelectColumns фильтрует колонки из полного набора данных
+func filterSelectColumns(stmt *statements.SelectStatement, inputResult *table.ExecuteResult) (*table.ExecuteResult, error) {
+	newColumns := make([]table.TableColumn, 0)
+	columnIndices := make([]int, 0)
+
+	for _, col := range stmt.Columns {
+		if col.IsSelectAll {
+			// Для * берем все колонки
+			return inputResult, nil
+		}
+
+		// Ищем колонку по имени с учётом table alias
+		found := false
+		searchName := col.ColumnName
+		if col.TableAlias != "" {
+			searchName = col.TableAlias + "." + col.ColumnName
+		}
+
+		for i, origCol := range inputResult.Columns {
+			// Проверяем точное совпадение или совпадение без префикса
+			if origCol.Name == searchName || origCol.Name == col.ColumnName {
+				newCol := origCol
+				if col.Alias != "" {
+					newCol.Name = col.Alias
+				} else {
+					newCol.Name = col.ColumnName
+				}
+				newCol.Idx = len(newColumns)
+				newColumns = append(newColumns, newCol)
+				columnIndices = append(columnIndices, i)
+				found = true
+				break
+			}
+			// Также проверяем если origCol имеет префикс, а мы ищем без него
+			if col.TableAlias == "" && strings.HasSuffix(origCol.Name, "."+col.ColumnName) {
+				newCol := origCol
+				if col.Alias != "" {
+					newCol.Name = col.Alias
+				} else {
+					newCol.Name = col.ColumnName
+				}
+				newCol.Idx = len(newColumns)
+				newColumns = append(newColumns, newCol)
+				columnIndices = append(columnIndices, i)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("column %s not found", col.ColumnName)
+		}
+	}
+
+	// Фильтруем строки, оставляя только нужные колонки
+	newRows := make([][]interface{}, len(inputResult.Rows))
+	for i, row := range inputResult.Rows {
+		newRow := make([]interface{}, len(columnIndices))
+		for j, idx := range columnIndices {
+			if idx < len(row) {
+				newRow[j] = row[idx]
+			}
+		}
+		newRows[i] = newRow
+	}
+
+	return &table.ExecuteResult{
+		Rows:    newRows,
+		Columns: newColumns,
 	}, nil
 }
 
-func executeFromClause(from *statements.FromClause, store *storage.DistributedStorageVClock, limit int) ([]map[string]interface{}, error) {
-	// Get rows for main table
-	stmt := &statements.SelectStatement{TableName: from.TableName}
-	stmt.Limit = limit
-	mainRows, err := system.ExecuteSystemTableSelect(stmt, store)
+// processSelectExpressions обрабатывает выражения в SELECT (включая CASE, функции, алиасы)
+func processSelectExpressions(stmt *statements.SelectStatement, inputResult *table.ExecuteResult) (*table.ExecuteResult, error) {
+	newColumns := make([]table.TableColumn, 0, len(stmt.Columns))
+	newRows := make([][]interface{}, 0, len(inputResult.Rows))
+
+	// Сначала определяем колонки
+	for colIdx, col := range stmt.Columns {
+		var colName string
+		var colType table.ColType
+
+		if col.IsSelectAll {
+			// Для * добавляем все колонки из исходного результата
+			for _, origCol := range inputResult.Columns {
+				newColumns = append(newColumns, origCol)
+			}
+			break // * заменяет все
+		}
+
+		// Обработка выражений
+		if col.ExpressionContext != nil {
+			// Для выражений, тип определим позже, но пока string
+			colType = table.ColTypeString
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = "?column?"
+			}
+		} else if col.Function != nil {
+			// Для функций, тип определим позже
+			colType = table.ColTypeString
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = "?column?"
+			}
+		} else if col.ColumnName != "" {
+			// Простая колонка
+			searchName := col.ColumnName
+			if col.TableAlias != "" {
+				searchName = col.TableAlias + "." + col.ColumnName
+			}
+			found := false
+			for _, origCol := range inputResult.Columns {
+				if origCol.Name == searchName || origCol.Name == col.ColumnName {
+					colType = origCol.Type
+					found = true
+					break
+				}
+				if col.TableAlias == "" && strings.HasSuffix(origCol.Name, "."+col.ColumnName) {
+					colType = origCol.Type
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("column %s not found", col.ColumnName)
+			}
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = col.ColumnName
+			}
+		}
+
+		newColumns = append(newColumns, table.TableColumn{
+			Idx:  colIdx,
+			Name: colName,
+			Type: colType,
+		})
+	}
+
+	// Теперь обрабатываем строки
+	for _, row := range inputResult.Rows {
+		newRow := make([]interface{}, 0, len(stmt.Columns))
+
+		resultRow := &table.ResultRow{
+			Row:     row,
+			Columns: inputResult.Columns,
+		}
+
+		for _, col := range stmt.Columns {
+			var colValue interface{}
+
+			if col.IsSelectAll {
+				// Для * добавляем все значения
+				newRow = append(newRow, row...)
+				break
+			}
+
+			// Обработка выражений
+			if col.ExpressionContext != nil {
+				val, err := revaluate.EvaluateExpressionContext(col.ExpressionContext, resultRow)
+				if err != nil {
+					return nil, fmt.Errorf("error evaluating expression: %w", err)
+				}
+				if boolVal, ok := val.(*rmodels.BoolExpression); ok {
+					colValue = boolVal.Value
+				} else if resultVal, ok := val.(*rmodels.ResultRowsExpression); ok {
+					if len(resultVal.Row.Rows) > 0 && len(resultVal.Row.Rows[0]) > 0 {
+						colValue = resultVal.Row.Rows[0][0]
+					} else {
+						colValue = nil
+					}
+				} else {
+					colValue = nil
+				}
+			} else if col.Function != nil {
+				// Обработка функций
+				args := make([]interface{}, 0, len(col.Function.Args))
+				for _, argExpr := range col.Function.Args {
+					val, err := revaluate.EvaluateExpressionContext(argExpr, resultRow)
+					if err != nil {
+						return nil, fmt.Errorf("error evaluating function arg: %w", err)
+					}
+					if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
+						args = append(args, valExpr.Row.Rows[0][0])
+					} else {
+						return nil, fmt.Errorf("invalid function arg")
+					}
+				}
+				v, err := functions.ExecuteFunction(col.Function.Name, args)
+				if err != nil {
+					return nil, fmt.Errorf("error executing function %s: %w", col.Function.Name, err)
+				}
+				if len(v.Rows) > 0 && len(v.Rows[0]) > 0 {
+					colValue = v.Rows[0][0]
+				} else {
+					colValue = nil
+				}
+			} else if col.ColumnName != "" {
+				// Простая колонка
+				searchName := col.ColumnName
+				if col.TableAlias != "" {
+					searchName = col.TableAlias + "." + col.ColumnName
+				}
+				found := false
+				for i, origCol := range inputResult.Columns {
+					if origCol.Name == searchName || origCol.Name == col.ColumnName {
+						colValue = row[i]
+						found = true
+						break
+					}
+					if col.TableAlias == "" && strings.HasSuffix(origCol.Name, "."+col.ColumnName) {
+						colValue = row[i]
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("column %s not found", col.ColumnName)
+				}
+			}
+
+			newRow = append(newRow, colValue)
+		}
+
+		newRows = append(newRows, newRow)
+	}
+
+	return &table.ExecuteResult{
+		Rows:    newRows,
+		Columns: newColumns,
+	}, nil
+}
+
+// inferTypeFromValue определяет тип колонки по значению
+func inferTypeFromValue(val interface{}) table.ColType {
+	switch val.(type) {
+	case int, int32, int64:
+		return table.ColTypeInt
+	case float32, float64:
+		return table.ColTypeFloat
+	case bool:
+		return table.ColTypeBool
+	default:
+		return table.ColTypeString
+	}
+}
+
+// ExecuteSelectWithJoins выполняет SELECT с JOIN операциями
+func ExecuteSelectWithJoins(
+	stmt *statements.SelectStatement,
+	store *storage.DistributedStorageVClock,
+	exCtx ExecutorContext,
+) (*table.ExecuteResult, error) {
+	var mainResult *table.ExecuteResult
+
+	// Получаем данные из главной таблицы
+	mainTable := &table.Table{
+		Storage:  store,
+		Database: exCtx.Database,
+		Schema:   exCtx.Schema,
+		Name:     stmt.From.TableName,
+	}
+
+	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+		var err error
+		selectColumns := []table.SelectColumn{{IsAll: true}}
+		mainResult, err = mainTable.Select(tx, stmt.From.TableName, selectColumns, nil, 0)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("DEBUG JOIN: fetched %d rows from main table %s", len(mainRows), from.TableName)
-	if len(mainRows) > 0 {
-		log.Printf("DEBUG JOIN: first main row keys: %v", getKeys(mainRows[0]))
-	}
-
-	// Add table alias prefix to main table columns
-	mainAlias := from.Alias
+	// Добавляем префикс к колонкам главной таблицы
+	mainAlias := stmt.From.Alias
 	if mainAlias == "" {
-		mainAlias = from.TableName
+		mainAlias = stmt.From.TableName
 	}
-	prefixedMainRows := prefixRowKeys(mainRows, mainAlias)
-
-	log.Printf("DEBUG JOIN: after prefix - main table %s, alias %s, rows: %d", from.TableName, mainAlias, len(prefixedMainRows))
-	if len(prefixedMainRows) > 0 {
-		log.Printf("DEBUG JOIN: first prefixed row keys: %v", getKeys(prefixedMainRows[0]))
+	for i := range mainResult.Columns {
+		originalName := mainResult.Columns[i].Name
+		mainResult.Columns[i].Name = mainAlias + "." + originalName
+		mainResult.Columns[i].TableIdentifier = mainAlias
+		mainResult.Columns[i].OriginalTableName = stmt.From.TableName
 	}
 
-	// For each join, perform hash join
-	currentRows := prefixedMainRows
-	for _, join := range from.Joins {
-		log.Printf("DEBUG JOIN: processing join with %s (alias: %s)", join.TableName, join.Alias)
-		rightStmt := &statements.SelectStatement{TableName: join.TableName}
-		rightRows, err := system.ExecuteSystemTableSelect(rightStmt, store)
+	currentResult := mainResult
+
+	// Выполняем JOIN-ы последовательно
+	for _, join := range stmt.From.Joins {
+		var rightResult *table.ExecuteResult
+
+		rightTable := &table.Table{
+			Storage:  store,
+			Database: exCtx.Database,
+			Schema:   exCtx.Schema,
+			Name:     join.TableName,
+		}
+
+		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+			var err error
+			selectColumns := []table.SelectColumn{{IsAll: true}}
+			rightResult, err = rightTable.Select(tx, join.TableName, selectColumns, nil, 0)
+			return err
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		log.Printf("DEBUG JOIN: fetched %d rows from right table %s", len(rightRows), join.TableName)
-
-		// Add table alias prefix to right table columns
+		// Добавляем префикс к колонкам правой таблицы
 		rightAlias := join.Alias
 		if rightAlias == "" {
 			rightAlias = join.TableName
 		}
-		prefixedRightRows := prefixRowKeys(rightRows, rightAlias)
+		for i := range rightResult.Columns {
+			originalName := rightResult.Columns[i].Name
+			rightResult.Columns[i].Name = rightAlias + "." + originalName
+			rightResult.Columns[i].TableIdentifier = rightAlias
+			rightResult.Columns[i].OriginalTableName = join.TableName
+		}
 
-		currentRows, err = performJoin(currentRows, prefixedRightRows, join)
+		// Выполняем JOIN
+		currentResult, err = performJoin(currentResult, rightResult, join)
 		if err != nil {
 			return nil, err
 		}
-
-		log.Printf("DEBUG JOIN: after join, currentRows: %d", len(currentRows))
-		if len(currentRows) > 0 {
-			log.Printf("DEBUG JOIN: first joined row keys: %v", getKeys(currentRows[0]))
-		}
 	}
 
-	return currentRows, nil
+	// Применяем WHERE
+	if stmt.Where != nil {
+		currentResult = revaluate.EvaluateFilterRowsByWhere(currentResult, stmt.Where)
+	}
+
+	// Обрабатываем SELECT колонки
+	currentResult, err = processSelectExpressions(stmt, currentResult)
+	if err != nil {
+		return nil, err
+	}
+
+	// Применяем ORDER BY
+	revaluate.EvaluateSortRows(currentResult, stmt.OrderBy)
+
+	// Применяем LIMIT
+	if stmt.Limit > 0 && len(currentResult.Rows) > stmt.Limit {
+		currentResult.Rows = currentResult.Rows[:stmt.Limit]
+	}
+
+	return currentResult, nil
 }
 
 // prefixRowKeys adds table/alias prefix to all column names in rows
@@ -500,86 +587,118 @@ func prefixRowKeys(rows []map[string]interface{}, prefix string) []map[string]in
 	return prefixedRows
 }
 
-func performJoin(leftRows, rightRows []map[string]interface{}, join statements.JoinClause) ([]map[string]interface{}, error) {
-	var result []map[string]interface{}
+func performJoin(leftRows, rightRows *table.ExecuteResult, join statements.JoinClause) (*table.ExecuteResult, error) {
+	// Собираем итоговые колонки: left + right, с корректными Idx
+	combColumns := make([]table.TableColumn, 0, len(leftRows.Columns)+len(rightRows.Columns))
+
+	for i, c := range leftRows.Columns {
+		cc := c
+		cc.Idx = i
+		combColumns = append(combColumns, cc)
+	}
+	for i, c := range rightRows.Columns {
+		cc := c
+		cc.Idx = len(leftRows.Columns) + i
+		combColumns = append(combColumns, cc)
+	}
+
+	rightPad := make([]interface{}, len(rightRows.Columns)) // nil-ы по умолчанию
+
+	evalOn := func(combRow []interface{}) (bool, error) {
+		if join.OnCondition == nil {
+			return true, nil
+		}
+		expr, ok := join.OnCondition.(*parser.ExpressionContext)
+		if !ok {
+			return false, fmt.Errorf("unsupported OnCondition type: %T", join.OnCondition)
+		}
+		val, err := revaluate.EvaluateExpressionContext(expr, &table.ResultRow{
+			Row:     combRow,
+			Columns: combColumns,
+		})
+		if err != nil {
+			logger.Errorf("Error evaluating JOIN ON condition: %v", err)
+			return false, err
+		}
+
+		if valBool, ok := val.(*rmodels.BoolExpression); ok {
+			return valBool.Value, nil
+		} else if resultVal, ok := val.(*rmodels.ResultRowsExpression); ok {
+			// Пробуем извлечь булево значение из результата
+			if len(resultVal.Row.Rows) > 0 && len(resultVal.Row.Rows[0]) > 0 {
+				if boolVal, ok := resultVal.Row.Rows[0][0].(bool); ok {
+					return boolVal, nil
+				}
+			}
+			logger.Errorf("ON condition returned ResultRowsExpression with non-bool value: %v", resultVal)
+			return false, fmt.Errorf("ON condition did not evaluate to bool, got %T with value %v", val, resultVal.Row.Rows)
+		} else {
+			logger.Errorf("ON condition returned unexpected type: %T", val)
+			return false, fmt.Errorf("OnCondition did not evaluate to bool, got %T", val)
+		}
+	}
+
+	resultRows := make([][]interface{}, 0)
+
 	switch join.Type {
 	case "LEFT":
-		for _, leftRow := range leftRows {
+		for _, lrow := range leftRows.Rows {
 			found := false
-			for _, rightRow := range rightRows {
-				combined := make(map[string]interface{})
-				// Merge left and right rows (both already have prefixed keys)
-				for k, v := range leftRow {
-					combined[k] = v
+
+			for _, rrow := range rightRows.Rows {
+				combRow := make([]interface{}, 0, len(lrow)+len(rrow))
+				combRow = append(combRow, lrow...)
+				combRow = append(combRow, rrow...)
+
+				ok, err := evalOn(combRow)
+				if err != nil {
+					return nil, err
 				}
-				for k, v := range rightRow {
-					combined[k] = v
+				if !ok {
+					continue
 				}
-				// Check ON condition
-				if join.OnCondition != nil {
-					if expr, ok := join.OnCondition.(*parser.ExpressionContext); ok {
-						val, err := rhelpers.EvaluateExpressionContext(expr, combined)
-						if err != nil {
-							return nil, err
-						}
-						if val == nil || val == false || val == 0 {
-							continue
-						}
-					}
-				}
-				result = append(result, combined)
+
+				resultRows = append(resultRows, combRow)
 				found = true
 			}
+
 			if !found {
-				// Add leftRow with nulls for right columns
-				combined := make(map[string]interface{})
-				for k, v := range leftRow {
-					combined[k] = v
-				}
-				// For right columns, set to nil
-				for _, rightRow := range rightRows {
-					for k := range rightRow {
-						if _, ok := combined[k]; !ok {
-							combined[k] = nil
-						}
-					}
-					break // Only need column names from one row
-				}
-				result = append(result, combined)
+				// Левую строку оставляем, правую часть заполняем nil-ами
+				combRow := make([]interface{}, 0, len(lrow)+len(rightPad))
+				combRow = append(combRow, lrow...)
+				combRow = append(combRow, rightPad...)
+				resultRows = append(resultRows, combRow)
 			}
 		}
+
 	case "INNER", "":
-		// Default to INNER
-		for _, leftRow := range leftRows {
-			for _, rightRow := range rightRows {
-				combined := make(map[string]interface{})
-				// Merge left and right rows (both already have prefixed keys)
-				for k, v := range leftRow {
-					combined[k] = v
+		fallthrough
+	default:
+		// Любой другой тип пока трактуем как INNER
+		for _, lrow := range leftRows.Rows {
+			for _, rrow := range rightRows.Rows {
+				combRow := make([]interface{}, 0, len(lrow)+len(rrow))
+				combRow = append(combRow, lrow...)
+				combRow = append(combRow, rrow...)
+
+				ok, err := evalOn(combRow)
+				if err != nil {
+					logger.Errorf("JOIN ON error: %v. Skipping this row combination", err)
+					continue
 				}
-				for k, v := range rightRow {
-					combined[k] = v
+				if !ok {
+					continue
 				}
-				// Check ON condition
-				if join.OnCondition != nil {
-					if expr, ok := join.OnCondition.(*parser.ExpressionContext); ok {
-						val, err := rhelpers.EvaluateExpressionContext(expr, combined)
-						if err != nil {
-							return nil, err
-						}
-						if val == nil || val == false || val == 0 {
-							continue
-						}
-					}
-				}
-				result = append(result, combined)
+
+				resultRows = append(resultRows, combRow)
 			}
 		}
-	default:
-		// For now, treat as INNER
-		return performJoin(leftRows, rightRows, statements.JoinClause{Type: "INNER", TableName: join.TableName, Alias: join.Alias, OnCondition: join.OnCondition})
 	}
-	return result, nil
+
+	return &table.ExecuteResult{
+		Rows:    resultRows,
+		Columns: combColumns,
+	}, nil
 }
 
 func getKeys(m map[string]interface{}) []string {

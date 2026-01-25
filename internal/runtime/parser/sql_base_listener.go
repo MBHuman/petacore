@@ -93,12 +93,6 @@ func (s *BasesqlListener) EnterSetStatement(ctx *SetStatementContext) {}
 // ExitSetStatement is called when production setStatement is exited.
 func (s *BasesqlListener) ExitSetStatement(ctx *SetStatementContext) {}
 
-// EnterDescribeStatement is called when production describeStatement is entered.
-func (s *BasesqlListener) EnterDescribeStatement(ctx *DescribeStatementContext) {}
-
-// ExitDescribeStatement is called when production describeStatement is exited.
-func (s *BasesqlListener) ExitDescribeStatement(ctx *DescribeStatementContext) {}
-
 // EnterShowStatement is called when production showStatement is entered.
 func (s *BasesqlListener) EnterShowStatement(ctx *ShowStatementContext) {}
 
@@ -123,11 +117,23 @@ func (s *BasesqlListener) EnterSelectItem(ctx *SelectItemContext) {}
 // ExitSelectItem is called when production selectItem is exited.
 func (s *BasesqlListener) ExitSelectItem(ctx *SelectItemContext) {}
 
+// EnterSelectAll is called when production selectAll is entered.
+func (s *BasesqlListener) EnterSelectAll(ctx *SelectAllContext) {}
+
+// ExitSelectAll is called when production selectAll is exited.
+func (s *BasesqlListener) ExitSelectAll(ctx *SelectAllContext) {}
+
 // EnterFromClause is called when production fromClause is entered.
 func (s *BasesqlListener) EnterFromClause(ctx *FromClauseContext) {}
 
 // ExitFromClause is called when production fromClause is exited.
 func (s *BasesqlListener) ExitFromClause(ctx *FromClauseContext) {}
+
+// EnterTableFactor is called when production tableFactor is entered.
+func (s *BasesqlListener) EnterTableFactor(ctx *TableFactorContext) {}
+
+// ExitTableFactor is called when production tableFactor is exited.
+func (s *BasesqlListener) ExitTableFactor(ctx *TableFactorContext) {}
 
 // EnterJoinClause is called when production joinClause is entered.
 func (s *BasesqlListener) EnterJoinClause(ctx *JoinClauseContext) {}
@@ -219,6 +225,12 @@ func (s *BasesqlListener) EnterMultiplicativeExpression(ctx *MultiplicativeExpre
 // ExitMultiplicativeExpression is called when production multiplicativeExpression is exited.
 func (s *BasesqlListener) ExitMultiplicativeExpression(ctx *MultiplicativeExpressionContext) {}
 
+// EnterUnaryExpression is called when production unaryExpression is entered.
+func (s *BasesqlListener) EnterUnaryExpression(ctx *UnaryExpressionContext) {}
+
+// ExitUnaryExpression is called when production unaryExpression is exited.
+func (s *BasesqlListener) ExitUnaryExpression(ctx *UnaryExpressionContext) {}
+
 // EnterCastExpression is called when production castExpression is entered.
 func (s *BasesqlListener) EnterCastExpression(ctx *CastExpressionContext) {}
 
@@ -242,6 +254,12 @@ func (s *BasesqlListener) EnterPrimaryExpression(ctx *PrimaryExpressionContext) 
 
 // ExitPrimaryExpression is called when production primaryExpression is exited.
 func (s *BasesqlListener) ExitPrimaryExpression(ctx *PrimaryExpressionContext) {}
+
+// EnterSubqueryExpression is called when production subqueryExpression is entered.
+func (s *BasesqlListener) EnterSubqueryExpression(ctx *SubqueryExpressionContext) {}
+
+// ExitSubqueryExpression is called when production subqueryExpression is exited.
+func (s *BasesqlListener) ExitSubqueryExpression(ctx *SubqueryExpressionContext) {}
 
 // EnterCaseExpression is called when production caseExpression is entered.
 func (s *BasesqlListener) EnterCaseExpression(ctx *CaseExpressionContext) {}

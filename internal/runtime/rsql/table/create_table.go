@@ -7,7 +7,13 @@ import (
 )
 
 // CreateTable создает новую таблицу
-func (t *Table) CreateTable(name string, columns []ColumnDef, ifNotExists bool) error {
+func (t *Table) CreateTable(
+	name string,
+	columns []ColumnDef,
+	primaryKeys []int,
+	ifNotExists bool,
+	isInformationSchema bool,
+) error {
 	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		// Проверяем, существует ли таблица
 		metaPrefixKey := t.getMetadataPrefixKey()
@@ -22,14 +28,16 @@ func (t *Table) CreateTable(name string, columns []ColumnDef, ifNotExists bool) 
 
 		// Создаем метаданные таблицы
 		meta := TableMetadata{
-			Name:    name,
-			Columns: make(map[string]ColumnMetadata),
+			Name:        name,
+			Columns:     make(map[string]ColumnMetadata),
+			PrimaryKeys: primaryKeys,
 		}
 
 		for _, col := range columns {
 			meta.Columns[col.Name] = ColumnMetadata{
-				Type:         col.Type,
-				IsPrimaryKey: col.IsPrimaryKey,
+				Idx:  col.Idx,
+				Type: col.Type,
+				// IsPrimaryKey: col.IsPrimaryKey,
 				IsNullable:   col.IsNullable,
 				DefaultValue: col.DefaultValue,
 				IsSerial:     col.IsSerial,

@@ -1,8 +1,9 @@
 package visitor
 
 import (
+	"errors"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rhelpers"
+	"petacore/internal/runtime/rhelpers/rparser"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"strconv"
@@ -22,15 +23,17 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 		stmt.IfNotExists = true
 	}
 
+	primaryKeys := make([]int, 0)
+	primaryKeysMap := make(map[int]struct{})
 	// Columns
-	for _, colDef := range ctx.AllColumnDefinition() {
+	for idx, colDef := range ctx.AllColumnDefinition() {
 		col := table.ColumnDef{}
 		if colDef.ColumnName() != nil {
 			col.Name = colDef.ColumnName().GetText()
 		}
 		if colDef.DataType() != nil {
 			dataTypeText := strings.ToUpper(colDef.DataType().GetText())
-			col.Type = rhelpers.ParseDataType(dataTypeText)
+			col.Type = rparser.ParseDataType(dataTypeText)
 			if strings.Contains(dataTypeText, "SERIAL") {
 				col.IsSerial = true
 				col.Type = table.ColTypeInt // SERIAL is integer
@@ -83,16 +86,43 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 
 		// Special handling for PRIMARY KEY column
 		if colDef.PRIMARY() != nil && colDef.KEY() != nil {
-			col.IsPrimaryKey = true
+			primaryKeys = append(primaryKeys, idx+1)
+			primaryKeysMap[idx+1] = struct{}{}
 		}
 
 		// PRIMARY KEY implies NOT NULL
-		if col.IsPrimaryKey {
+		if _, ok := primaryKeysMap[idx+1]; ok {
 			col.IsNullable = false
 		}
 
 		stmt.Columns = append(stmt.Columns, col)
 	}
+
+	allColumnNames := ctx.AllColumnName()
+	if len(primaryKeys) > 0 && len(allColumnNames) > 0 {
+		l.err = errors.New("PRIMARY KEY already defined in column definitions")
+		return // PRIMARY KEY already defined in column definitions
+	}
+
+	for _, colCtx := range allColumnNames {
+		colName := colCtx.GetText()
+		// Find column index
+		for i, col := range stmt.Columns {
+			if col.Name == colName {
+				pkIdx := i + 1
+				// Avoid duplicates
+				if _, exists := primaryKeysMap[pkIdx]; !exists {
+					primaryKeys = append(primaryKeys, pkIdx)
+					primaryKeysMap[pkIdx] = struct{}{}
+					// PRIMARY KEY implies NOT NULL
+					stmt.Columns[i].IsNullable = false
+				}
+				break
+			}
+		}
+	}
+
+	stmt.PrimaryKeys = primaryKeys
 
 	l.stmt = stmt
 }

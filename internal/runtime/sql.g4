@@ -12,7 +12,6 @@ statement
     | dropTableStatement 
     | truncateTableStatement 
     | setStatement 
-    | describeStatement 
     | showStatement 
     ;
 
@@ -21,12 +20,12 @@ statement
 createTableStatement
     : CREATE TABLE (IF NOT EXISTS)? tableName LPAREN 
         columnDefinition (COMMA columnDefinition)* COMMA? 
+        (PRIMARY KEY LPAREN columnName (COMMA columnName)* RPAREN)?
     RPAREN
     ;
 
 columnDefinition
-    : PRIMARY KEY columnName dataType columnConstraints
-    | columnName dataType columnConstraints PRIMARY KEY
+    : columnName dataType columnConstraints PRIMARY KEY
     | columnName dataType columnConstraints
     ;
 
@@ -80,11 +79,6 @@ setStatement
     : SET IDENTIFIER (TO | EQ) value
     ;
 
-// ============ DESCRIBE ======================
-
-describeStatement
-    : DESCRIBE TABLE tableName
-    ;
 
 // ============ SHOW ======================
 
@@ -105,16 +99,25 @@ selectStatement
     ;
 
 selectList
-    : STAR
-    | selectItem (COMMA selectItem)*
+    : selectItem (COMMA selectItem)*
     ;
 
 selectItem
     : expression alias?
+    | selectAll
+    ;
+
+selectAll
+    : STAR
     ;
 
 fromClause
-    : tableName alias? (joinClause)*
+    : tableFactor (joinClause)*
+    ;
+
+tableFactor
+    : tableName alias?
+    | LPAREN selectStatement RPAREN alias        // derived table требует alias
     ;
 
 joinClause
@@ -182,7 +185,11 @@ additiveExpression
     ;
 
 multiplicativeExpression
-    : castExpression ((STAR | SLASH) castExpression)*
+    : unaryExpression ((STAR | SLASH) unaryExpression)*
+    ;
+
+unaryExpression
+    : (PLUS | MINUS)? castExpression
     ;
 
 castExpression
@@ -192,7 +199,7 @@ castExpression
 postfix
     : AT TIME ZONE STRING_LITERAL
     | COLLATE qualifiedName
-    | COLON_COLON typeName
+    | (COLON_COLON typeName)+
     ;
 
 typeName
@@ -201,12 +208,17 @@ typeName
 
 primaryExpression
     : LPAREN expression RPAREN
+    | subqueryExpression
     | caseExpression
     | functionCall
     | extractFunction
     | columnName
     | value
     | PARAMETER
+    ;
+
+subqueryExpression
+    : LPAREN selectStatement RPAREN
     ;
 
 caseExpression
@@ -228,6 +240,13 @@ namePart
     : IDENTIFIER
     | DEFAULT        // чтобы работало pg_catalog.default
     | TEXT_TYPE      // for pg_catalog.text
+    | INT_TYPE       // for casting ::integer, ::int
+    | FLOAT_TYPE     // for casting ::float, ::decimal
+    | BOOL_TYPE      // for casting ::boolean, ::bool
+    | VARCHAR_TYPE   // for casting ::varchar
+    | CHAR_TYPE      // for casting ::char
+    | SERIAL_TYPE    // for casting ::serial
+    | TIMESTAMP_TYPE // for casting ::timestamp
     ;
 
 qualifiedName
@@ -271,7 +290,6 @@ PRIMARY : 'PRIMARY' | 'primary';
 KEY : 'KEY' | 'key';
 DROP : 'DROP' | 'drop';
 TRUNCATE : 'TRUNCATE' | 'truncate';
-DESCRIBE : 'DESCRIBE' | 'describe';
 SET : 'SET' | 'set';
 TO : 'TO' | 'to';
 IF : 'IF' | 'if';
@@ -319,8 +337,8 @@ ZONE : 'ZONE' | 'zone';
 EXTRACT : 'EXTRACT' | 'extract';
 
 STRING_TYPE : 'STRING' | 'string';
-INT_TYPE : 'INT' | 'int' | 'INTEGER' | 'integer';
-FLOAT_TYPE : 'FLOAT' | 'float';
+INT_TYPE : 'INT' | 'int' | 'INTEGER' | 'integer' | 'BIGINT' | 'bigint';
+FLOAT_TYPE : 'FLOAT' | 'float' | 'DECIMAL' | 'decimal';
 BOOL_TYPE : 'BOOL' | 'bool' | 'BOOLEAN' | 'boolean';
 TEXT_TYPE : 'TEXT' | 'text';
 VARCHAR_TYPE : 'VARCHAR' | 'varchar';

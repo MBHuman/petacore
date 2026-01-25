@@ -2,11 +2,13 @@ package visitor
 
 import (
 	"fmt"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rhelpers"
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
 	"strconv"
+
+	"github.com/antlr4-go/antlr/v4"
 )
 
 // TODO пересмотреть, возможно можно проще сделать
@@ -16,15 +18,28 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 	// From clause
 	if ctx.FromClause() != nil {
 		from := &statements.FromClause{}
-		if ctx.FromClause().TableName() != nil {
-			from.TableName = ctx.FromClause().TableName().GetText()
-			// Table alias
-			if alias := ctx.FromClause().Alias(); alias != nil {
-				if id := alias.IDENTIFIER(); id != nil {
-					from.Alias = id.GetText()
+
+		if tableFactor := ctx.FromClause().TableFactor(); tableFactor != nil {
+			if tableName := tableFactor.TableName(); tableName != nil {
+				tableNameText := tableName.GetText()
+
+				from.TableName = tableNameText
+				if tableFactor.Alias() != nil {
+					from.Alias = tableFactor.Alias().GetText()
+				}
+			}
+
+			if subSeleqct := tableFactor.SelectStatement(); subSeleqct != nil {
+				logger.Debugf("DEBUG: parsing FROM subquery")
+				subStmtListener := &sqlListener{}
+				antlr.ParseTreeWalkerDefault.Walk(subStmtListener, subSeleqct)
+				from.SelectStatement = subStmtListener.stmt.(*statements.SelectStatement)
+				if tableFactor.Alias() != nil {
+					from.Alias = tableFactor.Alias().GetText()
 				}
 			}
 		}
+
 		// Parse joins
 		for _, jc := range ctx.FromClause().AllJoinClause() {
 			join := statements.JoinClause{}
@@ -55,62 +70,72 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 			from.Joins = append(from.Joins, join)
 		}
 		stmt.From = from
-		// For backward compatibility
-		if from.TableName != "" {
-			stmt.TableName = from.TableName
-			stmt.TableAlias = from.Alias
-		}
 	}
 
 	// Columns
 	if ctx.SelectList() != nil {
-		if ctx.SelectList().STAR() != nil {
-			// SELECT *
-			stmt.Columns = []items.SelectItem{{ColumnName: "*"}}
-		} else {
-			// Parse select items
-			for _, item := range ctx.SelectList().AllSelectItem() {
-				selectItem := items.SelectItem{}
-				expr := item.Expression()
-				if expr != nil {
-					// Try to extract simple column or function names for optimization
-					if primExpr := extractPrimaryExpression(expr); primExpr != nil {
-						if primExpr.ColumnName() != nil {
-							selectItem.ColumnName = primExpr.ColumnName().GetText()
-						} else if primExpr.FunctionCall() != nil {
-							fc := primExpr.FunctionCall()
-							funcCall := &items.FunctionCall{}
-							if qn := fc.QualifiedName(); qn != nil {
-								nameParts := qn.AllNamePart()
-								parts := []string{}
-								for _, np := range nameParts {
-									parts = append(parts, np.GetText())
-								}
-								funcCall.Name = parts[len(parts)-1]
-							}
+		for _, item := range ctx.SelectList().AllSelectItem() {
+			logger.Debugf("Parsing select item: %s", item.GetText())
+			selectItem := items.SelectItem{}
 
-							// Args - now expressions
-							for _, argExpr := range fc.AllExpression() {
-								value := rhelpers.ParseExpression(argExpr, nil)
-								funcCall.Args = append(funcCall.Args, value)
+			if selectAll := item.SelectAll(); selectAll != nil {
+				selectItem.IsSelectAll = true
+				stmt.Columns = append(stmt.Columns, selectItem)
+			} else if expr := item.Expression(); expr != nil {
+				// Try to extract simple column or function names for optimization
+				if primExpr := extractPrimaryExpression(expr); primExpr != nil {
+					if primExpr.ColumnName() != nil {
+						fullName := primExpr.ColumnName().GetText()
+						// Parse qualified name like "c.name" or "customers.name"
+						if qn := primExpr.ColumnName().QualifiedName(); qn != nil {
+							parts := qn.AllNamePart()
+							if len(parts) == 2 {
+								// table_alias.column_name
+								selectItem.TableAlias = parts[0].GetText()
+								selectItem.ColumnName = parts[1].GetText()
+							} else if len(parts) == 1 {
+								// just column_name
+								selectItem.ColumnName = parts[0].GetText()
+							} else {
+								// schema.table.column or more complex
+								selectItem.ColumnName = fullName
 							}
-							selectItem.Function = funcCall
 						} else {
-							// Complex expression
-							selectItem.ExpressionContext = expr
+							selectItem.ColumnName = fullName
 						}
-					} else {
-						// Complex expression
-					}
+					} else if primExpr.FunctionCall() != nil {
+						fc := primExpr.FunctionCall()
+						funcCall := &items.FunctionCall{}
+						if qn := fc.QualifiedName(); qn != nil {
+							nameParts := qn.AllNamePart()
+							parts := []string{}
+							for _, np := range nameParts {
+								parts = append(parts, np.GetText())
+							}
+							funcCall.Name = parts[len(parts)-1]
+						}
 
-					// Alias
-					if alias := item.Alias(); alias != nil {
-						if id := alias.IDENTIFIER(); id != nil {
-							selectItem.Alias = id.GetText()
+						// Args - expression contexts
+						for _, argExpr := range fc.AllExpression() {
+							funcCall.Args = append(funcCall.Args, argExpr)
 						}
+						selectItem.Function = funcCall
+					} else {
+						// Complex expression - save ExpressionContext
+						selectItem.ExpressionContext = expr
 					}
-					stmt.Columns = append(stmt.Columns, selectItem)
+				} else {
+					// Complex expression - save ExpressionContext
+					selectItem.ExpressionContext = expr
 				}
+
+				// Alias
+				if alias := item.Alias(); alias != nil {
+					if id := alias.IDENTIFIER(); id != nil {
+						selectItem.Alias = id.GetText()
+					}
+				}
+				stmt.Columns = append(stmt.Columns, selectItem)
 			}
 		}
 
@@ -118,9 +143,30 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 		if ctx.OrderByClause() != nil {
 			for _, item := range ctx.OrderByClause().AllOrderByItem() {
 				orderItem := items.OrderByItem{}
-				if item.Expression() != nil {
-					orderItem.ExpressionContext = item.Expression()
+
+				// Извлекаем имя колонки или индекс из expression
+				if expr := item.Expression(); expr != nil {
+					// Пробуем извлечь простое выражение
+					if primExpr := extractPrimaryExpression(expr); primExpr != nil {
+						// Проверяем, это число (индекс колонки) или имя колонки
+						if primExpr.Value() != nil {
+							valueText := primExpr.Value().GetText()
+							// Пробуем распарсить как число
+							if idx, err := strconv.Atoi(valueText); err == nil && idx > 0 {
+								orderItem.ColumnIndex = idx
+							} else {
+								// Не число - используем как имя
+								orderItem.ColumnName = valueText
+							}
+						} else if primExpr.ColumnName() != nil {
+							orderItem.ColumnName = primExpr.ColumnName().GetText()
+						}
+					} else {
+						// Сложное выражение - берем как текст
+						orderItem.ColumnName = expr.GetText()
+					}
 				}
+
 				if item.ASC() != nil {
 					orderItem.Direction = "ASC"
 				} else if item.DESC() != nil {
@@ -128,6 +174,7 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 				} else {
 					orderItem.Direction = "ASC" // default
 				}
+
 				stmt.OrderBy = append(stmt.OrderBy, orderItem)
 			}
 		}
@@ -221,13 +268,23 @@ func extractPrimaryExpression(expr parser.IExpressionContext) parser.IPrimaryExp
 		return nil // has multiplication/division
 	}
 
-	// multiplicativeExpression -> castExpression (if only one)
-	castExprs := multExpr.AllCastExpression()
-	if len(castExprs) != 1 {
+	// multiplicativeExpression -> unaryExpression (if only one)
+	unaryExprs := multExpr.AllUnaryExpression()
+	if len(unaryExprs) != 1 {
 		return nil
 	}
 
-	castExpr := castExprs[0]
+	unaryExpr := unaryExprs[0]
+	if unaryExpr.PLUS() != nil || unaryExpr.MINUS() != nil {
+		return nil // has unary operator
+	}
+
+	// unaryExpression -> castExpression
+	castExpr := unaryExpr.CastExpression()
+	if castExpr == nil {
+		return nil
+	}
+
 	if len(castExpr.AllPostfix()) > 0 {
 		return nil // has postfix (cast, collate, at time zone)
 	}

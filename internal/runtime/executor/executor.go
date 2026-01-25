@@ -3,18 +3,24 @@ package executor
 import (
 	"fmt"
 	"petacore/internal/runtime/rsql/statements"
+	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
 )
 
 type ExecutorContext struct {
-	Database string
-	Schema   string
+	Database                string
+	Schema                  string
+	IsInformationSchemaInit bool
 }
 
-func ExecuteStatement(stmt statements.SQLStatement, storage *storage.DistributedStorageVClock, sessionParams map[string]string) (interface{}, error) {
+func ExecuteStatement(stmt statements.SQLStatement, storage *storage.DistributedStorageVClock, sessionParams map[string]string) (*table.ExecuteResult, error) {
 	exCtx := ExecutorContext{
 		Database: "testdb",
 		Schema:   "public",
+	}
+
+	if val, ok := sessionParams["__information_schema"]; ok {
+		exCtx.IsInformationSchemaInit = val == "true"
 	}
 
 	switch s := stmt.(type) {
@@ -32,8 +38,6 @@ func ExecuteStatement(stmt statements.SQLStatement, storage *storage.Distributed
 		return nil, ExecuteTruncateTable(s, storage, exCtx)
 	case *statements.SetStatement:
 		return nil, ExecuteSet(s, storage, sessionParams, exCtx)
-	case *statements.DescribeStatement:
-		return ExecuteDescribe(s, storage, exCtx)
 	case *statements.ShowStatement:
 		return ExecuteShow(s, storage, sessionParams, exCtx)
 	default:

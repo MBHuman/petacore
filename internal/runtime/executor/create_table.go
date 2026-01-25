@@ -13,9 +13,9 @@ func ExecuteCreateTable(stmt *statements.CreateTableStatement, store *storage.Di
 	columns := make([]table.ColumnDef, len(stmt.Columns))
 	for i, col := range stmt.Columns {
 		columns[i] = table.ColumnDef{
+			Idx:          i + 1,
 			Name:         col.Name,
 			Type:         col.Type,
-			IsPrimaryKey: col.IsPrimaryKey,
 			IsNullable:   col.IsNullable,
 			IsUnique:     col.IsUnique,
 			IsSerial:     col.IsSerial,
@@ -23,5 +23,11 @@ func ExecuteCreateTable(stmt *statements.CreateTableStatement, store *storage.Di
 		}
 	}
 
-	return tbl.CreateTable(stmt.TableName, columns, stmt.IfNotExists)
+	return tbl.CreateTable(
+		stmt.TableName,
+		columns,
+		stmt.PrimaryKeys,
+		stmt.IfNotExists,
+		exCtx.IsInformationSchemaInit,
+	)
 }

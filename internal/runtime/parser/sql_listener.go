@@ -44,9 +44,6 @@ type sqlListener interface {
 	// EnterSetStatement is called when entering the setStatement production.
 	EnterSetStatement(c *SetStatementContext)
 
-	// EnterDescribeStatement is called when entering the describeStatement production.
-	EnterDescribeStatement(c *DescribeStatementContext)
-
 	// EnterShowStatement is called when entering the showStatement production.
 	EnterShowStatement(c *ShowStatementContext)
 
@@ -59,8 +56,14 @@ type sqlListener interface {
 	// EnterSelectItem is called when entering the selectItem production.
 	EnterSelectItem(c *SelectItemContext)
 
+	// EnterSelectAll is called when entering the selectAll production.
+	EnterSelectAll(c *SelectAllContext)
+
 	// EnterFromClause is called when entering the fromClause production.
 	EnterFromClause(c *FromClauseContext)
+
+	// EnterTableFactor is called when entering the tableFactor production.
+	EnterTableFactor(c *TableFactorContext)
 
 	// EnterJoinClause is called when entering the joinClause production.
 	EnterJoinClause(c *JoinClauseContext)
@@ -107,6 +110,9 @@ type sqlListener interface {
 	// EnterMultiplicativeExpression is called when entering the multiplicativeExpression production.
 	EnterMultiplicativeExpression(c *MultiplicativeExpressionContext)
 
+	// EnterUnaryExpression is called when entering the unaryExpression production.
+	EnterUnaryExpression(c *UnaryExpressionContext)
+
 	// EnterCastExpression is called when entering the castExpression production.
 	EnterCastExpression(c *CastExpressionContext)
 
@@ -118,6 +124,9 @@ type sqlListener interface {
 
 	// EnterPrimaryExpression is called when entering the primaryExpression production.
 	EnterPrimaryExpression(c *PrimaryExpressionContext)
+
+	// EnterSubqueryExpression is called when entering the subqueryExpression production.
+	EnterSubqueryExpression(c *SubqueryExpressionContext)
 
 	// EnterCaseExpression is called when entering the caseExpression production.
 	EnterCaseExpression(c *CaseExpressionContext)
@@ -185,9 +194,6 @@ type sqlListener interface {
 	// ExitSetStatement is called when exiting the setStatement production.
 	ExitSetStatement(c *SetStatementContext)
 
-	// ExitDescribeStatement is called when exiting the describeStatement production.
-	ExitDescribeStatement(c *DescribeStatementContext)
-
 	// ExitShowStatement is called when exiting the showStatement production.
 	ExitShowStatement(c *ShowStatementContext)
 
@@ -200,8 +206,14 @@ type sqlListener interface {
 	// ExitSelectItem is called when exiting the selectItem production.
 	ExitSelectItem(c *SelectItemContext)
 
+	// ExitSelectAll is called when exiting the selectAll production.
+	ExitSelectAll(c *SelectAllContext)
+
 	// ExitFromClause is called when exiting the fromClause production.
 	ExitFromClause(c *FromClauseContext)
+
+	// ExitTableFactor is called when exiting the tableFactor production.
+	ExitTableFactor(c *TableFactorContext)
 
 	// ExitJoinClause is called when exiting the joinClause production.
 	ExitJoinClause(c *JoinClauseContext)
@@ -248,6 +260,9 @@ type sqlListener interface {
 	// ExitMultiplicativeExpression is called when exiting the multiplicativeExpression production.
 	ExitMultiplicativeExpression(c *MultiplicativeExpressionContext)
 
+	// ExitUnaryExpression is called when exiting the unaryExpression production.
+	ExitUnaryExpression(c *UnaryExpressionContext)
+
 	// ExitCastExpression is called when exiting the castExpression production.
 	ExitCastExpression(c *CastExpressionContext)
 
@@ -259,6 +274,9 @@ type sqlListener interface {
 
 	// ExitPrimaryExpression is called when exiting the primaryExpression production.
 	ExitPrimaryExpression(c *PrimaryExpressionContext)
+
+	// ExitSubqueryExpression is called when exiting the subqueryExpression production.
+	ExitSubqueryExpression(c *SubqueryExpressionContext)
 
 	// ExitCaseExpression is called when exiting the caseExpression production.
 	ExitCaseExpression(c *CaseExpressionContext)

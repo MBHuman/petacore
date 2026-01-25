@@ -2,8 +2,9 @@ package functions
 
 import (
 	"fmt"
-	"log"
 	"math"
+	"petacore/internal/logger"
+	"petacore/internal/runtime/rsql/table"
 	"strconv"
 	"strings"
 )
@@ -11,21 +12,36 @@ import (
 // ExecuteFunction executes a built-in function
 // TODO добавить поддержку функций с помощью SDK плагинов
 // TODO добавить поддержку SQL функций, определенных пользователем, должна быть поддержка CREATE FUNCTION И CREATE PROCEDURE
-func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
-	log.Printf("Executing function: %s with args: %v", name, args)
+func ExecuteFunction(name string, args []interface{}) (*table.ExecuteResult, error) {
+	logger.Debugf("Executing function: %s with args: %v", name, args)
 	switch strings.ToUpper(name) {
 	case "CURRENT_DATABASE":
 		result := "testdb"
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "current_database", Type: table.ColTypeString},
+			},
+		}, nil
 	case "CURRENT_SCHEMA":
 		result := "public"
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "current_schema", Type: table.ColTypeString},
+			},
+		}, nil
 	case "CURRENT_USER":
 		result := "postgres"
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "current_user", Type: table.ColTypeString},
+			},
+		}, nil
 	case "CURRENT_SCHEMAS":
 		// current_schemas(false) returns {public}
 		var result interface{}
@@ -38,17 +54,32 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 		} else {
 			result = []string{"public"}
 		}
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "current_schemas", Type: table.ColTypeString},
+			},
+		}, nil
 	case "VERSION":
 		result := "PostgreSQL 14.0 (PetaCore)"
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "version", Type: table.ColTypeString},
+			},
+		}, nil
 	case "PG_POSTMASTER_START_TIME":
 		// Return a fixed timestamp for simplicity
 		result := "2023-01-01 00:00:00+00"
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "pg_postmaster_start_time", Type: table.ColTypeString},
+			},
+		}, nil
 	case "EXTRACT":
 		if len(args) != 2 {
 			return nil, fmt.Errorf("extract requires two arguments")
@@ -65,8 +96,13 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 				// Parse timestamp, for simplicity assume format
 				// Return fixed unix for now
 				result := float64(1672531200) // 2023-01-01 00:00:00 UTC
-				log.Printf("Function %s result: %v", name, result)
-				return result, nil
+				logger.Debugf("Function %s result: %v", name, result)
+				return &table.ExecuteResult{
+					Rows: [][]interface{}{{result}},
+					Columns: []table.TableColumn{
+						{Name: "extract", Type: table.ColTypeFloat},
+					},
+				}, nil
 			}
 			return nil, fmt.Errorf("extract epoch source must be timestamp")
 		}
@@ -75,7 +111,7 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("round requires at least one argument")
 		}
-		log.Printf("ROUND args[0] type: %T, value: %v", args[0], args[0])
+		logger.Debugf("ROUND args[0] type: %T, value: %v", args[0], args[0])
 		var val float64
 		switch v := args[0].(type) {
 		case float64:
@@ -93,8 +129,13 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 		}
 		// For simplicity, round to nearest integer
 		result := int(math.Round(val))
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "round", Type: table.ColTypeInt},
+			},
+		}, nil
 	case "MIN":
 		if len(args) == 0 {
 			return nil, fmt.Errorf("min requires at least one argument")
@@ -118,8 +159,13 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 				}
 			}
 		}
-		log.Printf("Function %s result: %v", name, minVal)
-		return minVal, nil
+		logger.Debugf("Function %s result: %v", name, minVal)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{minVal}},
+			Columns: []table.TableColumn{
+				{Name: "min", Type: table.ColTypeString},
+			},
+		}, nil
 	case "MAX":
 		if len(args) == 0 {
 			return nil, fmt.Errorf("max requires at least one argument")
@@ -143,8 +189,13 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 				}
 			}
 		}
-		log.Printf("Function %s result: %v", name, maxVal)
-		return maxVal, nil
+		logger.Debugf("Function %s result: %v", name, maxVal)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{maxVal}},
+			Columns: []table.TableColumn{
+				{Name: "max", Type: table.ColTypeString},
+			},
+		}, nil
 	case "PG_TABLE_IS_VISIBLE":
 		// pg_table_is_visible(oid) - check if table is visible in search path
 		// For simplicity, always return true
@@ -152,10 +203,48 @@ func ExecuteFunction(name string, args []interface{}) (interface{}, error) {
 			return nil, fmt.Errorf("pg_table_is_visible requires exactly one argument")
 		}
 		result := true
-		log.Printf("Function %s result: %v", name, result)
-		return result, nil
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "pg_table_is_visible", Type: table.ColTypeBool},
+			},
+		}, nil
+
+	case "PG_GET_USERBYID":
+		// pg_get_userbyid(uid) - get username by user ID
+		if len(args) != 1 {
+			return nil, fmt.Errorf("pg_get_userbyid requires exactly one argument")
+		}
+		var uid int
+		switch v := args[0].(type) {
+		case int:
+			uid = v
+		case int32:
+			uid = int(v)
+		case int64:
+			uid = int(v)
+		case float64:
+			uid = int(v)
+		default:
+			return nil, fmt.Errorf("pg_get_userbyid argument must be integer")
+		}
+		// For simplicity, return "postgres" for uid 10, else "user<uid>"
+		var result string
+		if uid == 10 {
+			result = "postgres"
+		} else {
+			result = fmt.Sprintf("user%d", uid)
+		}
+		logger.Debugf("Function %s result: %v", name, result)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{result}},
+			Columns: []table.TableColumn{
+				{Name: "pg_get_userbyid", Type: table.ColTypeString},
+			},
+		}, nil
 	default:
-		log.Printf("Unknown function: %s", name)
+		logger.Debugf("Unknown function: %s", name)
 		return nil, fmt.Errorf("unknown function: %s", name)
 	}
 }

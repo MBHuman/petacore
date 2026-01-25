@@ -6,6 +6,7 @@ import "petacore/internal/runtime/rsql/table"
 type CreateTableStatement struct {
 	TableName   string
 	Columns     []table.ColumnDef
+	PrimaryKeys []int
 	IfNotExists bool
 }
 

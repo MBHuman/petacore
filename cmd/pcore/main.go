@@ -2,18 +2,25 @@ package main
 
 import (
 	"fmt"
-	"log"
+
 	"os"
 	"os/signal"
 	"petacore/internal/core"
 	"petacore/internal/distributed"
+	"petacore/internal/logger"
+	"petacore/internal/runtime/system"
 	"petacore/internal/runtime/wire"
 	"petacore/internal/storage"
 	"syscall"
+
+	"go.uber.org/zap"
 )
 
 func main() {
-	// log.SetOutput(io.Discard)
+	logger.Init(true)
+	level := zap.NewAtomicLevel()
+	level.SetLevel(zap.DebugLevel)
+	logger.SetLevel(level)
 	var kv distributed.KVStore
 	var err error
 
@@ -28,6 +35,11 @@ func main() {
 	}
 	defer store.Stop()
 
+	// Initialize system tables
+	if err := system.InitializeSystemTables(store); err != nil {
+		logger.Warnf("Failed to initialize system tables: %v", err)
+	}
+
 	server := wire.NewWireServer(store, "5432")
 	if err := server.Start(); err != nil {
 		panic(err)
@@ -38,7 +50,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Println("Pg server started")
+	logger.Info("Pg server started")
 
 	<-sigCh
 	fmt.Println("Shutting down...")

@@ -1,23 +1,39 @@
 package table
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"petacore/internal/logger"
 	"petacore/internal/storage"
 	"petacore/internal/utils"
 	"strconv"
 )
+
+type ExecuteResult struct {
+	Rows    [][]interface{}
+	Columns []TableColumn
+}
+
+type ResultRow struct {
+	Row     []interface{}
+	Columns []TableColumn
+}
+
+type SelectColumn struct {
+	Name  string
+	IsAll bool
+}
 
 type ITable interface {
 	CreateTable(name string, columns []ColumnDef, ifNotExists bool) error
 	Insert(tableName string, values map[string]interface{}) error
 	Select(
 		tableName string,
-		columns []string,
+		columns []SelectColumn,
 		where map[string]interface{},
 		limit int,
-	) ([]map[string]interface{}, error)
+	) (*ExecuteResult, error)
 	DropTable(name string) error
 }
 
@@ -29,17 +45,19 @@ type Table struct {
 }
 
 type TableMetadata struct {
-	Name    string
-	Columns map[string]ColumnMetadata
+	Name        string
+	Columns     map[string]ColumnMetadata
+	PrimaryKeys []int
 }
 
 type ColumnMetadata struct {
-	Type         ColType
-	IsPrimaryKey bool
+	Type ColType
+	// IsPrimaryKey bool
 	IsNullable   bool
 	DefaultValue interface{}
 	IsSerial     bool
 	IsUnique     bool
+	Idx          int
 }
 
 type Row map[string]interface{}
@@ -139,15 +157,20 @@ func (t *Table) genSequenceKey(tx *storage.DistributedTransactionVClock, colName
 		}
 	}
 
-	log.Printf("Using sequence prefix key %s with value %d", sequencePrefixKey, seqValue)
+	logger.Debugf("Using sequence prefix key %s with value %d", sequencePrefixKey, seqValue)
 	tx.Write([]byte(sequencePrefixKey), strconv.FormatUint(seqValue+1, 10))
 	return seqValue
 }
 
-func (t *Table) getRowKey(rowID string) string {
+func (t *Table) getRowKey(primaryKeys []interface{}) []byte {
 	tablePrefixKey := t.getTablePrefixKey()
-	rowKey := utils.GenTableRowKey(tablePrefixKey, rowID)
-	return rowKey
+	var buf bytes.Buffer
+	for _, pk := range primaryKeys {
+		buf.WriteString(fmt.Sprintf("%v", pk))
+	}
+	rowID := buf.Bytes()
+	rowKey := utils.GenTableRowKey(tablePrefixKey, string(rowID))
+	return []byte(rowKey)
 }
 
 func (t *Table) getRowPrefixKey() string {

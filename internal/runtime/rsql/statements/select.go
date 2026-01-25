@@ -3,12 +3,14 @@ package statements
 import "petacore/internal/runtime/rsql/items"
 
 type FromClause struct {
-	TableName string
-	Alias     string
-	Joins     []JoinClause
+	Alias           string
+	Joins           []JoinClause
+	TableName       string
+	SelectStatement *SelectStatement
 }
 
 type JoinClause struct {
+	// TODO перевести на enum
 	Type        string // INNER, LEFT, etc.
 	TableName   string
 	Alias       string
@@ -16,7 +18,6 @@ type JoinClause struct {
 }
 
 type SelectStatement struct {
-	TableName  string
 	TableAlias string
 	From       *FromClause
 	Columns    []items.SelectItem

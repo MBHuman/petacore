@@ -2,259 +2,19 @@ package rhelpers
 
 import (
 	"fmt"
-	"log"
+	"reflect"
 	"regexp"
-	"sort"
 
-	"petacore/internal/runtime/functions"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rsql/items"
-	"petacore/internal/runtime/rsql/table"
+	"petacore/internal/runtime/rhelpers/rmodels"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // TODO пропал concatenation в evaluate - нужно добавить обратно
 
-func ParseDataType(typeStr string) table.ColType {
-	switch strings.ToUpper(typeStr) {
-	case "STRING", "TEXT":
-		return table.ColTypeString
-	case "INT":
-		return table.ColTypeInt
-	case "FLOAT":
-		return table.ColTypeFloat
-	case "BOOL":
-		return table.ColTypeBool
-	default:
-		return table.ColTypeString
-	}
-}
-
-// parseExpression evaluates an ANTLR expression context and returns the value
-func ParseExpression(expr parser.IExpressionContext, row map[string]interface{}) interface{} {
-	if expr == nil {
-		return nil
-	}
-
-	// New grammar: expression -> orExpression -> andExpression -> ... -> primaryExpression
-	// Just parse the orExpression which will handle the entire tree
-	if orExpr := expr.OrExpression(); orExpr != nil {
-		return parseOrExpression(orExpr, row)
-	}
-
-	return nil
-}
-
-// parseAdditiveExpression handles addition and subtraction
-func ParseAdditiveExpression(addExpr parser.IAdditiveExpressionContext, row map[string]interface{}) interface{} {
-	if addExpr == nil {
-		return nil
-	}
-
-	// Get the first multiplicative expression
-	multExpr := addExpr.MultiplicativeExpression(0)
-	if multExpr == nil {
-		return nil
-	}
-
-	result := parseMultiplicativeExpression(multExpr, row)
-
-	// Handle additional terms with operators
-	plusOps := addExpr.AllPLUS()
-	minusOps := addExpr.AllMINUS()
-
-	// Merge operators by token index
-	type opInfo struct {
-		op    string
-		index int
-	}
-	var ops []opInfo
-	for _, p := range plusOps {
-		ops = append(ops, opInfo{"+", p.GetSymbol().GetTokenIndex()})
-	}
-	for _, m := range minusOps {
-		ops = append(ops, opInfo{"-", m.GetSymbol().GetTokenIndex()})
-	}
-	// Sort by token index
-	sort.Slice(ops, func(i, j int) bool {
-		return ops[i].index < ops[j].index
-	})
-
-	multExprs := addExpr.AllMultiplicativeExpression()
-	// Skip the first one since we already processed it
-	for i, op := range ops {
-		if i+1 >= len(multExprs) {
-			break
-		}
-		nextValue := parseMultiplicativeExpression(multExprs[i+1], row)
-
-		if op.op == "+" {
-			result = AddValues(result, nextValue)
-		} else if op.op == "-" {
-			result = SubtractValues(result, nextValue)
-		}
-	}
-
-	return result
-}
-
-// parseCaseExpression handles CASE WHEN THEN ELSE END expressions
-func ParseCaseExpression(caseExpr parser.ICaseExpressionContext) interface{} {
-	if caseExpr == nil {
-		return nil
-	}
-
-	// For now, return a placeholder - actual evaluation will be done during execution
-	// We need to store the case expression for later evaluation
-	return &items.CaseExpression{
-		Context: caseExpr,
-	}
-}
-
-// parseConcatExpression handles string concatenation with ||
-func parseConcatExpression(concatExpr parser.IConcatExpressionContext, row map[string]interface{}) interface{} {
-	if concatExpr == nil {
-		return nil
-	}
-
-	// Get all additive expressions to concatenate
-	exprs := concatExpr.AllAdditiveExpression()
-	if len(exprs) == 0 {
-		return nil
-	}
-
-	// If only one expression and no CONCAT operators, return it directly
-	if len(exprs) == 1 && len(concatExpr.AllCONCAT()) == 0 {
-		return ParseAdditiveExpression(exprs[0], row)
-	}
-
-	// Multiple expressions with CONCAT, concatenate as strings
-	result := ""
-	for _, e := range exprs {
-		val := ParseAdditiveExpression(e, row)
-		if val != nil {
-			result += fmt.Sprintf("%v", val)
-		}
-	}
-	return result
-}
-
-// parseExtractFunction handles EXTRACT expressions
-func ParseExtractFunction(extractExpr parser.IExtractFunctionContext, row map[string]interface{}) interface{} {
-	if extractExpr == nil {
-		return nil
-	}
-
-	field := extractExpr.IDENTIFIER().GetText()
-	sourceExpr := extractExpr.Expression()
-	if sourceExpr == nil {
-		return nil
-	}
-
-	source := ParseExpression(sourceExpr, row)
-	args := []interface{}{field, source}
-	value, _ := functions.ExecuteFunction("EXTRACT", args)
-	return value
-}
-
-// parseOrExpression handles OR expressions
-func parseOrExpression(orExpr parser.IOrExpressionContext, row map[string]interface{}) interface{} {
-	if orExpr == nil {
-		return nil
-	}
-
-	andExprs := orExpr.AllAndExpression()
-	if len(andExprs) == 0 {
-		return nil
-	}
-
-	// Evaluate first AND expression
-	result := parseAndExpression(andExprs[0], row)
-
-	// If multiple AND expressions connected by OR
-	for i := 1; i < len(andExprs); i++ {
-		rightVal := parseAndExpression(andExprs[i], row)
-		// OR logic: true if either is true
-		if boolLeft, ok := result.(bool); ok {
-			if boolRight, ok := rightVal.(bool); ok {
-				result = boolLeft || boolRight
-				continue
-			}
-		}
-		// If not bools, treat as truthy values
-		if isTrueHelper(result) || isTrueHelper(rightVal) {
-			result = true
-		} else {
-			result = false
-		}
-	}
-
-	return result
-}
-
-// parseAndExpression handles AND expressions
-func parseAndExpression(andExpr parser.IAndExpressionContext, row map[string]interface{}) interface{} {
-	if andExpr == nil {
-		return nil
-	}
-
-	notExprs := andExpr.AllNotExpression()
-	if len(notExprs) == 0 {
-		return nil
-	}
-
-	// Evaluate first NOT expression
-	result := parseNotExpression(notExprs[0], row)
-
-	// If multiple NOT expressions connected by AND
-	for i := 1; i < len(notExprs); i++ {
-		rightVal := parseNotExpression(notExprs[i], row)
-		// AND logic: true only if both are true
-		if boolLeft, ok := result.(bool); ok {
-			if boolRight, ok := rightVal.(bool); ok {
-				result = boolLeft && boolRight
-				continue
-			}
-		}
-		// If not bools, treat as truthy values
-		if isTrueHelper(result) && isTrueHelper(rightVal) {
-			result = true
-		} else {
-			result = false
-		}
-	}
-
-	return result
-}
-
-// parseNotExpression handles NOT expression
-func parseNotExpression(notExpr parser.INotExpressionContext, row map[string]interface{}) interface{} {
-	if notExpr == nil {
-		return nil
-	}
-
-	compExpr := notExpr.ComparisonExpression()
-	if compExpr == nil {
-		return nil
-	}
-
-	result := parseComparisonExpression(compExpr, row)
-
-	// Apply NOT if present
-	if notExpr.NOT() != nil {
-		if boolVal, ok := result.(bool); ok {
-			return !boolVal
-		}
-		// If not a bool, treat as truthy value
-		return !isTrueHelper(result)
-	}
-
-	return result
-}
-
-func isTrueHelper(value interface{}) bool {
+func IsTrueHelper(value interface{}) bool {
 	if value == nil {
 		return false
 	}
@@ -273,225 +33,116 @@ func isTrueHelper(value interface{}) bool {
 	return true
 }
 
-// parseComparisonExpression handles comparison expressions including IN, LIKE, IS NULL
-func parseComparisonExpression(compExpr parser.IComparisonExpressionContext, row map[string]interface{}) interface{} {
-	if compExpr == nil {
-		return nil
+func EvaluateComparison(left, right *rmodels.ResultRowsExpression, op string) bool {
+	logger.Debugf("Evaluating comparison: left=%v, right=%v, op=%s\n", left, right, op)
+	lv, rv, ok := oneValueSameType(left, right)
+	if !ok {
+		return false
 	}
 
-	// Get the left side (concatExpression)
-	concatExprs := compExpr.AllConcatExpression()
-	if len(concatExprs) == 0 {
-		return nil
-	}
-
-	left := parseConcatExpression(concatExprs[0], row)
-
-	// Check for operator
-	if compExpr.Operator() != nil {
-		if len(concatExprs) < 2 {
-			return left
-		}
-		op := compExpr.Operator().GetText()
-		right := parseConcatExpression(concatExprs[1], row)
-		return EvaluateComparison(left, right, op)
-	}
-
-	// Check for operatorExpr
-	if compExpr.OperatorExpr() != nil {
-		if len(concatExprs) < 2 {
-			return left
-		}
-		opExpr := compExpr.OperatorExpr()
-		right := parseConcatExpression(concatExprs[1], row)
-		return EvaluateOperator(left, right, opExpr)
-	}
-
-	// Check for IN
-	if compExpr.IN() != nil {
-		not := compExpr.NOT() != nil
-		var values []interface{}
-		for _, expr := range compExpr.AllExpression() {
-			values = append(values, ParseExpression(expr, row))
-		}
-		in := contains(values, left)
-		if not {
-			in = !in
-		}
-		return in
-	}
-
-	// Check for LIKE
-	if compExpr.LIKE() != nil {
-		if len(concatExprs) < 2 {
-			return left
-		}
-		not := compExpr.NOT() != nil
-		right := parseConcatExpression(concatExprs[1], row)
-		// Simple LIKE implementation
-		leftStr := fmt.Sprintf("%v", left)
-		rightStr := fmt.Sprintf("%v", right)
-		match := strings.Contains(leftStr, strings.ReplaceAll(strings.ReplaceAll(rightStr, "%", ""), "_", ""))
-		if not {
-			return !match
-		}
-		return match
-	}
-
-	// Check for IS NULL
-	if compExpr.IS() != nil {
-		not := compExpr.NOT() != nil
-		isNull := left == nil
-		if not {
-			return !isNull
-		}
-		return isNull
-	}
-
-	// No operator, just return the left value
-	return left
-}
-
-// Old parseComparisonExpression - keeping for reference
-func parseComparisonExpressionOLD(compExpr parser.IComparisonExpressionContext, row map[string]interface{}) interface{} {
-	if compExpr == nil {
-		return nil
-	}
-
-	left := parseConcatExpression(compExpr.ConcatExpression(0), row)
-
-	if compExpr.Operator() != nil {
-		// Regular comparison
-		op := compExpr.Operator().GetText()
-		right := parseConcatExpression(compExpr.ConcatExpression(1), row)
-		return EvaluateComparison(left, right, op)
-	}
-
-	if compExpr.IN() != nil {
-		// IN expression
-		not := compExpr.NOT() != nil
-		var values []interface{}
-		for _, expr := range compExpr.AllExpression() {
-			values = append(values, ParseExpression(expr, row))
-		}
-		in := contains(values, left)
-		if not {
-			in = !in
-		}
-		return in
-	}
-
-	// No operator or IN, just the left value
-	return left
-}
-
-// evaluateComparison evaluates a comparison operator
-func EvaluateComparison(left, right interface{}, op string) bool {
-	log.Printf("DEBUG evaluateComparison: left=%v (type %T), right=%v (type %T), op=%s\n", left, left, right, right, op)
 	switch op {
-	case "=":
-		result := compareEquals(left, right)
-		log.Printf("DEBUG evaluateComparison: result=%v\n", result)
-		return result
-	case "!=":
-		return left != right
-	case "<":
-		if la, ok := left.(int); ok {
-			if ra, ok := right.(int); ok {
-				return la < ra
-			}
+	case "=", "!=":
+		eq := equal(lv, rv)
+		if op == "!=" {
+			return !eq
 		}
-		if la, ok := left.(float64); ok {
-			if ra, ok := right.(float64); ok {
-				return la < ra
-			}
-		}
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				return la < ra
-			}
-		}
-	case ">":
-		if la, ok := left.(int); ok {
-			if ra, ok := right.(int); ok {
-				return la > ra
-			}
-		}
-		if la, ok := left.(float64); ok {
-			if ra, ok := right.(float64); ok {
-				return la > ra
-			}
-		}
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				return la > ra
-			}
-		}
-	case "<=":
-		if la, ok := left.(int); ok {
-			if ra, ok := right.(int); ok {
-				return la <= ra
-			}
-		}
-		if la, ok := left.(float64); ok {
-			if ra, ok := right.(float64); ok {
-				return la <= ra
-			}
-		}
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				return la <= ra
-			}
-		}
-	case ">=":
-		if la, ok := left.(int); ok {
-			if ra, ok := right.(int); ok {
-				return la >= ra
-			}
-		}
-		if la, ok := left.(float64); ok {
-			if ra, ok := right.(float64); ok {
-				return la >= ra
-			}
-		}
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				return la >= ra
-			}
-		}
+		return eq
+
+	case "<", ">", "<=", ">=":
+		return orderCompare(lv, rv, op)
+
 	case "LIKE":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				return strings.Contains(la, ra) // simple like
-			}
+		ls, ok := lv.(string)
+		if !ok {
+			return false
 		}
-	case "~":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString(ra, la)
-				return matched
-			}
+		return strings.Contains(ls, rv.(string))
+
+	case "~", "!~", "~*", "!~*":
+		ls, ok := lv.(string)
+		if !ok {
+			return false
 		}
-	case "!~":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString(ra, la)
-				return !matched
-			}
+		pat := rv.(string)
+		if op == "~*" || op == "!~*" {
+			pat = "(?i)" + pat
 		}
-	case "~*":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString("(?i)"+ra, la)
-				return matched
-			}
+		matched, err := regexp.MatchString(pat, ls)
+		if err != nil {
+			return false
 		}
-	case "!~*":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString("(?i)"+ra, la)
-				return !matched
-			}
+		if op == "!~" || op == "!~*" {
+			return !matched
+		}
+		return matched
+	}
+
+	return false
+}
+
+func oneValueSameType(l, r *rmodels.ResultRowsExpression) (interface{}, interface{}, bool) {
+	if l == nil || r == nil || len(l.Row.Rows) != 1 || len(r.Row.Rows) != 1 {
+		return nil, nil, false
+	}
+	lv, rv := l.Row.Rows[0][0], r.Row.Rows[0][0]
+	if lv == nil || rv == nil || reflect.TypeOf(lv) != reflect.TypeOf(rv) {
+		return nil, nil, false
+	}
+	return lv, rv, true
+}
+
+func equal(a, b interface{}) bool {
+	switch av := a.(type) {
+	case int:
+		return av == b.(int)
+	case float64:
+		return av == b.(float64)
+	case string:
+		return av == b.(string)
+	case bool:
+		return av == b.(bool)
+	default:
+		return false
+	}
+}
+
+func orderCompare(a, b interface{}, op string) bool {
+	switch av := a.(type) {
+	case int:
+		bv := b.(int)
+		switch op {
+		case "<":
+			return av < bv
+		case ">":
+			return av > bv
+		case "<=":
+			return av <= bv
+		case ">=":
+			return av >= bv
+		}
+	case float64:
+		bv := b.(float64)
+		switch op {
+		case "<":
+			return av < bv
+		case ">":
+			return av > bv
+		case "<=":
+			return av <= bv
+		case ">=":
+			return av >= bv
+		}
+	case string:
+		bv := b.(string)
+		switch op {
+		case "<":
+			return av < bv
+		case ">":
+			return av > bv
+		case "<=":
+			return av <= bv
+		case ">=":
+			return av >= bv
 		}
 	}
 	return false
@@ -550,7 +201,7 @@ func toNumber(val interface{}) (float64, bool) {
 }
 
 // contains checks if value is in the list
-func contains(list []interface{}, value interface{}) bool {
+func Contains(list []interface{}, value interface{}) bool {
 	for _, v := range list {
 		if v == value {
 			return true
@@ -559,276 +210,9 @@ func contains(list []interface{}, value interface{}) bool {
 	return false
 }
 
-// parsePrimaryExpression handles the basic expressions
-func parsePrimaryExpression(primExpr parser.IPrimaryExpressionContext, row map[string]interface{}) interface{} {
-	if primExpr == nil {
-		return nil
-	}
-
-	// Check for parenthesized expression
-	if primExpr.Expression() != nil {
-		return ParseExpression(primExpr.Expression(), row)
-	}
-
-	// Check for CASE expression
-	if primExpr.CaseExpression() != nil {
-		return ParseCaseExpression(primExpr.CaseExpression())
-	}
-
-	// Check for function call
-	if primExpr.FunctionCall() != nil {
-		fc := primExpr.FunctionCall()
-		funcName := ""
-		if qn := fc.QualifiedName(); qn != nil {
-			nameParts := qn.AllNamePart()
-			if len(nameParts) > 0 {
-				parts := []string{}
-				for _, np := range nameParts {
-					parts = append(parts, np.GetText())
-				}
-				funcName = parts[len(parts)-1]
-			}
-		}
-		var args []interface{}
-		for _, argExpr := range fc.AllExpression() {
-			args = append(args, ParseExpression(argExpr, row))
-		}
-		value, _ := functions.ExecuteFunction(funcName, args)
-		return value
-	}
-
-	// Check for extract function
-	if primExpr.ExtractFunction() != nil {
-		return ParseExtractFunction(primExpr.ExtractFunction(), row)
-	}
-
-	// Check for column name
-	if primExpr.ColumnName() != nil {
-		columnName := primExpr.ColumnName().GetText()
-		// Handle qualified names like table.column or alias.column
-		parts := strings.Split(columnName, ".")
-
-		// Try full qualified name first (alias.column or table.column)
-		if value, ok := row[columnName]; ok {
-			return value
-		}
-
-		// Try just the column name (last part)
-		actualColumn := parts[len(parts)-1]
-		if value, ok := row[actualColumn]; ok {
-			return value
-		}
-
-		// If column not found, return nil or error
-		return nil
-	}
-
-	// Check for literal values
-	if primExpr.Value() != nil {
-		valueCtx := primExpr.Value()
-		if valueCtx.NUMBER() != nil {
-			numStr := valueCtx.NUMBER().GetText()
-			if strings.Contains(numStr, ".") {
-				if val, err := strconv.ParseFloat(numStr, 64); err == nil {
-					return val
-				}
-			} else {
-				if val, err := strconv.Atoi(numStr); err == nil {
-					return val
-				}
-			}
-		}
-
-		if valueCtx.STRING_LITERAL() != nil {
-			str := valueCtx.STRING_LITERAL().GetText()
-			// Remove quotes
-			if len(str) >= 2 && str[0] == '\'' && str[len(str)-1] == '\'' {
-				return str[1 : len(str)-1]
-			}
-			return str
-		}
-
-		if valueCtx.TRUE() != nil {
-			return true
-		}
-
-		if valueCtx.FALSE() != nil {
-			return false
-		}
-
-		if valueCtx.CURRENT_TIMESTAMP() != nil {
-			return time.Now().Format("2006-01-02 15:04:05")
-		}
-	}
-
-	// If nothing matches, return the text
-	return primExpr.GetText()
-}
-
-// parseMultiplicativeExpression handles multiplication and division
-func parseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionContext, row map[string]interface{}) interface{} {
-	if multExpr == nil {
-		return nil
-	}
-
-	// Get all cast expressions
-	castExprs := multExpr.AllCastExpression()
-	if len(castExprs) == 0 {
-		return nil
-	}
-
-	// Get the first cast expression
-	result := parseCastExpression(castExprs[0], row)
-
-	// Handle additional terms with operators
-	stars := multExpr.AllSTAR()
-	slashes := multExpr.AllSLASH()
-
-	// Merge operators by token index
-	type opInfo struct {
-		op    string
-		index int
-	}
-	var ops []opInfo
-	for _, s := range stars {
-		ops = append(ops, opInfo{"*", s.GetSymbol().GetTokenIndex()})
-	}
-	for _, s := range slashes {
-		ops = append(ops, opInfo{"/", s.GetSymbol().GetTokenIndex()})
-	}
-	// Sort by token index
-	sort.Slice(ops, func(i, j int) bool {
-		return ops[i].index < ops[j].index
-	})
-
-	// Skip the first one since we already processed it
-	for i, op := range ops {
-		if i+1 >= len(castExprs) {
-			break
-		}
-		nextValue := parseCastExpression(castExprs[i+1], row)
-
-		switch op.op {
-		case "*":
-			result = MultiplyValues(result, nextValue)
-		case "/":
-			result = DivideValues(result, nextValue)
-		}
-	}
-
-	return result
-}
-
-// parseCastExpression handles type casting with ::<type>, COLLATE, AT TIME ZONE
-func parseCastExpression(castExpr parser.ICastExpressionContext, row map[string]interface{}) interface{} {
-	if castExpr == nil {
-		return nil
-	}
-
-	// Get the primary expression
-	primExpr := castExpr.PrimaryExpression()
-	if primExpr == nil {
-		return nil
-	}
-
-	// Parse the primary expression
-	value := parsePrimaryExpression(primExpr, row)
-
-	// Apply postfixes
-	postfixes := castExpr.AllPostfix()
-	for _, postfix := range postfixes {
-		if postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil && postfix.STRING_LITERAL() != nil {
-			// AT TIME ZONE
-			value = applyTimeZone(value, postfix.STRING_LITERAL().GetText())
-		} else if postfix.COLLATE() != nil && postfix.QualifiedName() != nil {
-			// COLLATE - for now, ignore
-			// value = applyCollate(value, postfix.QualifiedName().GetText())
-		} else if postfix.COLON_COLON() != nil && postfix.TypeName() != nil {
-			// Type cast
-			typeName := strings.ToLower(postfix.TypeName().QualifiedName().GetText())
-			value = CastValue(value, typeName)
-		}
-	}
-
-	return value
-}
-
-// applyTimeZone applies time zone to a timestamp
-// TODO реализовать корректную работу с часовыми поясами
-func applyTimeZone(value interface{}, tzStr string) interface{} {
-	// For simplicity, just return the value, ignore timezone
-	return value
-}
-
-// castValue performs type casting to the specified type
-// TODO перевести cast в отдельный модуль + пересмотреть работу с типами
-func CastValue(value interface{}, typeName string) interface{} {
-	switch typeName {
-	case "int", "int4", "integer":
-		if f, ok := toFloat64(value); ok {
-			return int(f)
-		}
-		if s, ok := value.(string); ok {
-			if i, err := strconv.Atoi(s); err == nil {
-				return i
-			}
-		}
-		return 0 // fallback
-	case "bigint", "int8":
-		if f, ok := toFloat64(value); ok {
-			return int64(f)
-		}
-		if s, ok := value.(string); ok {
-			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-				return i
-			}
-		}
-		return int64(0) // fallback
-	case "float", "float8", "double precision":
-		if f, ok := toFloat64(value); ok {
-			return f
-		}
-		if s, ok := value.(string); ok {
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				return f
-			}
-		}
-		return 0.0 // fallback
-	case "text", "varchar", "character varying":
-		return fmt.Sprintf("%v", value)
-	case "bool", "boolean":
-		if b, ok := value.(bool); ok {
-			return b
-		}
-		if s, ok := value.(string); ok {
-			if strings.ToLower(s) == "true" {
-				return true
-			} else if strings.ToLower(s) == "false" {
-				return false
-			}
-		}
-		if i, ok := toFloat64(value); ok && i != 0 {
-			return true
-		}
-		return false // fallback
-	case "oid":
-		// OID is typically int4
-		if f, ok := toFloat64(value); ok {
-			return int(f)
-		}
-		return 0
-	case "name":
-		// name is like text but limited
-		return fmt.Sprintf("%v", value)
-	default:
-		// For unknown types, return as is
-		return value
-	}
-}
-
 // evaluateOperator evaluates an operator expression like OPERATOR(pg_catalog.~)
 // TODO пересмотреть работу с операторами, убрать хардкодинг
-func EvaluateOperator(left, right interface{}, opExpr parser.IOperatorExprContext) bool {
+func EvaluateOperator(left, right rmodels.Expression, opExpr parser.IOperatorExprContext) bool {
 	if opExpr == nil {
 		return false
 	}
@@ -842,33 +226,48 @@ func EvaluateOperator(left, right interface{}, opExpr parser.IOperatorExprContex
 	// Get the operator name (e.g., "pg_catalog.~")
 	opName := qualName.GetText()
 
+	// Extract values
+	var leftVal, rightVal interface{}
+	if l, ok := left.(*rmodels.ResultRowsExpression); ok && len(l.Row.Rows) > 0 && len(l.Row.Rows[0]) > 0 {
+		leftVal = l.Row.Rows[0][0]
+	}
+	if r, ok := right.(*rmodels.ResultRowsExpression); ok && len(r.Row.Rows) > 0 && len(r.Row.Rows[0]) > 0 {
+		rightVal = r.Row.Rows[0][0]
+	}
+
+	logger.Debugf("EvaluateOperator: opName=%s, leftVal=%v (%T), rightVal=%v (%T)", opName, leftVal, leftVal, rightVal, rightVal)
+
 	// For now, handle specific operators
 	switch opName {
 	case "pg_catalog.~":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString(ra, la)
+		if la, ok := leftVal.(string); ok {
+			if ra, ok := rightVal.(string); ok {
+				matched, err := regexp.MatchString(ra, la)
+				logger.Debugf("EvaluateOperator ~: pattern=%s, str=%s, matched=%v, err=%v", ra, la, matched, err)
 				return matched
 			}
 		}
 	case "pg_catalog.!~":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString(ra, la)
+		if la, ok := leftVal.(string); ok {
+			if ra, ok := rightVal.(string); ok {
+				matched, err := regexp.MatchString(ra, la)
+				logger.Debugf("EvaluateOperator !~: pattern=%s, str=%s, matched=%v, err=%v", ra, la, matched, err)
 				return !matched
 			}
 		}
 	case "pg_catalog.~*":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString("(?i)"+ra, la)
+		if la, ok := leftVal.(string); ok {
+			if ra, ok := rightVal.(string); ok {
+				matched, err := regexp.MatchString("(?i)"+ra, la)
+				logger.Debugf("EvaluateOperator ~*: pattern=%s, str=%s, matched=%v, err=%v", "(?i)"+ra, la, matched, err)
 				return matched
 			}
 		}
 	case "pg_catalog.!~*":
-		if la, ok := left.(string); ok {
-			if ra, ok := right.(string); ok {
-				matched, _ := regexp.MatchString("(?i)"+ra, la)
+		if la, ok := leftVal.(string); ok {
+			if ra, ok := rightVal.(string); ok {
+				matched, err := regexp.MatchString("(?i)"+ra, la)
+				logger.Debugf("EvaluateOperator !~*: pattern=%s, str=%s, matched=%v, err=%v", "(?i)"+ra, la, matched, err)
 				return !matched
 			}
 		}

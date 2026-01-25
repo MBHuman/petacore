@@ -2,7 +2,7 @@ package visitor
 
 import (
 	"fmt"
-	"log"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
 
@@ -29,9 +29,9 @@ func ParseSQL(query string) (statements.SQLStatement, error) {
 	}
 
 	if listener.stmt == nil {
-		return nil, fmt.Errorf("failed to parse SQL query")
+		return nil, fmt.Errorf("failed to parse SQL query with err: %v", listener.err)
 	}
 
-	log.Printf("DEBUG: Parsed statement type: %s\n", listener.stmt.Type())
+	logger.Debugf("DEBUG: Parsed statement type: %s\n", listener.stmt.Type())
 	return listener.stmt, nil
 }

@@ -1,8 +1,8 @@
 package table
 
 import (
-	"log"
 	"petacore/internal/core"
+	"petacore/internal/logger"
 	"petacore/internal/storage"
 )
 
@@ -18,7 +18,7 @@ func (t *Table) TruncateTable(name string) error {
 			for colName, colMeta := range meta.Columns {
 				if colMeta.IsSerial {
 					seqKey := t.getSequencePrefixKey(colName)
-					log.Printf("Resetting sequence for column %s: %s", colName, seqKey)
+					logger.Debugf("Resetting sequence for column %s: %s", colName, seqKey)
 					tx.Write([]byte(seqKey), "1")
 				}
 			}
