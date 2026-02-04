@@ -104,8 +104,6 @@ INSERT INTO pg_catalog.pg_class (
 (2615, 'pg_namespace', 11, 2615, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
 (1262, 'pg_database', 11, 1248, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 14, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
 (1213, 'pg_tablespace', 11, 1213, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 5, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
-(1260, 'pg_roles', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 13, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
-(1262, 'pg_stat_ssl', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 7, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
 (1263, 'pg_shdescription', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
 (2601, 'pg_am', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0);
 
