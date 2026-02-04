@@ -8,7 +8,9 @@ import (
 
 // ExecuteCreateTable создает таблицу
 func ExecuteCreateTable(stmt *statements.CreateTableStatement, store *storage.DistributedStorageVClock, exCtx ExecutorContext) error {
-	tbl := table.NewTable(store, exCtx.Database, exCtx.Schema, stmt.TableName)
+	// Резолвим схему и имя таблицы
+	schema, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
+	tbl := table.NewTable(store, exCtx.Database, schema, tableName)
 
 	columns := make([]table.ColumnDef, len(stmt.Columns))
 	for i, col := range stmt.Columns {

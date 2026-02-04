@@ -246,24 +246,6 @@ func (ws *WireServer) inferParameterTypes(stmt statements.SQLStatement, paramCou
 	return paramOIDs
 }
 
-// colTypeToOID converts internal column type to PostgreSQL OID
-func (ws *WireServer) colTypeToOID(colType table.ColType) uint32 {
-	switch colType {
-	case table.ColTypeInt:
-		return 23 // INT4
-	case table.ColTypeBigInt:
-		return 20 // INT8
-	case table.ColTypeFloat:
-		return 701 // FLOAT8
-	case table.ColTypeBool:
-		return 16 // BOOL
-	case table.ColTypeString:
-		return 25 // TEXT
-	default:
-		return 25 // TEXT
-	}
-}
-
 func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, session *Session) {
 	// Handle keep-alive queries and empty queries
 	trimmedQuery := strings.TrimSpace(query)
@@ -300,7 +282,7 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 	}
 
 	// Send result based on statement type
-	switch s := stmt.(type) {
+	switch stmt.(type) {
 	case *statements.CreateTableStatement:
 		// DDL - send CommandComplete
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("CREATE TABLE")})
@@ -314,7 +296,7 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 		// DDL - send CommandComplete
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("TRUNCATE TABLE")})
 	case *statements.SelectStatement:
-		ws.sendSelectResult(backend, s, result, true)
+		ws.sendSelectResult(backend, result, true)
 	case *statements.SetStatement:
 		// SET - send CommandComplete
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
@@ -606,7 +588,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	logger.Debugf("Execute result: %+v", result)
 
 	// Send result based on statement type (similar to handleQuery)
-	switch s := ps.Stmt.(type) {
+	switch ps.Stmt.(type) {
 	case *statements.EmptyStatement:
 		backend.Send(&pgproto3.EmptyQueryResponse{})
 	case *statements.CreateTableStatement:
@@ -618,12 +600,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	case *statements.SelectStatement:
 		// Force text format for system tables since we can't reliably encode them in binary
 		formatCodes := ps.ResultFormatCodes
-		// TODO избавиться от постоянных проверок IsSystemTable, вынести в стратегию выполнения
-		// if s.From != nil && system.IsSystemTable(s.From.TableName) {
-		// 	// Override to text format for system tables
-		// 	formatCodes = []int16{0}
-		// }
-		ws.sendSelectResultWithFormats(backend, s, result, true, formatCodes)
+		ws.sendSelectResultWithFormats(backend, result, true, formatCodes)
 	case *statements.SetStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
 		// case *statements.ShowStatement:
@@ -631,26 +608,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	}
 }
 
-func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stmt *statements.SelectStatement, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16) {
-	logger.Debugf("DEBUG sendSelectResultWithFormats: formatCodes=%v", formatCodes)
-	logger.Debugf("DEBUG: Select result: %+v\n", result)
-	// var rows []map[string]interface{}
-	// var columns []string
-	// var columnTypes []table.ColType
-
-	// if resultMap, ok := result.(map[string]interface{}); ok {
-	// 	// New result format
-	// 	columns = resultMap["columns"].([]string)
-	// 	columnTypes = resultMap["columnTypes"].([]table.ColType)
-	// 	rows = resultMap["rows"].([]map[string]interface{})
-	// } else {
-	// 	backend.Send(&pgproto3.ErrorResponse{
-	// 		Severity: "ERROR",
-	// 		Code:     "XX000",
-	// 		Message:  "invalid result type",
-	// 	})
-	// 	return
-	// }
+func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16) {
 
 	if len(result.Rows) == 0 {
 		// No data
@@ -668,7 +626,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 				case table.ColTypeBool:
 					oid = 16 // BOOL
 				case table.ColTypeString:
-					oid = 25 // TEXT
+					oid = 25 // VARCHAR
 				}
 
 				// Determine format for this column
@@ -701,18 +659,18 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 	if sendRowDesc {
 		rowDesc := &pgproto3.RowDescription{}
 		for i, column := range result.Columns {
-			oid := uint32(25) // Default TEXT
+			oid := uint32(0) // Use UNKNOWN to force text format decoding
 			switch column.Type {
 			case table.ColTypeInt:
-				oid = 23 // INT4
+				oid = 23
 			case table.ColTypeBigInt:
-				oid = 20 // INT8
+				oid = 20
 			case table.ColTypeFloat:
-				oid = 701 // FLOAT8
+				oid = 701
 			case table.ColTypeBool:
-				oid = 16 // BOOL
+				oid = 16
 			case table.ColTypeString:
-				oid = 25 // TEXT
+				oid = 25
 			}
 
 			// Determine format for this column
@@ -740,24 +698,15 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 
 	// Data rows
 	for _, row := range result.Rows {
+		logger.Debug("DEBUG: Sending row:", zap.Any("row", row))
 		dataRow := &pgproto3.DataRow{}
-		// Determine format for this column
-		// format := int16(0) // default text
-		// if len(formatCodes) == 1 {
-		// 	// Single format applies to all columns
-		// 	format = formatCodes[0]
-		// } else if i < len(formatCodes) {
-		// 	// Per-column format
-		// 	format = formatCodes[i]
-		// }
-
-		// if format == 1 {
-		// 	// Binary format
-		// 	dataRow.Values = append(dataRow.Values, encodeBinary(v, i, columnTypes))
-		// } else {
 		// Text format
 		for _, value := range row {
-			dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
+			if value == nil {
+				dataRow.Values = append(dataRow.Values, nil)
+			} else {
+				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
+			}
 		}
 		// }
 		backend.Send(dataRow)
@@ -767,107 +716,6 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 }
 
 // sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
-func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, stmt *statements.SelectStatement, result *table.ExecuteResult, sendRowDesc bool) {
-	ws.sendSelectResultWithFormats(backend, stmt, result, sendRowDesc, []int16{0})
+func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool) {
+	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0})
 }
-
-// encodeBinary encodes a value in PostgreSQL binary format
-func encodeBinary(v interface{}, colIdx int, columnTypes []table.ColType) []byte {
-	if colIdx >= len(columnTypes) {
-		// Fallback to text
-		return []byte(fmt.Sprintf("%v", v))
-	}
-
-	logger.Debugf("DEBUG encodeBinary: colIdx=%d, type=%v, value=%v (Go type %T)", colIdx, columnTypes[colIdx], v, v)
-
-	switch columnTypes[colIdx] {
-	case table.ColTypeInt:
-		// INT4 - 4 bytes, big-endian
-		var val int32
-		switch v := v.(type) {
-		case int:
-			val = int32(v)
-		case int32:
-			val = v
-		case int64:
-			val = int32(v)
-		case float64:
-			val = int32(v)
-		case float32:
-			val = int32(v)
-		default:
-			return []byte(fmt.Sprintf("%v", v))
-		}
-		buf := make([]byte, 4)
-		buf[0] = byte(val >> 24)
-		buf[1] = byte(val >> 16)
-		buf[2] = byte(val >> 8)
-		buf[3] = byte(val)
-		return buf
-	case table.ColTypeString:
-		// TEXT binary format is just the string bytes
-		if s, ok := v.(string); ok {
-			return []byte(s)
-		}
-		return []byte(fmt.Sprintf("%v", v))
-	default:
-		// For other types, convert to string
-		return []byte(fmt.Sprintf("%v", v))
-	}
-}
-
-// func (ws *WireServer) sendDescribeResult(backend *pgproto3.Backend, result *table.ExecuteResult) {
-// 	rows := result.Rows
-// 	if rows == nil {
-// 		backend.Send(&pgproto3.ErrorResponse{
-// 			Severity: "ERROR",
-// 			Code:     "XX000",
-// 			Message:  "invalid result type for describe",
-// 		})
-// 		return
-// 	}
-
-// 	if len(rows) == 0 {
-// 		// No data
-// 		backend.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{}})
-// 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SHOW 0")})
-// 		return
-// 	}
-
-// 	// Get columns from first row
-// 	var columns []string
-// 	for k := range rows[0] {
-// 		columns = append(columns, k)
-// 	}
-// 	sort.Strings(columns)
-
-// 	// RowDescription
-// 	rowDesc := &pgproto3.RowDescription{}
-// 	for _, colName := range columns {
-// 		rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-// 			Name:                 []byte(colName),
-// 			TableOID:             0,
-// 			TableAttributeNumber: 0,
-// 			DataTypeOID:          25, // TEXT
-// 			DataTypeSize:         -1,
-// 			TypeModifier:         -1,
-// 			Format:               0,
-// 		})
-// 	}
-// 	backend.Send(rowDesc)
-
-// 	// Send DataRows
-// 	for _, row := range rows {
-// 		dataRow := &pgproto3.DataRow{}
-// 		for _, colName := range columns {
-// 			if v, exists := row[colName]; exists && v != nil {
-// 				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-// 			} else {
-// 				dataRow.Values = append(dataRow.Values, nil)
-// 			}
-// 		}
-// 		backend.Send(dataRow)
-// 	}
-
-// 	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SHOW %d", len(rows)))})
-// }

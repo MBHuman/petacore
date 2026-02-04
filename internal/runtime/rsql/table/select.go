@@ -96,7 +96,7 @@ func (t *Table) Select(
 			logger.Error("Failed to unmarshal", zap.Error(err))
 			continue
 		}
-		logger.Debugf("Single row data: %+v\n", singleRow)
+		// logger.Debugf("Single row data: %+v\n", singleRow)
 
 		resultRow := make([]interface{}, 0, len(finalColumns))
 

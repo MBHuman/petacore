@@ -126,12 +126,15 @@ func ExecuteNormalTable(
 		return ExecuteSelectWithJoins(stmt, store, exCtx)
 	}
 
+	// Резолвим схему и имя таблицы (поддержка schema.table и pg_catalog)
+	schema, resolvedTableName := ComputeSchemaAndTableName(tableName, &exCtx)
+
 	// --- 3) Normal table select ---
 	tbl := &table.Table{
 		Storage:  store,
 		Database: exCtx.Database,
-		Schema:   exCtx.Schema,
-		Name:     tableName,
+		Schema:   schema,
+		Name:     resolvedTableName,
 	}
 
 	logger.Debug("Executing normal SELECT on table", zap.String("table", tableName))
@@ -184,6 +187,7 @@ func ExecuteNormalTable(
 	// Apply WHERE filtering after getting rows
 	if stmt.Where != nil {
 		result = revaluate.EvaluateFilterRowsByWhere(result, stmt.Where)
+		logger.Debugf("After WHERE filter: %d rows", len(result.Rows))
 	}
 
 	// Check for aggregates
@@ -226,10 +230,12 @@ func ExecuteNormalTable(
 		}
 	} else if needColumnFiltering && stmt.Where != nil {
 		// Если был WHERE и нужны только конкретные колонки, фильтруем
+		logger.Debugf("Calling filterSelectColumns, rows before: %d", len(result.Rows))
 		result, err = filterSelectColumns(stmt, result)
 		if err != nil {
 			return nil, err
 		}
+		logger.Debugf("After filterSelectColumns: %d rows", len(result.Rows))
 	} else {
 		// Просто применяем алиасы к обычным колонкам
 		for i, col := range stmt.Columns {
@@ -245,6 +251,7 @@ func ExecuteNormalTable(
 		result.Rows = result.Rows[:stmt.Limit]
 	}
 
+	logger.Debugf("ExecuteNormalTable returning %d rows", len(result.Rows))
 	return result, nil
 }
 
@@ -514,18 +521,21 @@ func ExecuteSelectWithJoins(
 ) (*table.ExecuteResult, error) {
 	var mainResult *table.ExecuteResult
 
+	// Резолвим схему для главной таблицы
+	mainSchema, mainTableName := ComputeSchemaAndTableName(stmt.From.TableName, &exCtx)
+
 	// Получаем данные из главной таблицы
 	mainTable := &table.Table{
 		Storage:  store,
 		Database: exCtx.Database,
-		Schema:   exCtx.Schema,
-		Name:     stmt.From.TableName,
+		Schema:   mainSchema,
+		Name:     mainTableName,
 	}
 
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		var err error
 		selectColumns := []table.SelectColumn{{IsAll: true}}
-		mainResult, err = mainTable.Select(tx, stmt.From.TableName, selectColumns, nil, 0)
+		mainResult, err = mainTable.Select(tx, mainTableName, selectColumns, nil, 0)
 		return err
 	})
 	if err != nil {
@@ -535,13 +545,13 @@ func ExecuteSelectWithJoins(
 	// Добавляем префикс к колонкам главной таблицы
 	mainAlias := stmt.From.Alias
 	if mainAlias == "" {
-		mainAlias = stmt.From.TableName
+		mainAlias = mainTableName
 	}
 	for i := range mainResult.Columns {
 		originalName := mainResult.Columns[i].Name
 		mainResult.Columns[i].Name = mainAlias + "." + originalName
 		mainResult.Columns[i].TableIdentifier = mainAlias
-		mainResult.Columns[i].OriginalTableName = stmt.From.TableName
+		mainResult.Columns[i].OriginalTableName = mainTableName
 	}
 
 	currentResult := mainResult
@@ -550,17 +560,20 @@ func ExecuteSelectWithJoins(
 	for _, join := range stmt.From.Joins {
 		var rightResult *table.ExecuteResult
 
+		// Резолвим схему для JOIN таблицы (поддержка schema.table и pg_catalog)
+		joinSchema, joinTableName := ComputeSchemaAndTableName(join.TableName, &exCtx)
+
 		rightTable := &table.Table{
 			Storage:  store,
 			Database: exCtx.Database,
-			Schema:   exCtx.Schema,
-			Name:     join.TableName,
+			Schema:   joinSchema,
+			Name:     joinTableName,
 		}
 
 		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			var err error
 			selectColumns := []table.SelectColumn{{IsAll: true}}
-			rightResult, err = rightTable.Select(tx, join.TableName, selectColumns, nil, 0)
+			rightResult, err = rightTable.Select(tx, joinTableName, selectColumns, nil, 0)
 			return err
 		})
 		if err != nil {
@@ -570,13 +583,13 @@ func ExecuteSelectWithJoins(
 		// Добавляем префикс к колонкам правой таблицы
 		rightAlias := join.Alias
 		if rightAlias == "" {
-			rightAlias = join.TableName
+			rightAlias = joinTableName
 		}
 		for i := range rightResult.Columns {
 			originalName := rightResult.Columns[i].Name
 			rightResult.Columns[i].Name = rightAlias + "." + originalName
 			rightResult.Columns[i].TableIdentifier = rightAlias
-			rightResult.Columns[i].OriginalTableName = join.TableName
+			rightResult.Columns[i].OriginalTableName = joinTableName
 		}
 
 		// Выполняем JOIN

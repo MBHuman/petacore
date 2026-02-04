@@ -48,7 +48,6 @@ func NewPgConnection(t testing.TB) *pgx.ConnPool {
 }
 
 func TestPreparedStatements(t *testing.T) {
-	t.Skip()
 	conn := NewPgConnection(t)
 	defer conn.Close()
 
@@ -92,6 +91,9 @@ func TestRegexSelect(t *testing.T) {
 	expectedValues := []string{"test1", "test2"}
 	i := 0
 	for rows.Next() {
+		if rows.Err() != nil {
+			t.Fatalf("Error during row iteration: %v", rows.Err())
+		}
 		var value string
 		err := rows.Scan(&value)
 		if err != nil {
@@ -106,6 +108,9 @@ func TestRegexSelect(t *testing.T) {
 			t.Fatalf("Row %d: got %s, want %s", i, value, expectedValues[i])
 		}
 		i++
+	}
+	if rows.Err() != nil {
+		t.Fatalf("Error during row iteration: %v", rows.Err())
 	}
 
 	if i != len(expectedValues) {

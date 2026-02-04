@@ -8,6 +8,8 @@ import (
 
 // ExecuteTruncateTable удаляет все строки из таблицы
 func ExecuteTruncateTable(stmt *statements.TruncateTableStatement, store *storage.DistributedStorageVClock, exCtx ExecutorContext) error {
-	tbl := table.NewTable(store, exCtx.Database, exCtx.Schema, stmt.TableName)
+	// Резолвим схему и имя таблицы
+	schema, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
+	tbl := table.NewTable(store, exCtx.Database, schema, tableName)
 	return tbl.TruncateTable(stmt.TableName)
 }

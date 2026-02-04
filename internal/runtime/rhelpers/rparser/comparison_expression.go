@@ -176,30 +176,58 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 
 	// IN (...)
 	if compExpr.IN() != nil {
-		// Тут у тебя старая логика была на interface{} — если хочешь IN для ResultRowsExpression,
-		// нужно отдельно доставать single cell из left.
 		not := compExpr.NOT() != nil
 
-		var values []interface{}
-		for _, e := range compExpr.AllExpression() {
-			v, err := ParseExpression(e, row) // если у тебя ParseExpression возвращает interface{}
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, v)
+		// Получаем левое значение как ResultRowsExpression для доступа к типу
+		leftExpr, ok := left.(*rmodels.ResultRowsExpression)
+		if !ok {
+			return nil, fmt.Errorf("IN operator requires ResultRowsExpression on left, got %T", left)
 		}
 
-		// left может быть Expression — под IN разумно поддержать 1x1 scalar
-		lv, err := exprToScalar(left)
-		if err != nil {
+		if err := checkComparisonExpr(leftExpr, leftExpr); err != nil {
 			return nil, err
 		}
 
-		in := rhelpers.Contains(values, lv)
-		if not {
-			in = !in
+		leftType := leftExpr.Row.Columns[0].Type
+		leftValue := leftExpr.Row.Rows[0][0]
+		leftOps := leftType.TypeOps()
+
+		// Проверяем каждое значение из IN списка
+		found := false
+		for _, e := range compExpr.AllExpression() {
+			v, err := ParseExpression(e, row)
+			if err != nil {
+				return nil, err
+			}
+
+			rightExpr, ok := v.(*rmodels.ResultRowsExpression)
+			if !ok {
+				return nil, fmt.Errorf("IN value must be ResultRowsExpression, got %T", v)
+			}
+
+			rightValue := rightExpr.Row.Rows[0][0]
+			rightType := rightExpr.Row.Columns[0].Type
+
+			// Приводим правое значение к типу левого, если типы не совпадают
+			if leftType != rightType {
+				convertedValue, err := leftOps.CastTo(rightValue, leftType)
+				if err == nil {
+					rightValue = convertedValue
+				}
+			}
+
+			// Используем Compare для проверки равенства
+			compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
+			if err == nil && compareResult == 0 {
+				found = true
+				break
+			}
 		}
-		return &rmodels.BoolExpression{Value: in}, nil
+
+		if not {
+			found = !found
+		}
+		return &rmodels.BoolExpression{Value: found}, nil
 	}
 
 	// LIKE

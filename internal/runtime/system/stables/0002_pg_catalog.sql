@@ -95,24 +95,19 @@ INSERT INTO pg_catalog.pg_class (
     relforcerowsecurity, relispopulated, relreplident,
     relispartition, relrewrite, relfrozenxid, relminmxid
 ) VALUES
-(
-    1, 'pg_tables', 11, 0, 0, 10,
-    0, 0, 0, 0, 0.0,
-    0, 0, FALSE, FALSE,
-    'p', 'r', 8, 0, FALSE,
-    FALSE, FALSE, FALSE,
-    FALSE, FALSE, 'n',
-    FALSE, 0, 0, 0
-),
-(
-    2, 'pg_columns', 11, 0, 0, 10,
-    0, 0, 0, 0, 0.0,
-    0, 0, FALSE, FALSE,
-    'p', 'r', 9, 0, FALSE,
-    FALSE, FALSE, FALSE,
-    FALSE, FALSE, 'n',
-    FALSE, 0, 0, 0
-);
+(1259, 'pg_tables', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 8, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1260, 'pg_columns', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 9, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1261, 'pg_class', 11, 83, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 30, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1249, 'pg_attribute', 11, 75, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 23, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1255, 'pg_proc', 11, 81, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 29, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1247, 'pg_type', 11, 71, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 31, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(2615, 'pg_namespace', 11, 2615, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1262, 'pg_database', 11, 1248, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 14, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1213, 'pg_tablespace', 11, 1213, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 5, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1260, 'pg_roles', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 13, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1262, 'pg_stat_ssl', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 7, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(1263, 'pg_shdescription', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0),
+(2601, 'pg_am', 11, 0, 0, 10, 0, 0, 0, 0, 0.0, 0, 0, FALSE, FALSE, 'p', 'r', 4, 0, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'n', FALSE, 0, 0, 0);
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_attribute (
     attrelid INTEGER,
@@ -240,13 +235,27 @@ INSERT INTO pg_catalog.pg_type (oid, typname, typnamespace, typowner, typlen, ty
 (25, 'text', 11, 10, -1, FALSE, 'b', 'S', TRUE, TRUE, ',', 0, 0, 1009, 'textin', 'textout', 'textrecv', 'textsend', 'texttypmodin', 'texttypmodout', 'textanalyze', 'i', 'e', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
 (26, 'oid', 11, 10, 4, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1028, 'oidin', 'oidout', 'oidrecv', 'oidsend', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
 (700, 'float4', 11, 10, 4, TRUE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1021, 'float4in', 'float4out', 'float4recv', 'float4send', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
-(701, 'float8', 11, 10, 8, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1022, 'float8in', 'float8out', 'float8recv', 'float8send', '-', '-', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL);
+(701, 'float8', 11, 10, 8, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1022, 'float8in', 'float8out', 'float8recv', 'float8send', '-', '-', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1043, 'varchar', 11, 10, -1, FALSE, 'b', 'S', FALSE, TRUE, ',', 0, 0, 1015, 'varcharin', 'varcharout', 'varcharrecv', 'varcharsend', 'varchartypmodin', 'varchartypmodout', '-', 'i', 'e', FALSE, 0, -1, 0, 100, NULL, NULL, NULL),
+(1082, 'date', 11, 10, 4, TRUE, 'b', 'D', FALSE, TRUE, ',', 0, 0, 1182, 'date_in', 'date_out', 'date_recv', 'date_send', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1083, 'time', 11, 10, 8, TRUE, 'b', 'D', FALSE, TRUE, ',', 0, 0, 1183, 'time_in', 'time_out', 'time_recv', 'time_send', 'timetypmodin', 'timetypmodout', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1114, 'timestamp', 11, 10, 8, TRUE, 'b', 'D', FALSE, TRUE, ',', 0, 0, 1115, 'timestamp_in', 'timestamp_out', 'timestamp_recv', 'timestamp_send', 'timestamptypmodin', 'timestamptypmodout', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1184, 'timestamptz', 11, 10, 8, TRUE, 'b', 'D', TRUE, TRUE, ',', 0, 0, 1185, 'timestamptz_in', 'timestamptz_out', 'timestamptz_recv', 'timestamptz_send', 'timestamptztypmodin', 'timestamptztypmodout', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1700, 'numeric', 11, 10, -1, FALSE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1231, 'numeric_in', 'numeric_out', 'numeric_recv', 'numeric_send', 'numerictypmodin', 'numerictypmodout', '-', 'i', 'm', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(2950, 'uuid', 11, 10, 16, FALSE, 'b', 'U', FALSE, TRUE, ',', 0, 0, 2951, 'uuid_in', 'uuid_out', 'uuid_recv', 'uuid_send', '-', '-', '-', 'c', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(114, 'json', 11, 10, -1, FALSE, 'b', 'U', FALSE, TRUE, ',', 0, 0, 199, 'json_in', 'json_out', 'json_recv', 'json_send', '-', '-', '-', 'i', 'e', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(3802, 'jsonb', 11, 10, -1, FALSE, 'b', 'U', FALSE, TRUE, ',', 0, 0, 3807, 'jsonb_in', 'jsonb_out', 'jsonb_recv', 'jsonb_send', '-', '-', '-', 'i', 'e', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(1042, 'bpchar', 11, 10, -1, FALSE, 'b', 'S', FALSE, TRUE, ',', 0, 0, 1014, 'bpcharin', 'bpcharout', 'bpcharrecv', 'bpcharsend', 'bpchartypmodin', 'bpchartypmodout', '-', 'i', 'e', FALSE, 0, -1, 0, 100, NULL, NULL, NULL),
+-- Domain types examples (typtype='d' based on base types)
+(100001, 'positive_int', 11, 10, 4, TRUE, 'd', 'N', FALSE, TRUE, ',', 0, 0, 0, 'int4in', 'int4out', 'int4recv', 'int4send', '-', '-', '-', 'i', 'p', FALSE, 23, -1, 0, 0, NULL, NULL, NULL),
+(100002, 'email_address', 11, 10, -1, FALSE, 'd', 'S', FALSE, TRUE, ',', 0, 0, 0, 'textin', 'textout', 'textrecv', 'textsend', '-', '-', '-', 'i', 'e', FALSE, 25, -1, 0, 0, NULL, NULL, NULL),
+(100003, 'us_postal_code', 11, 10, -1, FALSE, 'd', 'S', FALSE, TRUE, ',', 0, 0, 0, 'textin', 'textout', 'textrecv', 'textsend', '-', '-', '-', 'i', 'e', FALSE, 25, -1, 0, 0, NULL, NULL, NULL);
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_namespace (
     oid INT,
     nspname TEXT,
     nspowner INT,
-    nspacl TEXT
+    nspacl TEXT,
     PRIMARY KEY (oid)
 );
 
@@ -268,7 +277,7 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_database (
     datfrozenxid INT,
     datminmxid INT,
     dattablespace INT,
-    datacl TEXT
+    datacl TEXT,
     PRIMARY KEY (oid)
 );
 
@@ -339,7 +348,7 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_am (
     oid INT,
     amname TEXT,
     amhandler INT,
-    amtype TEXT
+    amtype TEXT,
     PRIMARY KEY (oid)
 );
 

@@ -9,7 +9,9 @@ import (
 
 // ExecuteInsert вставляет данные
 func ExecuteInsert(stmt *statements.InsertStatement, store *storage.DistributedStorageVClock, exCtx ExecutorContext) error {
-	tbl := table.NewTable(store, exCtx.Database, exCtx.Schema, stmt.TableName)
+	// Резолвим схему и имя таблицы
+	schema, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
+	tbl := table.NewTable(store, exCtx.Database, schema, tableName)
 
 	insertValues := make([][]interface{}, 0, len(stmt.Values))
 
