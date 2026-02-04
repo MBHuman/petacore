@@ -19,9 +19,30 @@ func AddValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpressio
 
 	aVal := aRows[0][0]
 	bVal := bRows[0][0]
-	typ := a.Row.Columns[0].Type
+	aType := a.Row.Columns[0].Type
+	bType := b.Row.Columns[0].Type
 
-	val, err := applyAdd(aVal, bVal, typ)
+	// Если типы не совпадают, пробуем привести к типу левой части
+	if aType != bType {
+		aOps := aType.TypeOps()
+		convertedValue, err := aOps.CastTo(bVal, aType)
+		if err == nil {
+			bVal = convertedValue
+			bType = aType
+		} else {
+			// Если не получилось привести к типу левой, пробуем привести левую к типу правой
+			bOps := bType.TypeOps()
+			convertedValue, err := bOps.CastTo(aVal, bType)
+			if err == nil {
+				aVal = convertedValue
+				aType = bType
+			} else {
+				return nil, fmt.Errorf("AddValues: cannot cast types %s and %s", aType.String(), bType.String())
+			}
+		}
+	}
+
+	val, err := applyAdd(aVal, bVal, aType)
 	if err != nil {
 		return nil, err
 	}
@@ -29,7 +50,7 @@ func AddValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpressio
 	resultRow := &table.ExecuteResult{
 		Rows: [][]interface{}{{val}},
 		Columns: []table.TableColumn{
-			{Idx: 0, Name: "?column?", Type: typ},
+			{Idx: 0, Name: "?column?", Type: aType},
 		},
 	}
 	return &rmodels.ResultRowsExpression{Row: resultRow}, nil
@@ -46,9 +67,30 @@ func SubtractValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpr
 
 	aVal := aRows[0][0]
 	bVal := bRows[0][0]
-	typ := a.Row.Columns[0].Type
+	aType := a.Row.Columns[0].Type
+	bType := b.Row.Columns[0].Type
 
-	val, err := applySubtract(aVal, bVal, typ)
+	// Если типы не совпадают, пробуем привести к типу левой части
+	if aType != bType {
+		aOps := aType.TypeOps()
+		convertedValue, err := aOps.CastTo(bVal, aType)
+		if err == nil {
+			bVal = convertedValue
+			bType = aType
+		} else {
+			// Если не получилось привести к типу левой, пробуем привести левую к типу правой
+			bOps := bType.TypeOps()
+			convertedValue, err := bOps.CastTo(aVal, bType)
+			if err == nil {
+				aVal = convertedValue
+				aType = bType
+			} else {
+				return nil, fmt.Errorf("SubtractValues: cannot cast types %s and %s", aType.String(), bType.String())
+			}
+		}
+	}
+
+	val, err := applySubtract(aVal, bVal, aType)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +98,7 @@ func SubtractValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpr
 	resultRow := &table.ExecuteResult{
 		Rows: [][]interface{}{{val}},
 		Columns: []table.TableColumn{
-			{Idx: 0, Name: "?column?", Type: typ},
+			{Idx: 0, Name: "?column?", Type: aType},
 		},
 	}
 	return &rmodels.ResultRowsExpression{Row: resultRow}, nil
@@ -73,9 +115,30 @@ func MultiplyValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpr
 
 	aVal := aRows[0][0]
 	bVal := bRows[0][0]
-	typ := a.Row.Columns[0].Type
+	aType := a.Row.Columns[0].Type
+	bType := b.Row.Columns[0].Type
 
-	val, err := applyMultiply(aVal, bVal, typ)
+	// Если типы не совпадают, пробуем привести к типу левой части
+	if aType != bType {
+		aOps := aType.TypeOps()
+		convertedValue, err := aOps.CastTo(bVal, aType)
+		if err == nil {
+			bVal = convertedValue
+			bType = aType
+		} else {
+			// Если не получилось привести к типу левой, пробуем привести левую к типу правой
+			bOps := bType.TypeOps()
+			convertedValue, err := bOps.CastTo(aVal, bType)
+			if err == nil {
+				aVal = convertedValue
+				aType = bType
+			} else {
+				return nil, fmt.Errorf("MultiplyValues: cannot cast types %s and %s", aType.String(), bType.String())
+			}
+		}
+	}
+
+	val, err := applyMultiply(aVal, bVal, aType)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +146,7 @@ func MultiplyValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpr
 	resultRow := &table.ExecuteResult{
 		Rows: [][]interface{}{{val}},
 		Columns: []table.TableColumn{
-			{Idx: 0, Name: "?column?", Type: typ},
+			{Idx: 0, Name: "?column?", Type: aType},
 		},
 	}
 	return &rmodels.ResultRowsExpression{Row: resultRow}, nil
@@ -100,9 +163,30 @@ func DivideValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpres
 
 	aVal := aRows[0][0]
 	bVal := bRows[0][0]
-	typ := a.Row.Columns[0].Type
+	aType := a.Row.Columns[0].Type
+	bType := b.Row.Columns[0].Type
 
-	val, err := applyDivide(aVal, bVal, typ)
+	// Если типы не совпадают, пробуем привести к типу левой части
+	if aType != bType {
+		aOps := aType.TypeOps()
+		convertedValue, err := aOps.CastTo(bVal, aType)
+		if err == nil {
+			bVal = convertedValue
+			bType = aType
+		} else {
+			// Если не получилось привести к типу левой, пробуем привести левую к типу правой
+			bOps := bType.TypeOps()
+			convertedValue, err := bOps.CastTo(aVal, bType)
+			if err == nil {
+				aVal = convertedValue
+				aType = bType
+			} else {
+				return nil, fmt.Errorf("DivideValues: cannot cast types %s and %s", aType.String(), bType.String())
+			}
+		}
+	}
+
+	val, err := applyDivide(aVal, bVal, aType)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +194,7 @@ func DivideValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpres
 	resultRow := &table.ExecuteResult{
 		Rows: [][]interface{}{{val}},
 		Columns: []table.TableColumn{
-			{Idx: 0, Name: "?column?", Type: typ},
+			{Idx: 0, Name: "?column?", Type: aType},
 		},
 	}
 	return &rmodels.ResultRowsExpression{Row: resultRow}, nil
@@ -128,14 +212,28 @@ func checkOps(a, b *rmodels.ResultRowsExpression) error {
 		return fmt.Errorf("AddValues: no rows to operate on")
 	}
 
-	if a.Row.Columns[0].Type != b.Row.Columns[0].Type {
-		return fmt.Errorf("AddValues: column types do not match")
+	aType := a.Row.Columns[0].Type
+	bType := b.Row.Columns[0].Type
+
+	// Проверяем, что хотя бы один из типов поддерживает арифметику
+	if !(aType == table.ColTypeInt || aType == table.ColTypeFloat ||
+		bType == table.ColTypeInt || bType == table.ColTypeFloat) {
+		return fmt.Errorf("AddValues: types %s and %s not supported for arithmetic", aType.String(), bType.String())
 	}
 
-	if !(a.Row.Columns[0].Type == table.ColTypeInt ||
-		a.Row.Columns[0].Type == table.ColTypeFloat) {
-		return fmt.Errorf("AddValues: use type: %s", a.Row.Columns[0].Type.String())
+	// Проверяем, что типы можно привести друг к другу
+	if aType != bType {
+		aOps := aType.TypeOps()
+		_, errA := aOps.CastTo(bRows[0][0], aType)
+		if errA != nil {
+			bOps := bType.TypeOps()
+			_, errB := bOps.CastTo(aRows[0][0], bType)
+			if errB != nil {
+				return fmt.Errorf("AddValues: cannot cast between types %s and %s", aType.String(), bType.String())
+			}
+		}
 	}
+
 	return nil
 }
 

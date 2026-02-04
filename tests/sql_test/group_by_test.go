@@ -89,6 +89,152 @@ func PopulateGroupByData(t testing.TB, conn *pgx.ConnPool) {
 	}
 }
 
+func TestAggregateFunctions(t *testing.T) {
+	conn := NewPgConnection(t)
+	defer conn.Close()
+
+	PopulateGroupByData(t, conn)
+
+	tests := []struct {
+		name     string
+		query    string
+		expected float64
+	}{
+		{
+			name:     "SUM test",
+			query:    "SELECT SUM(amount) FROM group_by_orders;",
+			expected: 800.0,
+		},
+		{
+			name:     "COUNT test",
+			query:    "SELECT COUNT(*) FROM group_by_orders;",
+			expected: 5,
+		},
+		{
+			name:     "AVG test",
+			query:    "SELECT AVG(amount) FROM group_by_orders;",
+			expected: 160.0,
+		},
+		{
+			name:     "MAX test",
+			query:    "SELECT MAX(amount) FROM group_by_orders;",
+			expected: 300.0,
+		},
+		{
+			name:     "MIN test",
+			query:    "SELECT MIN(amount) FROM group_by_orders;",
+			expected: 50.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := conn.QueryRow(tt.query)
+			var result float64
+			err := row.Scan(&result)
+			if err != nil {
+				t.Fatalf("Query failed: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("Expected %.2f, got %.2f", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestMultipleAggregates(t *testing.T) {
+	conn := NewPgConnection(t)
+	defer conn.Close()
+
+	PopulateGroupByData(t, conn)
+
+	tests := []struct {
+		name     string
+		query    string
+		scanFunc func(rows *pgx.Rows) ([]interface{}, error)
+		expected [][]interface{}
+	}{
+		{
+			name:  "SUM and COUNT test",
+			query: "SELECT SUM(amount), COUNT(*) FROM group_by_orders;",
+			scanFunc: func(rows *pgx.Rows) ([]interface{}, error) {
+				var sum float64
+				var count int
+				err := rows.Scan(&sum, &count)
+				if err != nil {
+					return nil, err
+				}
+				return []interface{}{sum, count}, nil
+			},
+			expected: [][]interface{}{
+				{800.0, 5},
+			},
+		},
+		{
+			name:  "AVG, MAX and MIN test",
+			query: "SELECT AVG(amount), MAX(amount), MIN(amount) FROM group_by_orders;",
+			scanFunc: func(rows *pgx.Rows) ([]interface{}, error) {
+				var avg, max, min float64
+				err := rows.Scan(&avg, &max, &min)
+				if err != nil {
+					return nil, err
+				}
+				return []interface{}{avg, max, min}, nil
+			},
+			expected: [][]interface{}{
+				{160.0, 300.0, 50.0},
+			},
+		},
+		{
+			name:  "Multiple SUM test",
+			query: "SELECT SUM(amount) AS a1, SUM(amount + 1) AS a2, SUM(amount + 2) AS a3, SUM(amount + 3) AS a4 FROM group_by_orders;",
+			scanFunc: func(rows *pgx.Rows) ([]interface{}, error) {
+				var a1, a2, a3, a4 float64
+				err := rows.Scan(&a1, &a2, &a3, &a4)
+				if err != nil {
+					return nil, err
+				}
+				return []interface{}{a1, a2, a3, a4}, nil
+			},
+			expected: [][]interface{}{
+				{800.0, 805.0, 810.0, 815.0},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := conn.Query(tt.query)
+			if err != nil {
+				t.Fatalf("Query failed: %v", err)
+			}
+			defer rows.Close()
+
+			var resultRows [][]interface{}
+			for rows.Next() {
+				row, err := tt.scanFunc(rows)
+				if err != nil {
+					t.Fatalf("Failed to scan row: %v", err)
+				}
+				resultRows = append(resultRows, row)
+			}
+
+			if len(resultRows) != len(tt.expected) {
+				t.Fatalf("Expected %d rows, got %d", len(tt.expected), len(resultRows))
+			}
+
+			for i, expectedRow := range tt.expected {
+				resultRow := resultRows[i]
+				for j, expectedValue := range expectedRow {
+					if resultRow[j] != expectedValue {
+						t.Errorf("row %d column %d: expected %v, got %v", i+1, j+1, expectedValue, resultRow[j])
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestOrdersGroupBy(t *testing.T) {
 
 	conn := NewPgConnection(t)
