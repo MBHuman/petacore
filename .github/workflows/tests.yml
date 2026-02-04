@@ -18,7 +18,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25'
+        go-version-file: go.mod
         cache: true
 
     - name: Install dependencies
@@ -30,7 +30,11 @@ jobs:
     - name: Run integration tests
       run: |
         chmod +x scripts/run-tests.sh
-        STORE=inmemory PORT=5432 scripts/run-tests.sh
+        STORE=inmemory PORT=5432 PCORE_BIN=/tmp/pcore-server scripts/run-tests.sh || (
+          echo "==== server log ====";
+          cat /tmp/pcore_server_5432.log || true;
+          exit 1
+        )
 
     - name: Upload coverage
       uses: codecov/codecov-action@v3

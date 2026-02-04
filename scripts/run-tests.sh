@@ -36,7 +36,7 @@ cleanup() {
   fi
 
   # 3) Ждём освобождения порта
-  local deadline=$((SECONDS + 5))
+  local deadline=$((SECONDS + 60))
   while is_listening && (( SECONDS < deadline )); do
     sleep 0.1
   done
@@ -64,7 +64,7 @@ go run cmd/pcore/main.go -store "${STORE}" >"${LOG_FILE}" 2>&1 &
 WRAPPER_PID=$!
 
 echo "⏳ Waiting for server to listen on ${PORT}..."
-deadline=$((SECONDS + 15))
+deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )); do
   if ! kill -0 "${WRAPPER_PID}" 2>/dev/null; then
     echo "❌ Server wrapper exited during startup."
