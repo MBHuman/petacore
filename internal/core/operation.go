@@ -5,7 +5,7 @@ type Operation interface {
 }
 
 type ReadOperation struct {
-	Key string
+	Key []byte
 }
 
 func (ro *ReadOperation) Execute(tx *Transaction) error {
@@ -14,7 +14,7 @@ func (ro *ReadOperation) Execute(tx *Transaction) error {
 }
 
 type WriteOperation struct {
-	Key   string
+	Key   []byte
 	Value string
 }
 

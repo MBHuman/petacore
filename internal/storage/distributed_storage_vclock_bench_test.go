@@ -25,7 +25,7 @@ func BenchmarkVClock_SingleWrite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%d", i)
+		key := []byte(fmt.Sprintf("key%d", i))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, "value")
 			return nil
@@ -41,7 +41,7 @@ func BenchmarkVClock_SingleRead(b *testing.B) {
 
 	const prepopulate = 1000
 	for i := 0; i < prepopulate; i++ {
-		key := fmt.Sprintf("key%d", i)
+		key := []byte(fmt.Sprintf("key%d", i))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, "value")
 			return nil
@@ -50,7 +50,7 @@ func BenchmarkVClock_SingleRead(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%d", i%prepopulate)
+		key := []byte(fmt.Sprintf("key%d", i%prepopulate))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Read(key)
 			return nil
@@ -66,7 +66,7 @@ func BenchmarkVClock_ReadWriteMix(b *testing.B) {
 
 	const keys = 100
 	for i := 0; i < keys; i++ {
-		k := fmt.Sprintf("key%d", i)
+		k := []byte(fmt.Sprintf("key%d", i))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(k, "init")
 			return nil
@@ -75,7 +75,7 @@ func BenchmarkVClock_ReadWriteMix(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		k := fmt.Sprintf("key%d", i%keys)
+		k := []byte(fmt.Sprintf("key%d", i%keys))
 		if i%2 == 0 {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Read(k)
@@ -102,7 +102,7 @@ func BenchmarkVClock_ConcurrentWrites(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			id := atomic.AddUint64(&ctr, 1) - 1
-			key := fmt.Sprintf("key%d", id)
+			key := []byte(fmt.Sprintf("key%d", id))
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Write(key, "value")
 				return nil
@@ -119,7 +119,7 @@ func BenchmarkVClock_ConcurrentReads(b *testing.B) {
 
 	const prepopulate = 1000
 	for i := 0; i < prepopulate; i++ {
-		key := fmt.Sprintf("key%d", i)
+		key := []byte(fmt.Sprintf("key%d", i))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, "value")
 			return nil
@@ -131,7 +131,7 @@ func BenchmarkVClock_ConcurrentReads(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			i := atomic.AddUint64(&idx, 1) - 1
-			key := fmt.Sprintf("key%d", i%prepopulate)
+			key := []byte(fmt.Sprintf("key%d", i%prepopulate))
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Read(key)
 				return nil
@@ -148,7 +148,7 @@ func BenchmarkVClock_Transaction(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		k := fmt.Sprintf("key%d", i)
+		k := []byte(fmt.Sprintf("key%d", i))
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(k, "value")
 			tx.Read(k)
@@ -168,7 +168,7 @@ func BenchmarkVClock_LargeTransaction(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			for j := 0; j < opsPerTx; j++ {
-				key := fmt.Sprintf("key%d_%d", i, j)
+				key := []byte(fmt.Sprintf("key%d_%d", i, j))
 				tx.Write(key, "value")
 			}
 			return nil
@@ -183,7 +183,7 @@ func BenchmarkVClock_HotKey(b *testing.B) {
 	}
 
 	ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("hotkey", "0")
+		tx.Write([]byte("hotkey"), "0")
 		return nil
 	})
 
@@ -191,8 +191,8 @@ func BenchmarkVClock_HotKey(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Read("hotkey")
-				tx.Write("hotkey", "updated")
+				tx.Read([]byte("hotkey"))
+				tx.Write([]byte("hotkey"), "updated")
 				return nil
 			})
 		}
@@ -214,7 +214,7 @@ func BenchmarkVClock_QuorumOverhead(b *testing.B) {
 
 			const pre = 100
 			for i := 0; i < pre; i++ {
-				k := fmt.Sprintf("key%d", i)
+				k := []byte(fmt.Sprintf("key%d", i))
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 					tx.Write(k, "v")
 					return nil
@@ -223,7 +223,7 @@ func BenchmarkVClock_QuorumOverhead(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				k := fmt.Sprintf("key%d", i%pre)
+				k := []byte(fmt.Sprintf("key%d", i%pre))
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 					tx.Read(k)
 					return nil
@@ -245,7 +245,7 @@ func BenchmarkVClock_VectorClockSize(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			id := atomic.AddUint64(&ctr, 1) - 1
-			key := fmt.Sprintf("key%d", id)
+			key := []byte(fmt.Sprintf("key%d", id))
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 				tx.Write(key, "v")
 				return nil
@@ -269,7 +269,7 @@ func BenchmarkVClock_LatencyAvg(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		start := time.Now()
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write(fmt.Sprintf("key%d", i), "v")
+			tx.Write([]byte(fmt.Sprintf("key%d", i)), "v")
 			return nil
 		})
 		if sampleCount < maxSamples {
@@ -297,7 +297,7 @@ func BenchmarkVClock_Throughput(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write("tput_key", "v")
+				tx.Write([]byte("tput_key"), "v")
 				return nil
 			})
 			atomic.AddInt64(&ops, 1)
@@ -318,7 +318,7 @@ func BenchmarkVClock_MemoryUsage(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%d", i)
+		key := []byte(fmt.Sprintf("key%d", i))
 		val := fmt.Sprintf("value_%d_with_some_data", i)
 		ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			tx.Write(key, val)
@@ -342,7 +342,7 @@ func BenchmarkVClock_Scalability(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					i := atomic.AddUint64(&idx, 1) - 1
-					k := fmt.Sprintf("key%d", i)
+					k := []byte(fmt.Sprintf("key%d", i))
 					ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 						tx.Write(k, "v")
 						return nil
@@ -367,7 +367,7 @@ func BenchmarkVClock_BatchWrite(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 					for j := 0; j < bs; j++ {
-						tx.Write(fmt.Sprintf("key%d_%d", i, j), "v")
+						tx.Write([]byte(fmt.Sprintf("key%d_%d", i, j)), "v")
 					}
 					return nil
 				})
@@ -398,7 +398,7 @@ func BenchmarkVClock_ContentionLevel(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					i := atomic.AddUint64(&idx, 1) - 1
-					key := fmt.Sprintf("key%d", i%uint64(level.keyRange))
+					key := []byte(fmt.Sprintf("key%d", i%uint64(level.keyRange)))
 					ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 						tx.Write(key, "v")
 						return nil
@@ -420,7 +420,7 @@ func BenchmarkVClock_SynchronizationOverhead(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			ds.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write("sync_key", "v")
+				tx.Write([]byte("sync_key"), "v")
 				return nil
 			})
 		}

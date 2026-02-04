@@ -23,7 +23,7 @@ func SetupKVStore(tb testing.TB, namespace string) distributed.KVStore {
 
 	dbType := os.Getenv("DB_TYPE")
 	if dbType == "" {
-		dbType = "etcd"
+		dbType = "inmemory"
 	}
 
 	var kvStore distributed.KVStore
@@ -44,17 +44,8 @@ func SetupKVStore(tb testing.TB, namespace string) distributed.KVStore {
 			tb.Skipf("ETCD не доступен (%v), пропускаем тест: %v", endpoints, err)
 			return nil
 		}
-
-	case "postgres":
-		connStr := os.Getenv("PG_CONN_STRING")
-		if connStr == "" {
-			connStr = "postgres://postgres:password@localhost/petacore_test?sslmode=disable"
-		}
-		kvStore, err = distributed.NewPGStore(connStr, namespace)
-		if err != nil {
-			tb.Skipf("PostgreSQL не доступен (%s), пропускаем тест: %v", connStr, err)
-			return nil
-		}
+	case "inmemory":
+		kvStore = distributed.NewInMemoryStore()
 
 	default:
 		tb.Fatalf("Неизвестный DB_TYPE: %s", dbType)
@@ -160,7 +151,7 @@ func BenchmarkDistributedWrite(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 		if err != nil {
@@ -183,7 +174,7 @@ func BenchmarkDistributedRead(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 	}
@@ -194,7 +185,7 @@ func BenchmarkDistributedRead(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("key_%d", i%1000)
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			_, _ = tx.Read(key)
+			_, _ = tx.Read([]byte(key))
 			return nil
 		})
 		if err != nil {
@@ -217,7 +208,7 @@ func BenchmarkDistributedReadWrite(b *testing.B) {
 	for i := 0; i < 100; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "initial_value")
+			tx.Write([]byte(key), "initial_value")
 			return nil
 		})
 	}
@@ -229,8 +220,8 @@ func BenchmarkDistributedReadWrite(b *testing.B) {
 		readKey := fmt.Sprintf("key_%d", i%100)
 		writeKey := fmt.Sprintf("key_%d", (i+1)%100)
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			_, _ = tx.Read(readKey)
-			tx.Write(writeKey, "updated_value")
+			_, _ = tx.Read([]byte(readKey))
+			tx.Write([]byte(writeKey), "updated_value")
 			return nil
 		})
 		if err != nil {
@@ -251,8 +242,8 @@ func BenchmarkDistributedTransaction(b *testing.B) {
 
 	// Инициализация
 	_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("account:alice", "1000")
-		tx.Write("account:bob", "500")
+		tx.Write([]byte("account:alice"), "1000")
+		tx.Write([]byte("account:bob"), "500")
 		return nil
 	})
 
@@ -261,12 +252,12 @@ func BenchmarkDistributedTransaction(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			alice, _ := tx.Read("account:alice")
-			bob, _ := tx.Read("account:bob")
+			alice, _ := tx.Read([]byte("account:alice"))
+			bob, _ := tx.Read([]byte("account:bob"))
 
 			// Симулируем перевод средств
-			tx.Write("account:alice", alice+"-100")
-			tx.Write("account:bob", bob+"+100")
+			tx.Write([]byte("account:alice"), alice+"-100")
+			tx.Write([]byte("account:bob"), bob+"+100")
 			return nil
 		})
 		if err != nil {
@@ -291,7 +282,7 @@ func BenchmarkDistributedConcurrentWrites(b *testing.B) {
 		for pb.Next() {
 			key := fmt.Sprintf("key_%d", i)
 			err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-				tx.Write(key, "value")
+				tx.Write([]byte(key), "value")
 				return nil
 			})
 			if err != nil {
@@ -316,7 +307,7 @@ func BenchmarkDistributedConcurrentReads(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 	}
@@ -329,7 +320,7 @@ func BenchmarkDistributedConcurrentReads(b *testing.B) {
 		for pb.Next() {
 			key := fmt.Sprintf("key_%d", i%1000)
 			err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-				_, _ = tx.Read(key)
+				_, _ = tx.Read([]byte(key))
 				return nil
 			})
 			if err != nil {
@@ -352,7 +343,7 @@ func BenchmarkDistributedHotKey(b *testing.B) {
 
 	// Инициализируем счетчик
 	_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write("counter", "0")
+		tx.Write([]byte("counter"), "0")
 		return nil
 	})
 
@@ -362,8 +353,8 @@ func BenchmarkDistributedHotKey(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-				value, _ := tx.Read("counter")
-				tx.Write("counter", value+"1")
+				value, _ := tx.Read([]byte("counter"))
+				tx.Write([]byte("counter"), value+"1")
 				return nil
 			})
 			if err != nil {
@@ -415,7 +406,7 @@ func BenchmarkDistributedIsolationLevels(b *testing.B) {
 			for i := 0; i < 100; i++ {
 				key := fmt.Sprintf("key_%d", i)
 				_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					tx.Write(key, "value")
+					tx.Write([]byte(key), "value")
 					return nil
 				})
 			}
@@ -426,8 +417,8 @@ func BenchmarkDistributedIsolationLevels(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				key := fmt.Sprintf("key_%d", i%100)
 				err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					_, _ = tx.Read(key)
-					tx.Write(key, "updated")
+					_, _ = tx.Read([]byte(key))
+					tx.Write([]byte(key), "updated")
 					return nil
 				})
 				if err != nil {
@@ -500,7 +491,7 @@ func BenchmarkDistributedMultiNode(b *testing.B) {
 			for i := 0; i < opsPerNode; i++ {
 				key := fmt.Sprintf("node%d_key_%d", idx, i)
 				err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					tx.Write(key, "value")
+					tx.Write([]byte(key), "value")
 					return nil
 				})
 				if err != nil {
@@ -533,7 +524,7 @@ func BenchmarkDistributedBatchWrites(b *testing.B) {
 				err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 					for j := 0; j < batchSize; j++ {
 						key := fmt.Sprintf("key_%d_%d", i, j)
-						tx.Write(key, "value")
+						tx.Write([]byte(key), "value")
 					}
 					return nil
 				})
@@ -563,7 +554,7 @@ func BenchmarkDistributedLatency(b *testing.B) {
 		start := time.Now()
 		err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
 			key := fmt.Sprintf("key_%d", i)
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 		latencies[i] = time.Since(start)
@@ -608,7 +599,7 @@ func BenchmarkDistributedContention(b *testing.B) {
 	for i := 0; i < keyCount; i++ {
 		key := fmt.Sprintf("shared_key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "0")
+			tx.Write([]byte(key), "0")
 			return nil
 		})
 	}
@@ -621,8 +612,8 @@ func BenchmarkDistributedContention(b *testing.B) {
 		for pb.Next() {
 			key := fmt.Sprintf("shared_key_%d", i%keyCount)
 			err := ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-				value, _ := tx.Read(key)
-				tx.Write(key, value+"1")
+				value, _ := tx.Read([]byte(key))
+				tx.Write([]byte(key), value+"1")
 				return nil
 			})
 			if err != nil {
@@ -647,7 +638,7 @@ func BenchmarkDistributedReadHeavy(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 	}
@@ -662,13 +653,13 @@ func BenchmarkDistributedReadHeavy(b *testing.B) {
 			if i%10 == 0 {
 				key := fmt.Sprintf("key_%d", i%1000)
 				_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					tx.Write(key, "updated")
+					tx.Write([]byte(key), "updated")
 					return nil
 				})
 			} else {
 				key := fmt.Sprintf("key_%d", i%1000)
 				_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					_, _ = tx.Read(key)
+					_, _ = tx.Read([]byte(key))
 					return nil
 				})
 			}
@@ -691,7 +682,7 @@ func BenchmarkDistributedWriteHeavy(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-			tx.Write(key, "value")
+			tx.Write([]byte(key), "value")
 			return nil
 		})
 	}
@@ -706,13 +697,13 @@ func BenchmarkDistributedWriteHeavy(b *testing.B) {
 			if i%10 == 0 {
 				key := fmt.Sprintf("key_%d", i%1000)
 				_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					_, _ = tx.Read(key)
+					_, _ = tx.Read([]byte(key))
 					return nil
 				})
 			} else {
 				key := fmt.Sprintf("key_%d", i%1000)
 				_ = ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-					tx.Write(key, "updated")
+					tx.Write([]byte(key), "updated")
 					return nil
 				})
 			}

@@ -48,7 +48,7 @@ func (r *REPL) handleSet(args []string) {
 	value := strings.Join(args[1:], " ")
 
 	err := r.ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write(key, value)
+		tx.Write([]byte(key), value)
 		return nil
 	})
 
@@ -68,7 +68,7 @@ func (r *REPL) handleGet(args []string) {
 	key := args[0]
 
 	err := r.ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		if value, ok := tx.Read(key); ok {
+		if value, ok := tx.Read([]byte(key)); ok {
 			fmt.Printf("✓ %s = %s\n", key, value)
 		} else {
 			fmt.Printf("⚠ Ключ %s не найден\n", key)
@@ -90,7 +90,7 @@ func (r *REPL) handleDelete(args []string) {
 	key := args[0]
 
 	err := r.ds.RunTransaction(func(tx *storage.DistributedTransaction) error {
-		tx.Write(key, "")
+		tx.Write([]byte(key), "")
 		return nil
 	})
 
@@ -159,13 +159,13 @@ func (r *REPL) handleTransaction() {
 				for _, op := range operations {
 					switch op.opType {
 					case "read":
-						if value, ok := tx.Read(op.key); ok {
+						if value, ok := tx.Read([]byte(op.key)); ok {
 							fmt.Printf("  [READ] %s = %s\n", op.key, value)
 						} else {
 							fmt.Printf("  [READ] %s = <не найдено>\n", op.key)
 						}
 					case "write":
-						tx.Write(op.key, op.value)
+						tx.Write([]byte(op.key), op.value)
 						fmt.Printf("  [WRITE] %s = %s\n", op.key, op.value)
 					}
 				}

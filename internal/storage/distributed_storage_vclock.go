@@ -219,9 +219,9 @@ func (dtx *DistributedTransactionVClock) Begin() {
 // Read читает с quorum-based проверкой
 // Возвращает последнюю БЕЗОПАСНУЮ версию (с подтвержденным кворумом)
 // Если запись не синхронизирована на достаточное количество узлов - возвращает старую версию
-func (dtx *DistributedTransactionVClock) Read(key string) (string, bool) {
+func (dtx *DistributedTransactionVClock) Read(key []byte) (string, bool) {
 	// Сначала проверяем локальные изменения
-	if value, ok := dtx.localWrites[key]; ok {
+	if value, ok := dtx.localWrites[string(key)]; ok {
 		return value, true
 	}
 
@@ -245,17 +245,20 @@ func (dtx *DistributedTransactionVClock) Read(key string) (string, bool) {
 	}
 	// Добавляем в readSet для OCC
 	if vclock != nil {
-		dtx.readSet[key] = vclock.Clone()
+		dtx.readSet[string(key)] = vclock.Clone()
+	}
+	if value == "" {
+		return "", false
 	}
 	return value, true
 }
 
 // Write записывает в локальный буфер
-func (dtx *DistributedTransactionVClock) Write(key string, value string) {
+func (dtx *DistributedTransactionVClock) Write(key []byte, value string) {
 	// Read-before-write: если ключ не читался, прочитаем его версию для OCC
-	if _, exists := dtx.readSet[key]; !exists {
+	if _, exists := dtx.readSet[string(key)]; !exists {
 		// Проверяем локальные изменения
-		if _, ok := dtx.localWrites[key]; !ok {
+		if _, ok := dtx.localWrites[string(key)]; !ok {
 			// Читаем из MVCC, чтобы добавить в readSet
 			var snapshotVC *core.VectorClock
 			var snapshotTs uint64
@@ -268,13 +271,13 @@ func (dtx *DistributedTransactionVClock) Write(key string, value string) {
 			}
 			_, vclock, ok := dtx.mvccVClock.ReadWithSnapshot(key, snapshotVC, snapshotTs, dtx.minAcks, dtx.totalNodes, dtx.nodeID)
 			if ok && vclock != nil {
-				dtx.readSet[key] = vclock.Clone()
+				dtx.readSet[string(key)] = vclock.Clone()
 			}
 			// Если не ok, ключ новый, readSet не обновляем
 		}
 	}
 
-	dtx.localWrites[key] = value
+	dtx.localWrites[string(key)] = value
 }
 
 // Commit фиксирует транзакцию
@@ -287,7 +290,7 @@ func (dtx *DistributedTransactionVClock) Commit() error {
 		ctx := context.Background() // Или использовать timeout ctx
 		for key, expectedVClock := range dtx.readSet {
 			// Запрашиваем актуальную версию из ETCD через GetCurrentVersion
-			currentVClock, err := dtx.synchronizer.GetCurrentVersion(ctx, key)
+			currentVClock, err := dtx.synchronizer.GetCurrentVersion(ctx, []byte(key))
 			if err != nil {
 				return fmt.Errorf("OCC violation: key %s was read but error getting current version: %w", key, err)
 			}
@@ -312,7 +315,7 @@ func (dtx *DistributedTransactionVClock) Commit() error {
 		// 2. Пишет в ETCD (синхронно, гарантия персистентности)
 		// 3. Пишет в локальный MVCC с VClock
 		// 4. Watch на других узлах увидит изменение и обновит их VClock
-		if err := dtx.synchronizer.WriteThroughVClock(ctx, key, value); err != nil {
+		if err := dtx.synchronizer.WriteThroughVClock(ctx, []byte(key), value); err != nil {
 			return fmt.Errorf("failed to write key %s: %w", key, err)
 		}
 	}
@@ -335,4 +338,50 @@ func (dtx *DistributedTransactionVClock) Release() {
 		delete(dtx.readSet, k)
 	}
 	dtx.snapshotVClock = nil
+}
+
+// Put записывает значение
+func (dtx *DistributedTransactionVClock) Put(key, value []byte) error {
+	dtx.Write(key, string(value))
+	return nil
+}
+
+// Get читает значение
+func (dtx *DistributedTransactionVClock) Get(key []byte) ([]byte, bool, error) {
+	value, ok := dtx.Read(key)
+	return []byte(value), ok, nil
+}
+
+// Delete удаляет значение (пишем пустую строку)
+func (dtx *DistributedTransactionVClock) Delete(key []byte) error {
+	dtx.Write(key, "")
+	return nil
+}
+
+// Scan сканирует префикс
+func (dtx *DistributedTransactionVClock) Scan(prefix []byte, it core.IteratorType, limit int) (map[string][]byte, error) {
+	// Определяем snapshot для чтения
+	var snapshotVC *core.VectorClock
+	var snapshotTs uint64
+	if dtx.isolationLevel == core.SnapshotIsolation && dtx.snapshotVClock != nil {
+		// Для Snapshot Isolation используем фиксированный snapshot
+		snapshotVC = dtx.snapshotVClock
+		snapshotTs = 0
+	} else {
+		// Для ReadCommitted используем текущий timestamp
+		snapshotVC = nil
+		snapshotTs = dtx.logicalClock.Get()
+	}
+
+	resultStr := dtx.mvccVClock.ScanWithSnapshot(prefix, it, snapshotVC, snapshotTs, dtx.minAcks, dtx.totalNodes, dtx.nodeID, limit)
+	result := make(map[string][]byte)
+	for k, v := range resultStr {
+		result[k] = []byte(v)
+	}
+	return result, nil
+}
+
+// Rollback очищает локальные изменения
+func (dtx *DistributedTransactionVClock) Rollback() {
+	dtx.Release()
 }

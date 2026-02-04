@@ -6,7 +6,7 @@ import (
 
 // KVEntry представляет запись в KV хранилище с метаданными
 type KVEntry struct {
-	Key      string
+	Key      []byte
 	Value    string
 	Version  int64 // Версия записи (для MVCC)
 	Revision int64 // Ревизия в distributed store (например, ETCD revision)
@@ -15,19 +15,21 @@ type KVEntry struct {
 // KVStore - интерфейс для работы с распределенным KV хранилищем
 type KVStore interface {
 	// Get получает значение по ключу
-	Get(ctx context.Context, key string) (*KVEntry, error)
+	Get(ctx context.Context, key []byte) (*KVEntry, error)
 
 	// Put записывает значение по ключу с версией
-	Put(ctx context.Context, key string, value string, version int64) error
+	Put(ctx context.Context, key []byte, value string, version int64) error
 
 	// Delete удаляет ключ
-	Delete(ctx context.Context, key string) error
+	Delete(ctx context.Context, key []byte) error
+	// ScanPrefix сканирует все ключи с префиксом
+	ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEntry, error)
 
 	// SyncIterator возвращает итератор для синхронизации ключей с префиксом
 	// После того как Revision достигает ревизии в distributed хранилище,
 	// состояние узла считается синхронизированным и он принимать участие в кворуме
 	// и принимать запросы
-	SyncIterator(ctx context.Context, prefix string) (<-chan *WatchEvent, error)
+	SyncIterator(ctx context.Context, prefix []byte) (<-chan *WatchEvent, error)
 
 	// Close закрывает соединение с хранилищем
 	Close() error
@@ -49,6 +51,8 @@ const (
 	EventTypePut WatchEventType = iota
 	// EventTypeDelete событие удаления
 	EventTypeDelete
+	// EventTypeSyncComplete синхронизация начальных данных завершена
+	EventTypeSyncComplete
 )
 
 // WatchEvent событие изменения в KV хранилище

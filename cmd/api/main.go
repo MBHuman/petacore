@@ -164,7 +164,7 @@ func (s *APIServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 	// Выполняем транзакцию записи
 	err := s.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write(req.Key, req.Value)
+		tx.Write([]byte(req.Key), req.Value)
 		return nil
 	})
 
@@ -204,7 +204,7 @@ func (s *APIServer) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	// Выполняем транзакцию чтения с quorum проверкой
 	err := s.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		if value, ok := tx.Read(key); ok {
+		if value, ok := tx.Read([]byte(key)); ok {
 			response.Value = value
 			response.Found = true
 		} else {
@@ -249,11 +249,12 @@ func (s *APIServer) handleSetMinAcks(w http.ResponseWriter, r *http.Request) {
 	newMinAcks := s.storage.GetMinAcks()
 
 	var description string
-	if req.MinAcks == 0 {
+	switch req.MinAcks {
+	case 0:
 		description = fmt.Sprintf("Set to default quorum (%d/%d + 1)", s.storage.GetTotalNodes(), 2)
-	} else if req.MinAcks == -1 {
+	case -1:
 		description = fmt.Sprintf("Set to all nodes (%d/%d)", newMinAcks, s.storage.GetTotalNodes())
-	} else {
+	default:
 		description = fmt.Sprintf("Set to custom value (%d/%d)", newMinAcks, s.storage.GetTotalNodes())
 	}
 

@@ -49,7 +49,7 @@ func (r *REPL) handleSet(args []string) {
 	value := strings.Join(args[1:], " ")
 
 	err := r.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write(key, value)
+		tx.Write([]byte(key), value)
 		return nil
 	})
 
@@ -69,11 +69,17 @@ func (r *REPL) handleGet(args []string) {
 	key := args[0]
 
 	err := r.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		if value, ok := tx.Read(key); ok {
+		if value, ok := tx.Read([]byte(key)); ok {
 			fmt.Printf("✓ %s = %s\n", key, value)
 		} else {
 			fmt.Printf("⚠ Ключ %s не найден (или нет quorum)\n", key)
 			fmt.Printf("  [DEBUG] minAcks=%d, totalNodes=%d\n", r.storage.GetMinAcks(), r.storage.GetTotalNodes())
+			// Debug: check if key exists in MVCC
+			if val, ok, _ := tx.Get([]byte(key)); ok {
+				fmt.Printf("  [DEBUG] Key exists in MVCC with value: %s\n", val)
+			} else {
+				fmt.Printf("  [DEBUG] Key not found in MVCC\n")
+			}
 		}
 		return nil
 	})
@@ -124,7 +130,7 @@ func (r *REPL) handleTransaction() {
 				continue
 			}
 			key := args[0]
-			if value, ok := tx.Read(key); ok {
+			if value, ok := tx.Read([]byte(key)); ok {
 				fmt.Printf("✓ %s = %s\n", key, value)
 			} else {
 				fmt.Printf("⚠ %s = <не найдено>\n", key)
@@ -137,7 +143,7 @@ func (r *REPL) handleTransaction() {
 			}
 			key := args[0]
 			value := strings.Join(args[1:], " ")
-			tx.Write(key, value)
+			tx.Write([]byte(key), value)
 			fmt.Printf("✓ Записано: %s = %s\n", key, value)
 
 		case "commit":
@@ -228,7 +234,7 @@ func main() {
 	// Параметры командной строки
 	nodeID := flag.String("node", "node1", "ID узла")
 	totalNodes := flag.Int("nodes", 3, "Общее количество узлов в кластере")
-	etcdEndpoints := flag.String("etcd", "localhost:2379,localhost:2479,localhost:2579", "ETCD endpoints через запятую")
+	etcdEndpoints := flag.String("etcd", "localhost:2379", "ETCD endpoints через запятую")
 	isolationStr := flag.String("isolation", "snapshot", "Уровень изоляции транзакций: readcommitted или snapshot")
 	flag.Parse()
 

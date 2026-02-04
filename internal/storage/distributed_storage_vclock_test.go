@@ -31,7 +31,7 @@ func TestVectorClock_BasicOperations(t *testing.T) {
 
 	// Тест Write
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("key1", "value1")
+		tx.Write([]byte("key1"), "value1")
 		return nil
 	})
 
@@ -44,7 +44,7 @@ func TestVectorClock_BasicOperations(t *testing.T) {
 
 	// Тест Read
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		value, ok := tx.Read("key1")
+		value, ok := tx.Read([]byte("key1"))
 		if !ok {
 			t.Error("Expected to find key1")
 			return fmt.Errorf("key not found")
@@ -96,7 +96,7 @@ func TestVectorClock_QuorumRead(t *testing.T) {
 
 	// Node1 записывает данные
 	err := storage1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("test_key", "test_value")
+		tx.Write([]byte("test_key"), "test_value")
 		return nil
 	})
 
@@ -110,7 +110,7 @@ func TestVectorClock_QuorumRead(t *testing.T) {
 	// Проверяем, что все узлы получили запись
 	for i, store := range []*storage.DistributedStorageVClock{storage1, storage2, storage3} {
 		err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			value, ok := tx.Read("test_key")
+			value, ok := tx.Read([]byte("test_key"))
 			if !ok {
 				return fmt.Errorf("node%d: key not found", i+1)
 			}
@@ -150,7 +150,7 @@ func TestVectorClock_ConcurrentWrites(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				tx.Write(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+				tx.Write([]byte(fmt.Sprintf("key%d", i)), fmt.Sprintf("value%d", i))
 				return nil
 			})
 			if err != nil {
@@ -166,7 +166,7 @@ func TestVectorClock_ConcurrentWrites(t *testing.T) {
 	for i := 0; i < numWrites; i++ {
 		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 			key := fmt.Sprintf("key%d", i)
-			value, ok := tx.Read(key)
+			value, ok := tx.Read([]byte(key))
 			if !ok {
 				return fmt.Errorf("key %s not found", key)
 			}
@@ -198,7 +198,7 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 
 	// Первая транзакция - инициализация
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("counter", "0")
+		tx.Write([]byte("counter"), "0")
 		return nil
 	})
 
@@ -217,12 +217,12 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-				val, ok := tx.Read("counter")
+				val, ok := tx.Read([]byte("counter"))
 				if !ok {
 					val = "0"
 				}
 				// Просто перезаписываем (в реальной системе бы парсили и увеличивали)
-				tx.Write("counter", val+"1")
+				tx.Write([]byte("counter"), val+"1")
 				return nil
 			})
 		}()
@@ -233,7 +233,7 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 
 	// Проверяем финальное значение
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		value, ok := tx.Read("counter")
+		value, ok := tx.Read([]byte("counter"))
 		if !ok {
 			return fmt.Errorf("counter not found")
 		}
@@ -267,10 +267,10 @@ func TestVectorClock_MultipleKeys(t *testing.T) {
 
 	// Записываем несколько ключей в одной транзакции
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("user:1:name", "Alice")
-		tx.Write("user:1:email", "alice@example.com")
-		tx.Write("user:2:name", "Bob")
-		tx.Write("user:2:email", "bob@example.com")
+		tx.Write([]byte("user:1:name"), "Alice")
+		tx.Write([]byte("user:1:email"), "alice@example.com")
+		tx.Write([]byte("user:2:name"), "Bob")
+		tx.Write([]byte("user:2:email"), "bob@example.com")
 		return nil
 	})
 
@@ -293,7 +293,7 @@ func TestVectorClock_MultipleKeys(t *testing.T) {
 		}
 
 		for _, tt := range tests {
-			value, ok := tx.Read(tt.key)
+			value, ok := tx.Read([]byte(tt.key))
 			if !ok {
 				return fmt.Errorf("key %s not found", tt.key)
 			}
@@ -327,7 +327,7 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 
 	// Первая запись
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("config:version", "1.0")
+		tx.Write([]byte("config:version"), "1.0")
 		return nil
 	})
 	if err != nil {
@@ -338,7 +338,7 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 
 	// Обновление
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("config:version", "1.1")
+		tx.Write([]byte("config:version"), "1.1")
 		return nil
 	})
 	if err != nil {
@@ -349,7 +349,7 @@ func TestVectorClock_UpdateOperations(t *testing.T) {
 
 	// Проверяем, что получаем последнюю версию
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		value, ok := tx.Read("config:version")
+		value, ok := tx.Read([]byte("config:version"))
 		if !ok {
 			return fmt.Errorf("config:version not found")
 		}
@@ -382,7 +382,7 @@ func TestVectorClock_EmptyRead(t *testing.T) {
 
 	// Читаем несуществующий ключ
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		_, ok := tx.Read("nonexistent")
+		_, ok := tx.Read([]byte("nonexistent"))
 		if ok {
 			return fmt.Errorf("expected key not found, but it was found")
 		}
@@ -412,7 +412,7 @@ func TestVectorClock_TransactionRollback(t *testing.T) {
 
 	// Транзакция с ошибкой (должна откатиться)
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("rollback_test", "should_not_persist")
+		tx.Write([]byte("rollback_test"), "should_not_persist")
 		return fmt.Errorf("simulated error")
 	})
 
@@ -424,7 +424,7 @@ func TestVectorClock_TransactionRollback(t *testing.T) {
 
 	// Проверяем, что данные НЕ сохранились
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		_, ok := tx.Read("rollback_test")
+		_, ok := tx.Read([]byte("rollback_test"))
 		if ok {
 			return fmt.Errorf("data should not exist after rollback")
 		}
@@ -457,7 +457,7 @@ func TestVectorClock_SequentialWrites(t *testing.T) {
 	// Последовательные записи
 	for i := 0; i < numWrites; i++ {
 		err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			tx.Write("sequence", fmt.Sprintf("value-%d", i))
+			tx.Write([]byte("sequence"), fmt.Sprintf("value-%d", i))
 			return nil
 		})
 		if err != nil {
@@ -470,7 +470,7 @@ func TestVectorClock_SequentialWrites(t *testing.T) {
 
 	// Проверяем финальное значение
 	err := store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		value, ok := tx.Read("sequence")
+		value, ok := tx.Read([]byte("sequence"))
 		if !ok {
 			return fmt.Errorf("sequence key not found")
 		}
@@ -513,7 +513,7 @@ func TestOCC_DoubleSpending(t *testing.T) {
 
 	// Устанавливаем начальный баланс
 	err := store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write("balance", "100")
+		tx.Write([]byte("balance"), "100")
 		return nil
 	})
 	require.NoError(t, err)
@@ -528,12 +528,12 @@ func TestOCC_DoubleSpending(t *testing.T) {
 	go func() {
 		defer tx1Done.Done()
 		tx1Err = store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			if value, ok := tx.Read("balance"); !ok {
+			if value, ok := tx.Read([]byte("balance")); !ok {
 				return fmt.Errorf("balance not found")
 			} else if value != "100" {
 				return fmt.Errorf("expected 100, got %s", value)
 			}
-			tx.Write("balance", "50")
+			tx.Write([]byte("balance"), "50")
 			time.Sleep(200 * time.Millisecond) // Имитируем работу
 			return nil
 		})
@@ -547,12 +547,12 @@ func TestOCC_DoubleSpending(t *testing.T) {
 		defer tx2Done.Done()
 		time.Sleep(50 * time.Millisecond) // Начинаем после tx1
 		tx2Err = store2.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-			if value, ok := tx.Read("balance"); !ok {
+			if value, ok := tx.Read([]byte("balance")); !ok {
 				return fmt.Errorf("balance not found")
 			} else if value != "100" {
 				return fmt.Errorf("expected 100, got %s", value)
 			}
-			tx.Write("balance", "0")
+			tx.Write([]byte("balance"), "0")
 			time.Sleep(300 * time.Millisecond) // Имитируем работу
 			return nil
 		})
@@ -572,7 +572,7 @@ func TestOCC_DoubleSpending(t *testing.T) {
 	// Проверяем финальный баланс
 	time.Sleep(500 * time.Millisecond) // Ждём синхронизации
 	err = store1.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		value, ok := tx.Read("balance")
+		value, ok := tx.Read([]byte("balance"))
 		if !ok {
 			return fmt.Errorf("balance not found")
 		}
