@@ -9,15 +9,25 @@ import (
 
 // InMemoryStore реализация KVStore в памяти для тестирования
 type InMemoryStore struct {
-	mu       sync.RWMutex
-	data     map[string]*KVEntry
-	revision int64 // Глобальная ревизия для имитации распределенного хранилища
+	mu        sync.RWMutex
+	data      map[string]*KVEntry
+	revision  int64 // Глобальная ревизия для имитации распределенного хранилища
+	watchers  map[string][]*watcher
+	watcherMu sync.RWMutex
+}
+
+// watcher представляет подписчика на изменения
+type watcher struct {
+	prefix string
+	ch     chan *WatchEvent
+	ctx    context.Context
 }
 
 // NewInMemoryStore создает новый in-memory store
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
 		data:     make(map[string]*KVEntry),
+		watchers: make(map[string][]*watcher),
 		revision: 0,
 	}
 }
@@ -44,15 +54,22 @@ func (s *InMemoryStore) Get(ctx context.Context, key []byte) (*KVEntry, error) {
 // Put записывает значение по ключу с версией
 func (s *InMemoryStore) Put(ctx context.Context, key []byte, value string, version int64) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	keyStr := string(key)
+	prevEntry := s.data[keyStr]
 
 	s.revision++
-	s.data[string(key)] = &KVEntry{
+	newEntry := &KVEntry{
 		Key:      append([]byte(nil), key...),
 		Value:    value,
 		Version:  version,
 		Revision: s.revision,
 	}
+	s.data[keyStr] = newEntry
+	s.mu.Unlock()
+
+	// Уведомляем наблюдателей
+	s.notifyWatchers(keyStr, EventTypePut, newEntry, prevEntry)
 
 	return nil
 }
@@ -60,10 +77,15 @@ func (s *InMemoryStore) Put(ctx context.Context, key []byte, value string, versi
 // Delete удаляет ключ
 func (s *InMemoryStore) Delete(ctx context.Context, key []byte) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	delete(s.data, string(key))
+	keyStr := string(key)
+	prevEntry := s.data[keyStr]
+	delete(s.data, keyStr)
 	s.revision++
+	s.mu.Unlock()
+
+	// Уведомляем наблюдателей
+	s.notifyWatchers(keyStr, EventTypeDelete, nil, prevEntry)
 
 	return nil
 }
@@ -87,17 +109,42 @@ func (s *InMemoryStore) ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEnt
 			})
 		}
 	}
-
 	return entries, nil
+
 }
 
-// SyncIterator возвращает итератор для синхронизации ключей с префиксом
-// Для in-memory реализации просто возвращаем все существующие данные и сразу сигнализируем о завершении
 func (s *InMemoryStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *WatchEvent, error) {
 	ch := make(chan *WatchEvent, 100)
+	prefixStr := string(prefix)
+
+	// Регистрируем watcher
+	w := &watcher{
+		prefix: prefixStr,
+		ch:     ch,
+		ctx:    ctx,
+	}
+
+	s.watcherMu.Lock()
+	s.watchers[prefixStr] = append(s.watchers[prefixStr], w)
+	s.watcherMu.Unlock()
 
 	go func() {
-		defer close(ch)
+		defer func() {
+			// Удаляем watcher при завершении
+			s.watcherMu.Lock()
+			watchers := s.watchers[prefixStr]
+			for i, watcher := range watchers {
+				if watcher == w {
+					s.watchers[prefixStr] = append(watchers[:i], watchers[i+1:]...)
+					break
+				}
+			}
+			if len(s.watchers[prefixStr]) == 0 {
+				delete(s.watchers, prefixStr)
+			}
+			s.watcherMu.Unlock()
+			close(ch)
+		}()
 
 		// Получаем все существующие ключи
 		entries, err := s.ScanPrefix(ctx, prefix)
@@ -118,7 +165,7 @@ func (s *InMemoryStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan
 			}
 		}
 
-		// Сигнализируем о завершении синхронизации
+		// Сигнализируем о завершении начальной синхронизации
 		select {
 		case ch <- &WatchEvent{
 			Type: EventTypeSyncComplete,
@@ -126,9 +173,56 @@ func (s *InMemoryStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan
 		case <-ctx.Done():
 			return
 		}
+
+		// Продолжаем слушать изменения через context
+		<-ctx.Done()
 	}()
 
 	return ch, nil
+}
+
+// notifyWatchers уведомляет всех подписчиков об изменении
+func (s *InMemoryStore) notifyWatchers(key string, eventType WatchEventType, entry, prevEntry *KVEntry) {
+	s.watcherMu.RLock()
+	defer s.watcherMu.RUnlock()
+
+	for prefix, watchers := range s.watchers {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+
+		event := &WatchEvent{
+			Type:  eventType,
+			Entry: entry,
+		}
+
+		if prevEntry != nil {
+			event.PrevEntry = &KVEntry{
+				Key:      append([]byte(nil), prevEntry.Key...),
+				Value:    prevEntry.Value,
+				Version:  prevEntry.Version,
+				Revision: prevEntry.Revision,
+			}
+		}
+
+		if entry != nil {
+			event.Entry = &KVEntry{
+				Key:      append([]byte(nil), entry.Key...),
+				Value:    entry.Value,
+				Version:  entry.Version,
+				Revision: entry.Revision,
+			}
+		}
+
+		for _, w := range watchers {
+			select {
+			case w.ch <- event:
+			case <-w.ctx.Done():
+			default:
+				// Канал переполнен, пропускаем событие
+			}
+		}
+	}
 }
 
 // Close закрывает соединение с хранилищем (no-op для in-memory)

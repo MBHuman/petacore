@@ -23,7 +23,7 @@ func SetupKVStore(tb testing.TB, namespace string) distributed.KVStore {
 
 	dbType := os.Getenv("DB_TYPE")
 	if dbType == "" {
-		dbType = "etcd"
+		dbType = "inmemory"
 	}
 
 	var kvStore distributed.KVStore
@@ -44,17 +44,8 @@ func SetupKVStore(tb testing.TB, namespace string) distributed.KVStore {
 			tb.Skipf("ETCD не доступен (%v), пропускаем тест: %v", endpoints, err)
 			return nil
 		}
-
-	// case "postgres":
-	// 	connStr := os.Getenv("PG_CONN_STRING")
-	// 	if connStr == "" {
-	// 		connStr = "postgres://postgres:password@localhost/petacore_test?sslmode=disable"
-	// 	}
-	// 	kvStore, err = distributed.NewPGStore(connStr, namespace)
-	// 	if err != nil {
-	// 		tb.Skipf("PostgreSQL не доступен (%s), пропускаем тест: %v", connStr, err)
-	// 		return nil
-	// 	}
+	case "inmemory":
+		kvStore = distributed.NewInMemoryStore()
 
 	default:
 		tb.Fatalf("Неизвестный DB_TYPE: %s", dbType)
