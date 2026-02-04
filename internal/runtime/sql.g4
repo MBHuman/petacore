@@ -92,6 +92,7 @@ selectStatement
     : SELECT selectList 
         (FROM fromClause 
             (WHERE whereClause)? 
+            (GROUP BY groupByClause)?
             (ORDER BY orderByClause)? 
             (LIMIT limitValue)?
             (OFFSET offsetValue)?
@@ -143,6 +144,10 @@ limitValue
 
 offsetValue
     : NUMBER
+    ;
+
+groupByClause
+    : expression (COMMA expression)*
     ;
 
 alias
@@ -229,7 +234,12 @@ caseExpression
     ;
 
 functionCall
-    : qualifiedName LPAREN (expression (COMMA expression)*)? RPAREN
+    : qualifiedName LPAREN (functionArg (COMMA functionArg)*)? RPAREN
+    ;
+
+functionArg
+    : expression
+    | STAR
     ;
 
 extractFunction
@@ -302,6 +312,7 @@ SHOW : 'SHOW' | 'show';
 SELECT : 'SELECT' | 'select';
 FROM : 'FROM' | 'from';
 WHERE : 'WHERE' | 'where';
+GROUP : 'GROUP' | 'group';
 LIMIT : 'LIMIT' | 'limit';
 OFFSET : 'OFFSET' | 'offset';
 ORDER : 'ORDER' | 'order';

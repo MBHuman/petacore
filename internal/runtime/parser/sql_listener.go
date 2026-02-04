@@ -83,6 +83,9 @@ type sqlListener interface {
 	// EnterOffsetValue is called when entering the offsetValue production.
 	EnterOffsetValue(c *OffsetValueContext)
 
+	// EnterGroupByClause is called when entering the groupByClause production.
+	EnterGroupByClause(c *GroupByClauseContext)
+
 	// EnterAlias is called when entering the alias production.
 	EnterAlias(c *AliasContext)
 
@@ -133,6 +136,9 @@ type sqlListener interface {
 
 	// EnterFunctionCall is called when entering the functionCall production.
 	EnterFunctionCall(c *FunctionCallContext)
+
+	// EnterFunctionArg is called when entering the functionArg production.
+	EnterFunctionArg(c *FunctionArgContext)
 
 	// EnterExtractFunction is called when entering the extractFunction production.
 	EnterExtractFunction(c *ExtractFunctionContext)
@@ -233,6 +239,9 @@ type sqlListener interface {
 	// ExitOffsetValue is called when exiting the offsetValue production.
 	ExitOffsetValue(c *OffsetValueContext)
 
+	// ExitGroupByClause is called when exiting the groupByClause production.
+	ExitGroupByClause(c *GroupByClauseContext)
+
 	// ExitAlias is called when exiting the alias production.
 	ExitAlias(c *AliasContext)
 
@@ -283,6 +292,9 @@ type sqlListener interface {
 
 	// ExitFunctionCall is called when exiting the functionCall production.
 	ExitFunctionCall(c *FunctionCallContext)
+
+	// ExitFunctionArg is called when exiting the functionArg production.
+	ExitFunctionArg(c *FunctionArgContext)
 
 	// ExitExtractFunction is called when exiting the extractFunction production.
 	ExitExtractFunction(c *ExtractFunctionContext)

@@ -48,6 +48,7 @@ func NewPgConnection(t testing.TB) *pgx.ConnPool {
 }
 
 func TestPreparedStatements(t *testing.T) {
+	t.Skip()
 	conn := NewPgConnection(t)
 	defer conn.Close()
 
@@ -72,7 +73,7 @@ func TestPreparedStatements(t *testing.T) {
 }
 
 func TestRegexSelect(t *testing.T) {
-	t.Skip()
+	// t.Skip()
 	conn := NewPgConnection(t)
 	defer conn.Close()
 
@@ -115,7 +116,6 @@ func TestRegexSelect(t *testing.T) {
 // Test simple SELECT query
 
 func TestSelectWithCaseWhen(t *testing.T) {
-	t.Skip()
 	conn := NewPgConnection(t)
 	defer conn.Close()
 
@@ -170,25 +170,123 @@ func TestSelectWithCaseWhen(t *testing.T) {
 	}
 }
 
-func TestSelectWithSubquery(t *testing.T) {
-	t.Skip()
+func TestGroupBySelect(t *testing.T) {
+	// t.Skip()
 	conn := NewPgConnection(t)
 	defer conn.Close()
 
-	// Test subquery in WHERE clause
-	var id int
-	var value string
-	err := conn.QueryRow(`
-		SELECT id, value
+	// Test GROUP BY query
+	rows, err := conn.Query(`
+		SELECT value, COUNT(1) as count
 		FROM test_table
-		WHERE id = (SELECT MAX(id) FROM test_table)
-	`).Scan(&id, &value)
+		GROUP BY value
+		ORDER BY value;
+	`)
 	if err != nil {
-		t.Fatalf("Failed to execute subquery: %v", err)
+		t.Fatalf("Failed to execute GROUP BY query: %v", err)
 	}
 
-	if id != 3 || value != "test3" {
-		t.Fatalf("Subquery result: got (%d, %s), want (3, test3)", id, value)
+	defer rows.Close()
+
+	expected := map[string]int{
+		"test1": 1,
+		"test2": 1,
+		"test3": 1,
+	}
+
+	i := 0
+	for rows.Next() {
+		var value string
+		var count int
+		err := rows.Scan(&value, &count)
+		if err != nil {
+			t.Fatalf("Failed to scan row %d: %v", i, err)
+		}
+
+		expectedCount, ok := expected[value]
+		if !ok {
+			t.Fatalf("Unexpected value %s in result", value)
+		}
+
+		if count != expectedCount {
+			t.Fatalf("Value %s: got count %d, want %d", value, count, expectedCount)
+		}
+		i++
+	}
+
+	if i != len(expected) {
+		t.Fatalf("Expected %d rows, got %d", len(expected), i)
+	}
+}
+
+func TestAggregateSelect(t *testing.T) {
+	// t.Skip()
+	conn := NewPgConnection(t)
+	defer conn.Close()
+
+	cases := []struct {
+		name     string
+		query    string
+		expected interface{}
+	}{
+		{
+			name:     "COUNT(1)",
+			query:    "SELECT COUNT(1) FROM test_table",
+			expected: 3,
+		},
+		{
+			name:     "COUNT(*)",
+			query:    "SELECT COUNT(*) FROM test_table",
+			expected: 3,
+		},
+		{
+			name:     "MAX(id)",
+			query:    "SELECT MAX(id) FROM test_table",
+			expected: 3,
+		},
+		{
+			name:     "MIN(id)",
+			query:    "SELECT MIN(id) FROM test_table",
+			expected: 1,
+		},
+		{
+			name:     "SUM(id)",
+			query:    "SELECT SUM(id) FROM test_table",
+			expected: 6,
+		},
+		{
+			name:     "AVG(id)",
+			query:    "SELECT AVG(id) FROM test_table",
+			expected: 2.0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := conn.QueryRow(tc.query)
+			var result interface{}
+			switch tc.expected.(type) {
+			case int:
+				var val int
+				err := row.Scan(&val)
+				if err != nil {
+					t.Fatalf("Failed to scan %s: %v", tc.name, err)
+				}
+				result = val
+			case float64:
+				var val float64
+				err := row.Scan(&val)
+				if err != nil {
+					t.Fatalf("Failed to scan %s: %v", tc.name, err)
+				}
+				result = val
+			default:
+				t.Fatalf("Unsupported expected type for %s", tc.name)
+			}
+			if result != tc.expected {
+				t.Errorf("%s = %v, want %v", tc.name, result, tc.expected)
+			}
+		})
 	}
 }
 

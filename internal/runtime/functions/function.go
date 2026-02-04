@@ -248,3 +248,225 @@ func ExecuteFunction(name string, args []interface{}) (*table.ExecuteResult, err
 		return nil, fmt.Errorf("unknown function: %s", name)
 	}
 }
+
+// ExecuteAggregateFunction executes aggregate functions over groups of values
+func ExecuteAggregateFunction(name string, args []interface{}) (*table.ExecuteResult, error) {
+	logger.Debugf("Executing aggregate function: %s with args: %v", name, args)
+	switch strings.ToUpper(name) {
+	case "MAX":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("max requires at least one argument")
+		}
+		values, ok := args[0].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("max argument must be a slice of values")
+		}
+		if len(values) == 0 {
+			return nil, nil
+		}
+		maxVal := values[0]
+		colType := table.ColTypeString
+		// Determine type based on first non-nil value
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch val.(type) {
+			case int:
+				colType = table.ColTypeInt
+			case float64:
+				colType = table.ColTypeFloat
+			case string:
+				colType = table.ColTypeString
+			}
+			break // Only check first non-nil value for type
+		}
+		// Now find the actual max
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch v := val.(type) {
+			case int:
+				if maxVal == nil {
+					maxVal = v
+				} else if vi, ok := maxVal.(int); ok && v > vi {
+					maxVal = v
+				}
+			case float64:
+				if maxVal == nil {
+					maxVal = v
+				} else if vf, ok := maxVal.(float64); ok && v > vf {
+					maxVal = v
+				} else if vi, ok := maxVal.(int); ok && float64(vi) < v {
+					maxVal = v
+				}
+			case string:
+				if maxVal == nil {
+					maxVal = v
+				} else if vs, ok := maxVal.(string); ok && v > vs {
+					maxVal = v
+				}
+			}
+		}
+		logger.Debugf("Aggregate function %s result: %v", name, maxVal)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{maxVal}},
+			Columns: []table.TableColumn{
+				{Name: "max", Type: colType},
+			},
+		}, nil
+	case "MIN":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("min requires at least one argument")
+		}
+		values, ok := args[0].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("min argument must be a slice of values")
+		}
+		if len(values) == 0 {
+			return nil, nil
+		}
+		minVal := values[0]
+		colType := table.ColTypeString
+		// Determine type based on first non-nil value
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch val.(type) {
+			case int:
+				colType = table.ColTypeInt
+			case float64:
+				colType = table.ColTypeFloat
+			case string:
+				colType = table.ColTypeString
+			}
+			break // Only check first non-nil value for type
+		}
+		// Now find the actual min
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch v := val.(type) {
+			case int:
+				if minVal == nil {
+					minVal = v
+				} else if vi, ok := minVal.(int); ok && v < vi {
+					minVal = v
+				}
+			case float64:
+				if minVal == nil {
+					minVal = v
+				} else if vf, ok := minVal.(float64); ok && v < vf {
+					minVal = v
+				} else if vi, ok := minVal.(int); ok && float64(vi) > v {
+					minVal = v
+				}
+			case string:
+				if minVal == nil {
+					minVal = v
+				} else if vs, ok := minVal.(string); ok && v < vs {
+					minVal = v
+				}
+			}
+		}
+		logger.Debugf("Aggregate function %s result: %v", name, minVal)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{minVal}},
+			Columns: []table.TableColumn{
+				{Name: "min", Type: colType},
+			},
+		}, nil
+	case "COUNT":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("count requires at least one argument")
+		}
+		values, ok := args[0].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("count argument must be a slice of values")
+		}
+		count := 0
+		for _, val := range values {
+			if val != nil {
+				count++
+			}
+		}
+		colType := table.ColTypeFloat
+		logger.Debugf("Aggregate function %s result: %v", name, count)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{float64(count)}},
+			Columns: []table.TableColumn{
+				{Name: "count", Type: colType},
+			},
+		}, nil
+	case "SUM":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("sum requires at least one argument")
+		}
+		values, ok := args[0].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("sum argument must be a slice of values")
+		}
+		var sum float64
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch v := val.(type) {
+			case int:
+				sum += float64(v)
+			case float64:
+				sum += v
+			default:
+				return nil, fmt.Errorf("sum can only operate on numeric values")
+			}
+		}
+		logger.Debugf("Aggregate function %s result: %v", name, sum)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{sum}},
+			Columns: []table.TableColumn{
+				{Name: "sum", Type: table.ColTypeFloat},
+			},
+		}, nil
+	case "AVG":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("avg requires at least one argument")
+		}
+		values, ok := args[0].([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("avg argument must be a slice of values")
+		}
+		var sum float64
+		count := 0
+		colType := table.ColTypeFloat
+		for _, val := range values {
+			if val == nil {
+				continue
+			}
+			switch v := val.(type) {
+			case int:
+				sum += float64(v)
+			case float64:
+				sum += v
+			default:
+				return nil, fmt.Errorf("avg can only operate on numeric values")
+			}
+			count++
+		}
+		if count == 0 {
+			return nil, nil
+		}
+		avg := sum / float64(count)
+		logger.Debugf("Aggregate function %s result: %v", name, avg)
+		return &table.ExecuteResult{
+			Rows: [][]interface{}{{avg}},
+			Columns: []table.TableColumn{
+				{Name: "avg", Type: colType},
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown aggregate function: %s", name)
+	}
+}

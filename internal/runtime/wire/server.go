@@ -251,6 +251,8 @@ func (ws *WireServer) colTypeToOID(colType table.ColType) uint32 {
 	switch colType {
 	case table.ColTypeInt:
 		return 23 // INT4
+	case table.ColTypeBigInt:
+		return 20 // INT8
 	case table.ColTypeFloat:
 		return 701 // FLOAT8
 	case table.ColTypeBool:
@@ -659,6 +661,8 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 				switch column.Type {
 				case table.ColTypeInt:
 					oid = 23 // INT4
+				case table.ColTypeBigInt:
+					oid = 20 // INT8
 				case table.ColTypeFloat:
 					oid = 701 // FLOAT8
 				case table.ColTypeBool:
@@ -701,6 +705,8 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, stm
 			switch column.Type {
 			case table.ColTypeInt:
 				oid = 23 // INT4
+			case table.ColTypeBigInt:
+				oid = 20 // INT8
 			case table.ColTypeFloat:
 				oid = 701 // FLOAT8
 			case table.ColTypeBool:

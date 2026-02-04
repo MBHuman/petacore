@@ -89,6 +89,13 @@ func (t *Table) validateValueType(value interface{}, expectedType ColType) error
 		default:
 			return fmt.Errorf("expected int, got %T", value)
 		}
+	case ColTypeBigInt:
+		switch value.(type) {
+		case int, int32, int64, float64:
+			// Разрешаем числовые типы для bigint
+		default:
+			return fmt.Errorf("expected bigint, got %T", value)
+		}
 	case ColTypeFloat:
 		switch value.(type) {
 		case float32, float64, int, int32, int64:

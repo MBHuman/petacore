@@ -21,6 +21,7 @@ type SelectStatement struct {
 	TableAlias string
 	From       *FromClause
 	Columns    []items.SelectItem
+	GroupBy    []items.SelectItem
 	Where      *items.WhereClause
 	OrderBy    []items.OrderByItem
 	Limit      int

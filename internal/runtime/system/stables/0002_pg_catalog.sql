@@ -229,9 +229,18 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_type (
 );
 
 INSERT INTO pg_catalog.pg_type (oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typispreferred, typisdefined, typdelim, typrelid, typelem, typarray, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, typbasetype, typtypmod, typndims, typcollation, typdefaultbin, typdefault, typacl) VALUES
+(16, 'bool', 11, 10, 1, TRUE, 'b', 'B', TRUE, TRUE, ',', 0, 0, 1000, 'boolin', 'boolout', 'boolrecv', 'boolsend', 'booltypmodin', 'booltypmodout', 'boolanalyze', 'c', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(17, 'bytea', 11, 10, -1, FALSE, 'b', 'U', FALSE, TRUE, ',', 0, 0, 1001, 'byteain', 'byteaout', 'bytearecv', 'byteasend', '-', '-', '-', 'i', 'x', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(18, 'char', 11, 10, 1, TRUE, 'b', 'Z', FALSE, TRUE, ',', 0, 0, 1002, 'charin', 'charout', 'charrecv', 'charsend', '-', '-', '-', 'c', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(19, 'name', 11, 10, 64, FALSE, 'b', 'S', FALSE, TRUE, ',', 0, 0, 1003, 'namein', 'nameout', 'namerecv', 'namesend', '-', '-', '-', 'c', 'p', FALSE, 0, -1, 0, 950, NULL, NULL, NULL),
+(20, 'int8', 11, 10, 8, TRUE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1016, 'int8in', 'int8out', 'int8recv', 'int8send', '-', '-', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(21, 'int2', 11, 10, 2, TRUE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1005, 'int2in', 'int2out', 'int2recv', 'int2send', '-', '-', '-', 's', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
 (23, 'int4', 11, 10, 4, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1007, 'int4in', 'int4out', 'int4recv', 'int4send', 'int4typmodin', 'int4typmodout', 'int4analyze', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(24, 'regproc', 11, 10, 4, TRUE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1008, 'regprocin', 'regprocout', 'regprocrecv', 'regprocsend', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
 (25, 'text', 11, 10, -1, FALSE, 'b', 'S', TRUE, TRUE, ',', 0, 0, 1009, 'textin', 'textout', 'textrecv', 'textsend', 'texttypmodin', 'texttypmodout', 'textanalyze', 'i', 'e', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
-(16, 'bool', 11, 10, 1, TRUE, 'b', 'B', TRUE, TRUE, ',', 0, 0, 1000, 'boolin', 'boolout', 'boolrecv', 'boolsend', 'booltypmodin', 'booltypmodout', 'boolanalyze', 'c', 'p', FALSE, 0, -1, 0, 0,NULL ,NULL ,NULL );
+(26, 'oid', 11, 10, 4, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1028, 'oidin', 'oidout', 'oidrecv', 'oidsend', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(700, 'float4', 11, 10, 4, TRUE, 'b', 'N', FALSE, TRUE, ',', 0, 0, 1021, 'float4in', 'float4out', 'float4recv', 'float4send', '-', '-', '-', 'i', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL),
+(701, 'float8', 11, 10, 8, TRUE, 'b', 'N', TRUE, TRUE, ',', 0, 0, 1022, 'float8in', 'float8out', 'float8recv', 'float8send', '-', '-', '-', 'd', 'p', FALSE, 0, -1, 0, 0, NULL, NULL, NULL);
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_namespace (
     oid INT,

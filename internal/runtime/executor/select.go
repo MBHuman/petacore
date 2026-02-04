@@ -7,6 +7,7 @@ import (
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/revaluate"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
@@ -48,7 +49,16 @@ func ExecuteSelectWithoutTable(
 			// Evaluate function args
 			args := make([]interface{}, 0, len(col.Function.Args))
 			for _, argExpr := range col.Function.Args {
-				val, err := revaluate.EvaluateExpressionContext(argExpr, nil)
+				if argExpr.STAR() != nil {
+					// Special case for COUNT(*)
+					args = append(args, 1)
+					continue
+				}
+
+				if argExpr.Expression() == nil {
+					return nil, fmt.Errorf("invalid function argument")
+				}
+				val, err := revaluate.EvaluateExpressionContext(argExpr.Expression(), nil)
 				if err != nil {
 					return nil, fmt.Errorf("error evaluating function arg: %w", err)
 				}
@@ -176,6 +186,24 @@ func ExecuteNormalTable(
 		result = revaluate.EvaluateFilterRowsByWhere(result, stmt.Where)
 	}
 
+	// Check for aggregates
+	hasAggregates := false
+	for _, col := range stmt.Columns {
+		if col.Function != nil && col.Function.IsAggregate {
+			hasAggregates = true
+			break
+		}
+	}
+
+	if len(stmt.GroupBy) > 0 || hasAggregates {
+		// Handle GROUP BY and aggregates
+		result, err = processGroupByAndAggregates(stmt, result)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	// Normal processing
 	// Проверяем нужно ли обрабатывать выражения или выбирать конкретные колонки
 	hasExpressions := false
 	needColumnFiltering := false
@@ -351,7 +379,7 @@ func processSelectExpressions(stmt *statements.SelectStatement, inputResult *tab
 			if col.Alias != "" {
 				colName = col.Alias
 			} else {
-				colName = col.ColumnName
+				colName = searchName
 			}
 		}
 
@@ -401,7 +429,15 @@ func processSelectExpressions(stmt *statements.SelectStatement, inputResult *tab
 				// Обработка функций
 				args := make([]interface{}, 0, len(col.Function.Args))
 				for _, argExpr := range col.Function.Args {
-					val, err := revaluate.EvaluateExpressionContext(argExpr, resultRow)
+					if argExpr.STAR() != nil {
+						// Special case for COUNT(*)
+						args = append(args, 1)
+						continue
+					}
+					if argExpr.Expression() == nil {
+						return nil, fmt.Errorf("invalid function argument")
+					}
+					val, err := revaluate.EvaluateExpressionContext(argExpr.Expression(), resultRow)
 					if err != nil {
 						return nil, fmt.Errorf("error evaluating function arg: %w", err)
 					}
@@ -555,14 +591,32 @@ func ExecuteSelectWithJoins(
 		currentResult = revaluate.EvaluateFilterRowsByWhere(currentResult, stmt.Where)
 	}
 
-	// Обрабатываем SELECT колонки
-	currentResult, err = processSelectExpressions(stmt, currentResult)
-	if err != nil {
-		return nil, err
+	// Check for aggregates
+	hasAggregates := false
+	for _, col := range stmt.Columns {
+		if col.Function != nil && col.Function.IsAggregate {
+			hasAggregates = true
+			break
+		}
 	}
 
-	// Применяем ORDER BY
-	revaluate.EvaluateSortRows(currentResult, stmt.OrderBy)
+	if len(stmt.GroupBy) > 0 || hasAggregates {
+		// Handle GROUP BY and aggregates
+		currentResult, err = processGroupByAndAggregates(stmt, currentResult)
+		if err != nil {
+			return nil, err
+		}
+		// Применяем ORDER BY после GROUP BY
+		revaluate.EvaluateSortRows(currentResult, stmt.OrderBy)
+	} else {
+		// Применяем ORDER BY перед SELECT
+		revaluate.EvaluateSortRows(currentResult, stmt.OrderBy)
+		// Обрабатываем SELECT колонки
+		currentResult, err = processSelectExpressions(stmt, currentResult)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Применяем LIMIT
 	if stmt.Limit > 0 && len(currentResult.Rows) > stmt.Limit {
@@ -707,4 +761,262 @@ func getKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func processGroupByAndAggregates(stmt *statements.SelectStatement, inputResult *table.ExecuteResult) (*table.ExecuteResult, error) {
+	// Check for invalid combinations
+	hasAggregates := false
+	for _, col := range stmt.Columns {
+		if col.Function != nil && col.Function.IsAggregate {
+			hasAggregates = true
+			break
+		}
+	}
+
+	if len(stmt.GroupBy) == 0 && hasAggregates {
+		// If aggregates without GROUP BY, no non-aggregate columns allowed
+		for _, col := range stmt.Columns {
+			if col.ColumnName != "" || col.ExpressionContext != nil {
+				return nil, fmt.Errorf("column must appear in the GROUP BY clause or be used in an aggregate function")
+			}
+		}
+	}
+
+	var groups map[string][]*table.ResultRow
+
+	// If GROUP BY exists, validate non-aggregate columns are in GROUP BY
+	if len(stmt.GroupBy) > 0 {
+		for _, col := range stmt.Columns {
+			if col.ColumnName != "" {
+				found := false
+				for _, gb := range stmt.GroupBy {
+					if gb.ColumnName == col.ColumnName && gb.TableAlias == col.TableAlias {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("column %s must appear in GROUP BY clause", col.ColumnName)
+				}
+			}
+		}
+
+		// If GROUP BY exists, group rows
+		groups = make(map[string][]*table.ResultRow)
+		for _, row := range inputResult.Rows {
+			resultRow := &table.ResultRow{
+				Row:     row,
+				Columns: inputResult.Columns,
+			}
+			groupKey, err := computeGroupKey(stmt.GroupBy, resultRow)
+			if err != nil {
+				return nil, err
+			}
+			groups[groupKey] = append(groups[groupKey], resultRow)
+		}
+	} else {
+		// No GROUP BY, treat all rows as one group
+		groupRows := make([]*table.ResultRow, len(inputResult.Rows))
+		for i, row := range inputResult.Rows {
+			groupRows[i] = &table.ResultRow{
+				Row:     row,
+				Columns: inputResult.Columns,
+			}
+		}
+		groups = map[string][]*table.ResultRow{"": groupRows}
+	}
+
+	// Now process each group
+	newColumns := make([]table.TableColumn, 0, len(stmt.Columns))
+	newRows := make([][]interface{}, 0, len(groups))
+
+	// Define columns
+	for colIdx, col := range stmt.Columns {
+		var colName string
+		var colType table.ColType
+
+		if col.IsSelectAll {
+			return nil, fmt.Errorf("SELECT * not allowed with GROUP BY or aggregates")
+		}
+
+		if col.ExpressionContext != nil {
+			colType = table.ColTypeString
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = "?column?"
+			}
+		} else if col.Function != nil {
+			colType = table.ColTypeString
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = col.Function.Name
+			}
+		} else if col.ColumnName != "" {
+			// For non-aggregate columns, they must be in GROUP BY
+			if len(stmt.GroupBy) > 0 {
+				found := false
+				for _, gb := range stmt.GroupBy {
+					if gb.ColumnName == col.ColumnName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("column %s must appear in GROUP BY clause", col.ColumnName)
+				}
+			}
+			// Get actual type from input columns
+			colType = table.ColTypeString // default
+			for _, inputCol := range inputResult.Columns {
+				if inputCol.Name == col.ColumnName || (col.TableAlias != "" && inputCol.Name == col.TableAlias+"."+col.ColumnName) {
+					colType = inputCol.Type
+					break
+				}
+			}
+			if col.Alias != "" {
+				colName = col.Alias
+			} else {
+				colName = col.ColumnName
+			}
+		}
+
+		newColumns = append(newColumns, table.TableColumn{
+			Idx:  colIdx,
+			Name: colName,
+			Type: colType,
+		})
+	}
+
+	// Process each group
+	for _, groupRows := range groups {
+		newRow := make([]interface{}, 0, len(stmt.Columns))
+
+		for idx, col := range stmt.Columns {
+			var colValue interface{}
+
+			if col.ExpressionContext != nil {
+				// For now, assume no expressions in aggregates
+				return nil, fmt.Errorf("expressions not supported in GROUP BY yet")
+			} else if col.Function != nil {
+				if col.Function.IsAggregate {
+					// Compute aggregate over group
+					args := make([]interface{}, 0, len(col.Function.Args))
+					for _, argExpr := range col.Function.Args {
+						// For aggregates, collect values from all rows in group
+						groupValues := make([]interface{}, 0, len(groupRows))
+						for _, groupRow := range groupRows {
+							if argExpr.STAR() != nil {
+								// Special case for COUNT(*)
+								groupValues = append(groupValues, 1)
+								continue
+							}
+
+							if argExpr.Expression() == nil {
+								return nil, fmt.Errorf("invalid aggregate argument")
+							}
+							val, err := revaluate.EvaluateExpressionContext(argExpr.Expression(), groupRow)
+							if err != nil {
+								return nil, fmt.Errorf("error evaluating aggregate arg: %w", err)
+							}
+							if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
+								groupValues = append(groupValues, valExpr.Row.Rows[0][0])
+							} else {
+								groupValues = append(groupValues, nil)
+							}
+						}
+						args = append(args, groupValues)
+					}
+					v, err := functions.ExecuteAggregateFunction(col.Function.Name, args)
+					if err != nil {
+						return nil, fmt.Errorf("error executing aggregate function %s: %w", col.Function.Name, err)
+					}
+					// TODO посмотреть, может можно лучше сделать
+					colValue = v.Rows[0][0]
+					newColumns[idx].Type = v.Columns[0].Type
+				} else {
+					// Non-aggregate function, evaluate on first row or something? For now error
+					return nil, fmt.Errorf("non-aggregate functions not supported in GROUP BY")
+				}
+			} else if col.ColumnName != "" {
+				// Non-aggregate column, take from first row in group
+				if len(groupRows) > 0 {
+					resultRow := groupRows[0]
+					searchName := col.ColumnName
+					if col.TableAlias != "" {
+						searchName = col.TableAlias + "." + col.ColumnName
+					}
+					found := false
+					for i, origCol := range inputResult.Columns {
+						if origCol.Name == searchName || origCol.Name == col.ColumnName {
+							colValue = resultRow.Row[i]
+							found = true
+							break
+						}
+						if col.TableAlias == "" && strings.HasSuffix(origCol.Name, "."+col.ColumnName) {
+							colValue = resultRow.Row[i]
+							found = true
+							break
+						}
+					}
+					if !found {
+						return nil, fmt.Errorf("column %s not found", col.ColumnName)
+					}
+				}
+			}
+
+			newRow = append(newRow, colValue)
+		}
+
+		newRows = append(newRows, newRow)
+	}
+
+	return &table.ExecuteResult{
+		Columns: newColumns,
+		Rows:    newRows,
+	}, nil
+}
+func computeGroupKey(groupBy []items.SelectItem, row *table.ResultRow) (string, error) {
+	keyParts := make([]string, 0, len(groupBy))
+	for _, gb := range groupBy {
+		var val interface{}
+		var err error
+		if gb.ExpressionContext != nil {
+			val, err = revaluate.EvaluateExpressionContext(gb.ExpressionContext, row)
+			if err != nil {
+				return "", err
+			}
+			if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
+				val = valExpr.Row.Rows[0][0]
+			} else {
+				val = nil
+			}
+		} else if gb.ColumnName != "" {
+			// Find column value
+			searchName := gb.ColumnName
+			if gb.TableAlias != "" {
+				searchName = gb.TableAlias + "." + gb.ColumnName
+			}
+			found := false
+			for i, col := range row.Columns {
+				if col.Name == searchName || col.Name == gb.ColumnName {
+					val = row.Row[i]
+					found = true
+					break
+				} else if gb.TableAlias == "" && strings.HasSuffix(col.Name, "."+gb.ColumnName) {
+					val = row.Row[i]
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", fmt.Errorf("group by column %s not found", searchName)
+			}
+		} else {
+			return "", fmt.Errorf("invalid group by item")
+		}
+		keyParts = append(keyParts, fmt.Sprintf("%v", val))
+	}
+	return strings.Join(keyParts, "|"), nil
 }

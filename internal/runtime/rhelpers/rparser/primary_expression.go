@@ -45,8 +45,18 @@ func ParsePrimaryExpression(primExpr parser.IPrimaryExpressionContext, row *tabl
 			}
 		}
 		var args []interface{}
-		for _, argExpr := range fc.AllExpression() {
-			val, err := ParseExpression(argExpr, row)
+		for _, argExpr := range fc.AllFunctionArg() {
+			if argExpr.STAR() != nil {
+				// Handle COUNT(*) case - pass a special marker value
+				args = append(args, "*")
+				continue
+			}
+
+			if argExpr.Expression() == nil {
+				return nil, fmt.Errorf("unsupported function argument: %s", argExpr.GetText())
+			}
+
+			val, err := ParseExpression(argExpr.Expression(), row)
 			if err != nil {
 				return nil, err
 			}

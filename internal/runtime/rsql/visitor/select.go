@@ -7,6 +7,7 @@ import (
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
 	"strconv"
+	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
 )
@@ -115,8 +116,14 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 							funcCall.Name = parts[len(parts)-1]
 						}
 
+						// Check if aggregate function
+						switch strings.ToUpper(funcCall.Name) {
+						case "MAX", "MIN", "COUNT", "SUM", "AVG":
+							funcCall.IsAggregate = true
+						}
+
 						// Args - expression contexts
-						for _, argExpr := range fc.AllExpression() {
+						for _, argExpr := range fc.AllFunctionArg() {
 							funcCall.Args = append(funcCall.Args, argExpr)
 						}
 						selectItem.Function = funcCall
@@ -136,6 +143,38 @@ func (l *sqlListener) EnterSelectStatement(ctx *parser.SelectStatementContext) {
 					}
 				}
 				stmt.Columns = append(stmt.Columns, selectItem)
+			}
+		}
+
+		// Group By
+		if ctx.GroupByClause() != nil {
+			for _, expr := range ctx.GroupByClause().AllExpression() {
+				groupByItem := items.SelectItem{}
+				if primExpr := extractPrimaryExpression(expr); primExpr != nil {
+					if primExpr.ColumnName() != nil {
+						fullName := primExpr.ColumnName().GetText()
+						if qn := primExpr.ColumnName().QualifiedName(); qn != nil {
+							parts := qn.AllNamePart()
+							if len(parts) == 2 {
+								// table_alias.column_name
+								groupByItem.TableAlias = parts[0].GetText()
+								groupByItem.ColumnName = parts[1].GetText()
+							} else if len(parts) == 1 {
+								// just column_name
+								groupByItem.ColumnName = parts[0].GetText()
+							} else {
+								// schema.table.column or more complex
+								groupByItem.ColumnName = fullName
+							}
+						} else {
+							groupByItem.ColumnName = fullName
+						}
+					}
+				} else {
+					l.err = fmt.Errorf("complex GROUP BY expressions are not supported yet")
+					return
+				}
+				stmt.GroupBy = append(stmt.GroupBy, groupByItem)
 			}
 		}
 

@@ -171,6 +171,12 @@ func (s *BasesqlListener) EnterOffsetValue(ctx *OffsetValueContext) {}
 // ExitOffsetValue is called when production offsetValue is exited.
 func (s *BasesqlListener) ExitOffsetValue(ctx *OffsetValueContext) {}
 
+// EnterGroupByClause is called when production groupByClause is entered.
+func (s *BasesqlListener) EnterGroupByClause(ctx *GroupByClauseContext) {}
+
+// ExitGroupByClause is called when production groupByClause is exited.
+func (s *BasesqlListener) ExitGroupByClause(ctx *GroupByClauseContext) {}
+
 // EnterAlias is called when production alias is entered.
 func (s *BasesqlListener) EnterAlias(ctx *AliasContext) {}
 
@@ -272,6 +278,12 @@ func (s *BasesqlListener) EnterFunctionCall(ctx *FunctionCallContext) {}
 
 // ExitFunctionCall is called when production functionCall is exited.
 func (s *BasesqlListener) ExitFunctionCall(ctx *FunctionCallContext) {}
+
+// EnterFunctionArg is called when production functionArg is entered.
+func (s *BasesqlListener) EnterFunctionArg(ctx *FunctionArgContext) {}
+
+// ExitFunctionArg is called when production functionArg is exited.
+func (s *BasesqlListener) ExitFunctionArg(ctx *FunctionArgContext) {}
 
 // EnterExtractFunction is called when production extractFunction is entered.
 func (s *BasesqlListener) EnterExtractFunction(ctx *ExtractFunctionContext) {}

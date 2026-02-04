@@ -5,7 +5,6 @@ import (
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/table"
 	"sort"
-	"strings"
 )
 
 // sortRows sorts the rows based on OrderBy items
@@ -38,19 +37,6 @@ func EvaluateSortRows(execResult *table.ExecuteResult, orderBy []items.OrderByIt
 				valJ = execResult.Rows[j][idx]
 			} else if ob.ColumnName == "" {
 				continue // Skip if neither index nor name specified
-			} else if strings.Contains(exprText, ".") {
-				// Column name like N.oid
-				parts := strings.Split(exprText, ".")
-				if len(parts) == 2 {
-					colName := parts[1]
-					// For now, ignore table alias
-					if colIdx, ok := columnIndexMap[colName]; ok {
-						valI = execResult.Rows[i][colIdx]
-						valJ = execResult.Rows[j][colIdx]
-					} else {
-						continue
-					}
-				}
 			} else {
 				if colIdx, ok := columnIndexMap[exprText]; ok {
 					valI = execResult.Rows[i][colIdx]

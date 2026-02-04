@@ -29,6 +29,7 @@ type OrderByItem struct {
 }
 
 type FunctionCall struct {
-	Name string
-	Args []parser.IExpressionContext
+	Name        string
+	Args        []parser.IFunctionArgContext
+	IsAggregate bool
 }

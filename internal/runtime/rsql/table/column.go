@@ -10,6 +10,7 @@ type ColType int
 const (
 	ColTypeString ColType = iota
 	ColTypeInt
+	ColTypeBigInt
 	ColTypeFloat
 	ColTypeBool
 )
@@ -20,6 +21,8 @@ func (c ColType) String() string {
 		return "text"
 	case ColTypeInt:
 		return "integer"
+	case ColTypeBigInt:
+		return "bigint"
 	case ColTypeFloat:
 		return "real"
 	case ColTypeBool:
@@ -35,6 +38,8 @@ func (c ColType) TypeOps() TypeOps {
 		return &StringOps{}
 	case ColTypeInt:
 		return &IntOps{}
+	case ColTypeBigInt:
+		return &IntOps{} // BigInt uses same ops as Int
 	case ColTypeFloat:
 		return &FloatOps{}
 	case ColTypeBool:
@@ -102,6 +107,11 @@ func (i *IntOps) CastTo(value interface{}, targetType ColType) (interface{}, err
 			return iv, nil
 		}
 		return 0, fmt.Errorf("cannot cast to int")
+	case ColTypeBigInt:
+		if iv, ok := utils.ToInt(value); ok {
+			return int64(iv), nil
+		}
+		return int64(0), fmt.Errorf("cannot cast to bigint")
 	case ColTypeFloat:
 		if f, ok := utils.ToFloat64(value); ok {
 			return f, nil
@@ -263,8 +273,10 @@ func ColTypeFromString(typeStr string) ColType {
 	switch typeStr {
 	case "text", "varchar", "character varying":
 		return ColTypeString
-	case "int", "int4", "integer", "bigint", "int8":
+	case "int", "int4", "integer":
 		return ColTypeInt
+	case "bigint", "int8":
+		return ColTypeBigInt
 	case "float", "float8", "double precision":
 		return ColTypeFloat
 	case "bool", "boolean":
