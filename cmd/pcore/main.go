@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 
 	"os"
@@ -17,6 +18,12 @@ import (
 )
 
 func main() {
+	// Флаги командной строки
+	storeType := flag.String("store", "etcd", "Type of store to use: etcd, inmemory")
+	etcdEndpoints := flag.String("etcd-endpoints", "localhost:2379", "ETCD endpoints (comma-separated)")
+	etcdPrefix := flag.String("etcd-prefix", "pcore_cluster", "ETCD key prefix")
+	flag.Parse()
+
 	logger.Init(true)
 	level := zap.NewAtomicLevel()
 	level.SetLevel(zap.DebugLevel)
@@ -24,9 +31,20 @@ func main() {
 	var kv distributed.KVStore
 	var err error
 
-	kv, err = distributed.NewETCDStore([]string{"localhost:2379"}, "pcore_cluster")
-	if err != nil {
-		panic(err)
+	// Выбор типа хранилища
+	switch *storeType {
+	case "inmemory":
+		logger.Info("Using in-memory store")
+		kv = distributed.NewInMemoryStore()
+	case "etcd":
+		logger.Infof("Using ETCD store with endpoints: %s", *etcdEndpoints)
+		endpoints := []string{*etcdEndpoints}
+		kv, err = distributed.NewETCDStore(endpoints, *etcdPrefix)
+		if err != nil {
+			panic(err)
+		}
+	default:
+		panic(fmt.Sprintf("Unknown store type: %s", *storeType))
 	}
 
 	store := storage.NewDistributedStorageVClock(kv, "node1", 1, core.SnapshotIsolation, 1)
