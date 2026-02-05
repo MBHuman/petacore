@@ -9,9 +9,12 @@ import (
 	"petacore/internal/core"
 	"petacore/internal/distributed"
 	"petacore/internal/logger"
+	"petacore/internal/runtime/functions"
 	"petacore/internal/runtime/system"
 	"petacore/internal/runtime/wire"
 	"petacore/internal/storage"
+	baseplugin "petacore/plugins/base"
+	psdk "petacore/sdk"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -22,9 +25,14 @@ func main() {
 	storeType := flag.String("store", "etcd", "Type of store to use: etcd, inmemory")
 	etcdEndpoints := flag.String("etcd-endpoints", "localhost:2379", "ETCD endpoints (comma-separated)")
 	etcdPrefix := flag.String("etcd-prefix", "pcore_cluster", "ETCD key prefix")
+	logFile := flag.String("log-file", "", "Log file path (default: stdout)")
 	flag.Parse()
 
-	logger.Init(true)
+	if *logFile != "" {
+		logger.Init(true, *logFile)
+	} else {
+		logger.Init(true)
+	}
 	level := zap.NewAtomicLevel()
 	level.SetLevel(zap.DebugLevel)
 	logger.SetLevel(level)
@@ -52,6 +60,27 @@ func main() {
 		panic(err)
 	}
 	defer store.Stop()
+
+	// Initialize function registry
+	funcRegistry := psdk.NewFunctionRegistry()
+	functions.SetFunctionRegistry(funcRegistry)
+
+	// Register base plugin
+	pluginRegistry := psdk.NewPetaPluginRegistry()
+	basePlugin := baseplugin.Plugin
+	if err := basePlugin.Init(nil); err != nil {
+		logger.Errorf("Failed to init base plugin: %v", err)
+		panic(err)
+	}
+	if err := pluginRegistry.Register(basePlugin); err != nil {
+		logger.Errorf("Failed to register base plugin: %v", err)
+		panic(err)
+	}
+	if err := baseplugin.RegisterFunctions(funcRegistry); err != nil {
+		logger.Errorf("Failed to register base functions: %v", err)
+		panic(err)
+	}
+	logger.Info("Plugins registered")
 
 	// Initialize system tables
 	if err := system.InitializeSystemTables(store); err != nil {

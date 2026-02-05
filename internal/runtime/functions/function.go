@@ -1,25 +1,57 @@
 package functions
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"petacore/internal/logger"
 	"petacore/internal/runtime/rsql/table"
+	psdk "petacore/sdk"
 	"strconv"
 	"strings"
 )
 
-// ExecuteFunction executes a built-in function
+var functionRegistry *psdk.FunctionRegistry
+
+// SetFunctionRegistry sets the global function registry for user-defined functions
+func SetFunctionRegistry(registry *psdk.FunctionRegistry) {
+	functionRegistry = registry
+}
+
+// ExecuteFunction executes a built-in or user-defined function
 // TODO добавить поддержку функций с помощью SDK плагинов
 // TODO добавить поддержку SQL функций, определенных пользователем, должна быть поддержка CREATE FUNCTION И CREATE PROCEDURE
 func ExecuteFunction(name string, args []interface{}) (*table.ExecuteResult, error) {
 	logger.Debugf("Executing function: %s with args: %v", name, args)
+
+	// Check for user-defined functions first
+	if functionRegistry != nil {
+		if fn, exists := functionRegistry.GetByName(strings.ToUpper(name)); exists {
+			result, err := fn.Execute(context.Background(), args...)
+			if err != nil {
+				return nil, err
+			}
+			logger.Debugf("User-defined function %s result: %v", name, result)
+			return &table.ExecuteResult{
+				Rows: [][]interface{}{{result}},
+				Columns: []table.TableColumn{
+					{Name: name, Type: fn.GetFunction().ProRetType.ToColType()},
+				},
+			}, nil
+		} else {
+			logger.Debugf("User-defined function %s not found", strings.ToUpper(name))
+		}
+	} else {
+		logger.Debugf("Function registry is nil")
+	}
+
+	// Fall back to built-in functions
 	switch strings.ToUpper(name) {
 	case "CURRENT_DATABASE":
 		result := "testdb"
 		logger.Debugf("Function %s result: %v", name, result)
 		return &table.ExecuteResult{
-			Rows: [][]interface{}{{result}},
+			Rows: [][]any{{result}},
 			Columns: []table.TableColumn{
 				{Name: "current_database", Type: table.ColTypeString},
 			},
@@ -28,7 +60,7 @@ func ExecuteFunction(name string, args []interface{}) (*table.ExecuteResult, err
 		result := "public"
 		logger.Debugf("Function %s result: %v", name, result)
 		return &table.ExecuteResult{
-			Rows: [][]interface{}{{result}},
+			Rows: [][]any{{result}},
 			Columns: []table.TableColumn{
 				{Name: "current_schema", Type: table.ColTypeString},
 			},
@@ -37,7 +69,7 @@ func ExecuteFunction(name string, args []interface{}) (*table.ExecuteResult, err
 		result := "postgres"
 		logger.Debugf("Function %s result: %v", name, result)
 		return &table.ExecuteResult{
-			Rows: [][]interface{}{{result}},
+			Rows: [][]any{{result}},
 			Columns: []table.TableColumn{
 				{Name: "current_user", Type: table.ColTypeString},
 			},
