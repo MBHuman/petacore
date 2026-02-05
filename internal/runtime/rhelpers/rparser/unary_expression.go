@@ -1,13 +1,15 @@
 package rparser
 
 import (
+	"context"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 )
 
 // ParseUnaryExpression handles unary operators (+ and -)
-func ParseUnaryExpression(unaryExpr parser.IUnaryExpressionContext, row *table.ResultRow) (result rmodels.Expression, err error) {
+func ParseUnaryExpression(ctx context.Context, unaryExpr parser.IUnaryExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
 	if unaryExpr == nil {
 		return nil, nil
 	}
@@ -19,7 +21,7 @@ func ParseUnaryExpression(unaryExpr parser.IUnaryExpressionContext, row *table.R
 	}
 
 	// Parse the cast expression
-	result, err = ParseCastExpression(castExpr, row)
+	result, err = ParseCastExpression(ctx, castExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}

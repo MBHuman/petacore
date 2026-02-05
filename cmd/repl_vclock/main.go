@@ -49,7 +49,7 @@ func (r *REPL) handleSet(args []string) {
 	value := strings.Join(args[1:], " ")
 
 	err := r.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write([]byte(key), value)
+		tx.Write([]byte(key), []byte(value))
 		return nil
 	})
 
@@ -70,7 +70,7 @@ func (r *REPL) handleGet(args []string) {
 
 	err := r.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		if value, ok := tx.Read([]byte(key)); ok {
-			fmt.Printf("✓ %s = %s\n", key, value)
+			fmt.Printf("✓ %s = %s\n", key, string(value))
 		} else {
 			fmt.Printf("⚠ Ключ %s не найден (или нет quorum)\n", key)
 			fmt.Printf("  [DEBUG] minAcks=%d, totalNodes=%d\n", r.storage.GetMinAcks(), r.storage.GetTotalNodes())
@@ -131,7 +131,7 @@ func (r *REPL) handleTransaction() {
 			}
 			key := args[0]
 			if value, ok := tx.Read([]byte(key)); ok {
-				fmt.Printf("✓ %s = %s\n", key, value)
+				fmt.Printf("✓ %s = %s\n", key, string(value))
 			} else {
 				fmt.Printf("⚠ %s = <не найдено>\n", key)
 			}
@@ -143,7 +143,7 @@ func (r *REPL) handleTransaction() {
 			}
 			key := args[0]
 			value := strings.Join(args[1:], " ")
-			tx.Write([]byte(key), value)
+			tx.Write([]byte(key), []byte(value))
 			fmt.Printf("✓ Записано: %s = %s\n", key, value)
 
 		case "commit":

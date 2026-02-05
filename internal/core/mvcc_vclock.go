@@ -8,7 +8,7 @@ import (
 
 // MVCCVersion представляет версию данных с Vector Clock
 type MVCCVersion struct {
-	Value       string
+	Value       []byte
 	VectorClock *VectorClock
 	Timestamp   uint64 // Для совместимости с HLC
 }
@@ -27,13 +27,13 @@ func NewMVCCWithVClock() *MVCCWithVClock {
 }
 
 // WriteWithVClock записывает значение с Vector Clock
-func (m *MVCCWithVClock) WriteWithVClock(key []byte, value string, timestamp uint64, vclock *VectorClock) {
+func (m *MVCCWithVClock) WriteWithVClock(key []byte, value []byte, timestamp uint64, vclock *VectorClock) {
 	skipList := m.versions.ComputeIfAbsent(key, func() *ConcurrentSkipListMap[*MVCCVersion] {
 		return NewConcurrentSkipListMap[*MVCCVersion]()
 	})
 
 	version := &MVCCVersion{
-		Value:       value,
+		Value:       append([]byte(nil), value...),
 		VectorClock: vclock.Clone(),
 		Timestamp:   timestamp,
 	}
@@ -44,10 +44,10 @@ func (m *MVCCWithVClock) WriteWithVClock(key []byte, value string, timestamp uin
 
 // ReadWithSnapshot читает значение с snapshot isolation
 // snapshotVClock != nil для SI, snapshotTimestamp для RC
-func (m *MVCCWithVClock) ReadWithSnapshot(key []byte, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string) (string, *VectorClock, bool) {
+func (m *MVCCWithVClock) ReadWithSnapshot(key []byte, snapshotVClock *VectorClock, snapshotTimestamp uint64, minAcks int, totalNodes int, currentNodeID string) ([]byte, *VectorClock, bool) {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
-		return "", nil, false
+		return nil, nil, false
 	}
 
 	// Используем итератор для поиска последней безопасной версии
@@ -74,19 +74,19 @@ func (m *MVCCWithVClock) ReadWithSnapshot(key []byte, snapshotVClock *VectorCloc
 	}
 
 	if latestSafe != nil {
-		return latestSafe.Value, latestSafe.VectorClock, true
+		return append([]byte(nil), latestSafe.Value...), latestSafe.VectorClock, true
 	}
 
 	// Нет безопасных версий в snapshot
-	return "", nil, false
+	return nil, nil, false
 }
 
 // ReadLatest читает последнюю версию без проверки quorum
 // (используется для внутренних целей)
-func (m *MVCCWithVClock) ReadLatest(key []byte) (string, *VectorClock, bool) {
+func (m *MVCCWithVClock) ReadLatest(key []byte) ([]byte, *VectorClock, bool) {
 	skipList, ok := m.versions.Get(key)
 	if !ok {
-		return "", nil, false
+		return nil, nil, false
 	}
 
 	iterator := skipList.NewVersionIterator()
@@ -100,10 +100,10 @@ func (m *MVCCWithVClock) ReadLatest(key []byte) (string, *VectorClock, bool) {
 	}
 
 	if latest == nil {
-		return "", nil, false
+		return nil, nil, false
 	}
 
-	return latest.Value, latest.VectorClock, true
+	return append([]byte(nil), latest.Value...), latest.VectorClock, true
 }
 
 // GetVectorClock возвращает Vector Clock для последней версии ключа
@@ -181,14 +181,14 @@ func (m *MVCCWithVClock) ScanWithSnapshot(
 	totalNodes int,
 	currentNodeID string,
 	limit int,
-) map[string]string {
+ ) map[string][]byte {
 	iterator := m.versions.NewIterator(prefix, it)
 	if iterator == nil {
-		return make(map[string]string)
+		return make(map[string][]byte)
 	}
 	defer iterator.Close()
 
-	result := make(map[string]string)
+	result := make(map[string][]byte)
 	count := 0
 	for iterator.Next() {
 		if limit > 0 && count >= limit {
@@ -220,7 +220,7 @@ func (m *MVCCWithVClock) ScanWithSnapshot(
 		}
 
 		if latestSafe != nil {
-			result[string(key)] = latestSafe.Value
+			result[string(key)] = append([]byte(nil), latestSafe.Value...)
 			count++
 		}
 	}

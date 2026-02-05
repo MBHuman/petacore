@@ -42,7 +42,21 @@ dataType
     | VARCHAR_TYPE (LPAREN NUMBER RPAREN)? 
     | CHAR_TYPE (LPAREN NUMBER RPAREN)?
     | SERIAL_TYPE 
-    | TIMESTAMP_TYPE
+    | TIMESTAMP_TYPE (LPAREN NUMBER RPAREN)? (WITH TIME ZONE | WITHOUT TIME ZONE)?
+    | DATE_TYPE
+    | TIME (LPAREN NUMBER RPAREN)? (WITH TIME ZONE | WITHOUT TIME ZONE)?
+    | INTERVAL_TYPE intervalFields? (LPAREN NUMBER RPAREN)?
+    ;
+
+intervalFields
+    : YEAR | MONTH | DAY | HOUR | MINUTE | SECOND
+    | YEAR TO MONTH
+    | DAY TO HOUR
+    | DAY TO MINUTE
+    | DAY TO SECOND
+    | HOUR TO MINUTE
+    | HOUR TO SECOND
+    | MINUTE TO SECOND
     ;
 
 // ============ INSERT ======================
@@ -64,7 +78,7 @@ valueList
 // ============ DROP TABLE ======================
 
 dropTableStatement
-    : DROP TABLE tableName
+    : DROP TABLE (IF EXISTS)? tableName
     ;
 
 // ============ TRUNCATE TABLE ======================
@@ -89,15 +103,30 @@ showStatement
 // ============ SELECT ======================
 
 selectStatement
-    : SELECT selectList 
-        (FROM fromClause 
-            (WHERE whereClause)? 
-            (GROUP BY groupByClause)?
-            (ORDER BY orderByClause)? 
-            (LIMIT limitValue)?
-            (OFFSET offsetValue)?
-        )?
+    : unionExceptStatement
     ;
+
+// UNION and EXCEPT have same precedence, left-associative
+unionExceptStatement
+    : intersectStatement ((UNION | EXCEPT) ALL? intersectStatement)*
+    ;
+
+// INTERSECT has higher precedence than UNION/EXCEPT
+intersectStatement
+    : primarySelectStatement (INTERSECT ALL? primarySelectStatement)*
+    ;
+
+// Primary SELECT or parenthesized SELECT statement
+primarySelectStatement
+    : SELECT selectList (FROM fromClause)?
+        (WHERE whereClause)? 
+        (GROUP BY groupByClause)?
+        (ORDER BY orderByClause)? 
+        (LIMIT limitValue)?
+        (OFFSET offsetValue)?
+    | LPAREN selectStatement RPAREN
+    ;
+
 
 selectList
     : selectItem (COMMA selectItem)*
@@ -113,7 +142,7 @@ selectAll
     ;
 
 fromClause
-    : tableFactor (joinClause)*
+    : tableFactor (COMMA tableFactor)* (joinClause)*
     ;
 
 tableFactor
@@ -170,12 +199,14 @@ andExpression
 
 notExpression
     : NOT? comparisonExpression
+    | (NOT? EXISTS subqueryExpression)
     ;
 
 comparisonExpression
     : concatExpression (
         ((operator | operatorExpr) concatExpression)
         | (NOT? IN LPAREN expression (COMMA expression)* RPAREN)
+        | (NOT? IN subqueryExpression)
         | (NOT? LIKE concatExpression)
         | (IS NOT? NULL)
     )?
@@ -257,6 +288,9 @@ namePart
     | CHAR_TYPE      // for casting ::char
     | SERIAL_TYPE    // for casting ::serial
     | TIMESTAMP_TYPE // for casting ::timestamp
+    | DATE_TYPE      // for casting ::date
+    | TIME           // for casting ::time
+    | INTERVAL_TYPE  // for casting ::interval
     ;
 
 qualifiedName
@@ -283,10 +317,19 @@ operatorExpr
 value
     : STRING_LITERAL 
     | NUMBER 
-    | CURRENT_TIMESTAMP 
+    | CURRENT_TIMESTAMP
+    | CURRENT_USER
     | TRUE 
     | FALSE
     | NULL
+    | typedLiteral
+    ;
+
+typedLiteral
+    : DATE_TYPE STRING_LITERAL
+    | TIMESTAMP_TYPE STRING_LITERAL
+    | TIME STRING_LITERAL
+    | INTERVAL_TYPE STRING_LITERAL intervalFields?
     ;
 
 // ======= LEXER RULES ====================
@@ -319,6 +362,10 @@ ORDER : 'ORDER' | 'order';
 BY : 'BY' | 'by';
 ASC : 'ASC' | 'asc';
 DESC : 'DESC' | 'desc';
+UNION : 'UNION' | 'union';
+INTERSECT : 'INTERSECT' | 'intersect';
+EXCEPT : 'EXCEPT' | 'except';
+ALL : 'ALL' | 'all';
 
 JOIN : 'JOIN' | 'join';
 INNER : 'INNER' | 'inner';
@@ -356,8 +403,20 @@ VARCHAR_TYPE : 'VARCHAR' | 'varchar';
 CHAR_TYPE : 'CHAR' | 'char';
 SERIAL_TYPE : 'SERIAL' | 'serial';
 TIMESTAMP_TYPE : 'TIMESTAMP' | 'timestamp';
+DATE_TYPE : 'DATE' | 'date';
+INTERVAL_TYPE : 'INTERVAL' | 'interval';
+
+YEAR : 'YEAR' | 'year';
+MONTH : 'MONTH' | 'month';
+DAY : 'DAY' | 'day';
+HOUR : 'HOUR' | 'hour';
+MINUTE : 'MINUTE' | 'minute';
+SECOND : 'SECOND' | 'second';
+WITH : 'WITH' | 'with';
+WITHOUT : 'WITHOUT' | 'without';
 
 CURRENT_TIMESTAMP : 'CURRENT_TIMESTAMP' | 'current_timestamp';
+CURRENT_USER : 'CURRENT_USER' | 'current_user';
 TRUE : 'TRUE' | 'true';
 FALSE : 'FALSE' | 'false';
 

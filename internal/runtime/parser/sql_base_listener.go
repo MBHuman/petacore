@@ -57,6 +57,12 @@ func (s *BasesqlListener) EnterDataType(ctx *DataTypeContext) {}
 // ExitDataType is called when production dataType is exited.
 func (s *BasesqlListener) ExitDataType(ctx *DataTypeContext) {}
 
+// EnterIntervalFields is called when production intervalFields is entered.
+func (s *BasesqlListener) EnterIntervalFields(ctx *IntervalFieldsContext) {}
+
+// ExitIntervalFields is called when production intervalFields is exited.
+func (s *BasesqlListener) ExitIntervalFields(ctx *IntervalFieldsContext) {}
+
 // EnterInsertStatement is called when production insertStatement is entered.
 func (s *BasesqlListener) EnterInsertStatement(ctx *InsertStatementContext) {}
 
@@ -104,6 +110,24 @@ func (s *BasesqlListener) EnterSelectStatement(ctx *SelectStatementContext) {}
 
 // ExitSelectStatement is called when production selectStatement is exited.
 func (s *BasesqlListener) ExitSelectStatement(ctx *SelectStatementContext) {}
+
+// EnterUnionExceptStatement is called when production unionExceptStatement is entered.
+func (s *BasesqlListener) EnterUnionExceptStatement(ctx *UnionExceptStatementContext) {}
+
+// ExitUnionExceptStatement is called when production unionExceptStatement is exited.
+func (s *BasesqlListener) ExitUnionExceptStatement(ctx *UnionExceptStatementContext) {}
+
+// EnterIntersectStatement is called when production intersectStatement is entered.
+func (s *BasesqlListener) EnterIntersectStatement(ctx *IntersectStatementContext) {}
+
+// ExitIntersectStatement is called when production intersectStatement is exited.
+func (s *BasesqlListener) ExitIntersectStatement(ctx *IntersectStatementContext) {}
+
+// EnterPrimarySelectStatement is called when production primarySelectStatement is entered.
+func (s *BasesqlListener) EnterPrimarySelectStatement(ctx *PrimarySelectStatementContext) {}
+
+// ExitPrimarySelectStatement is called when production primarySelectStatement is exited.
+func (s *BasesqlListener) ExitPrimarySelectStatement(ctx *PrimarySelectStatementContext) {}
 
 // EnterSelectList is called when production selectList is entered.
 func (s *BasesqlListener) EnterSelectList(ctx *SelectListContext) {}
@@ -332,3 +356,9 @@ func (s *BasesqlListener) EnterValue(ctx *ValueContext) {}
 
 // ExitValue is called when production value is exited.
 func (s *BasesqlListener) ExitValue(ctx *ValueContext) {}
+
+// EnterTypedLiteral is called when production typedLiteral is entered.
+func (s *BasesqlListener) EnterTypedLiteral(ctx *TypedLiteralContext) {}
+
+// ExitTypedLiteral is called when production typedLiteral is exited.
+func (s *BasesqlListener) ExitTypedLiteral(ctx *TypedLiteralContext) {}

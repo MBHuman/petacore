@@ -18,7 +18,7 @@ func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []s
 		// Получаем метаданные таблицы
 		metaPrefixKey := t.getMetadataPrefixKey()
 		metaStr, found := tx.Read([]byte(metaPrefixKey))
-		if !found || metaStr == "" {
+		if !found || len(metaStr) == 0 {
 			return fmt.Errorf("table %s does not exist", tableName)
 		}
 
@@ -47,7 +47,8 @@ func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []s
 						insertRow[colMeta.Idx-1] = seqValue
 					} else if colMeta.DefaultValue != nil {
 						if colMeta.DefaultValue == "CURRENT_TIMESTAMP" {
-							insertRow[colMeta.Idx-1] = time.Now().Format("2006-01-02 15:04:05")
+							// Store current timestamp as int64 microseconds since epoch
+							insertRow[colMeta.Idx-1] = time.Now().UnixMicro()
 						} else {
 							insertRow[colMeta.Idx-1] = colMeta.DefaultValue
 						}
@@ -114,7 +115,7 @@ func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []s
 			if err != nil {
 				return err
 			}
-			tx.Write(rowKey, string(rowData))
+			tx.Write(rowKey, rowData)
 			logger.Debug("DEBUG: Saved row: ",
 				zap.String("rowKey", string(rowKey)),
 				zap.String("rowData", string(rowData)),

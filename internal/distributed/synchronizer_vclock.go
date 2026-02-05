@@ -1,14 +1,17 @@
 package distributed
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"petacore/internal/core"
 	"petacore/internal/logger"
 	"sync"
 	"time"
+
+	"github.com/hamba/avro/v2"
 
 	"go.uber.org/zap"
 )
@@ -36,6 +39,9 @@ type SynchronizerVClock struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+// buffer pool to reduce json marshal allocations
+var vclockBufPool sync.Pool
 
 // NewSynchronizerVClock создает новый синхронизатор с VClock
 func NewSynchronizerVClock(kvStore KVStore, mvccVClock *core.MVCCWithVClock, logicalClock *core.LClock, nodeID string) *SynchronizerVClock {
@@ -108,10 +114,20 @@ func (s *SynchronizerVClock) ScanPrefix(ctx context.Context, prefix []byte) (map
 }
 
 // VClockEntry структура для хранения в ETCD
-type VClockEntry struct {
-	Value       string            `json:"value"`
-	Timestamp   uint64            `json:"timestamp"`
-	VectorClock map[string]uint64 `json:"vclock"`
+// VClockEntryMeta хранит метаданные записи, сериализуемые через Avro
+type VClockEntryMeta struct {
+	Timestamp   int64            `avro:"timestamp"`
+	VectorClock map[string]int64 `avro:"vclock"`
+}
+
+var vclockAvroSchema = `{"type":"record","name":"VClockEntryMeta","fields":[{"name":"timestamp","type":"long"},{"name":"vclock","type":{"type":"map","values":"long"}}]}`
+var vclockAvroParsed avro.Schema
+
+func init() {
+	vclockBufPool = sync.Pool{
+		New: func() interface{} { return new(bytes.Buffer) },
+	}
+	vclockAvroParsed = avro.MustParse(vclockAvroSchema)
 }
 
 // syncLoopVClock непрерывно синхронизирует изменения через SyncIterator
@@ -178,10 +194,23 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 		return
 	}
 
-	// Парсим VClockEntry
-	var vclockEntry VClockEntry
-	if err := json.Unmarshal([]byte(event.Entry.Value), &vclockEntry); err != nil {
-		logger.Warn("[SynchronizerVClock] Warning: failed to parse VClock entry",
+	// Parse binary format: [4-byte metaLen][avro(meta)][value bytes]
+	data := []byte(event.Entry.Value)
+	if len(data) < 4 {
+		logger.Warn("[SynchronizerVClock] Warning: invalid entry size", zap.String("key", string(event.Entry.Key)))
+		return
+	}
+	metaLen := binary.BigEndian.Uint32(data[:4])
+	if int(metaLen) > len(data)-4 {
+		logger.Warn("[SynchronizerVClock] Warning: invalid meta length", zap.String("key", string(event.Entry.Key)))
+		return
+	}
+	metaBytes := data[4 : 4+metaLen]
+	valueBytes := data[4+metaLen:]
+
+	var meta VClockEntryMeta
+	if err := avro.Unmarshal(vclockAvroParsed, metaBytes, &meta); err != nil {
+		logger.Warn("[SynchronizerVClock] Warning: failed to unmarshal avro meta",
 			zap.String("key", string(event.Entry.Key)),
 			zap.Error(err),
 		)
@@ -190,12 +219,17 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 
 	logger.Info("[SynchronizerVClock] Loaded key",
 		zap.String("key", string(event.Entry.Key)),
-		zap.String("value", vclockEntry.Value),
-		zap.Any("vclock", vclockEntry.VectorClock),
+		zap.Int64("timestamp", meta.Timestamp),
+		zap.Any("vclock", meta.VectorClock),
 	)
 	// Создаем Vector Clock
 	vclock := core.NewVectorClock()
-	vclock.UpdateFromMap(vclockEntry.VectorClock)
+	// Convert map[int64] to map[uint64]
+	vmap := make(map[string]uint64, len(meta.VectorClock))
+	for k, v := range meta.VectorClock {
+		vmap[k] = uint64(v)
+	}
+	vclock.UpdateFromMap(vmap)
 
 	// Проверяем: если это наша собственная запись, не инкрементируем повторно
 	// Наша запись уже содержит наш nodeID в VClock
@@ -213,10 +247,10 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 	s.vclockMu.Unlock()
 
 	// Синхронизируем HLC
-	s.logicalClock.Recv(vclockEntry.Timestamp)
+	s.logicalClock.Recv(uint64(meta.Timestamp))
 
 	// Записываем в локальный MVCC с VClock (не модифицированным для своих записей)
-	s.mvccVClock.WriteWithVClock(event.Entry.Key, vclockEntry.Value, vclockEntry.Timestamp, vclock)
+	s.mvccVClock.WriteWithVClock(event.Entry.Key, valueBytes, uint64(meta.Timestamp), vclock)
 
 	// Обновляем ревизию
 	s.setLastSyncRevision(event.Entry.Revision)
@@ -230,7 +264,7 @@ func (s *SynchronizerVClock) handleWatchEventVClock(event *WatchEvent) {
 // 2. Пишем в ETCD (синхронно, блокирующая операция)
 // 3. Пишем в локальный MVCC
 // 4. Другие узлы получат через watch и обновят свои VClock
-func (s *SynchronizerVClock) WriteThroughVClock(ctx context.Context, key []byte, value string) error {
+func (s *SynchronizerVClock) WriteThroughVClock(ctx context.Context, key []byte, value []byte) error {
 	// Инкрементируем логическое время
 	timestamp := s.logicalClock.SendOrLocal()
 
@@ -241,20 +275,28 @@ func (s *SynchronizerVClock) WriteThroughVClock(ctx context.Context, key []byte,
 	s.globalVClock.Update(vclock)
 	s.vclockMu.Unlock()
 
-	// Сериализуем в VClockEntry
-	vclockEntry := VClockEntry{
-		Value:       value,
-		Timestamp:   timestamp,
-		VectorClock: vclock.ToMap(),
+	// Сериализуем метаданные через Avro
+	meta := VClockEntryMeta{
+		Timestamp:   int64(timestamp),
+		VectorClock: make(map[string]int64),
+	}
+	for k, v := range vclock.ToMap() {
+		meta.VectorClock[k] = int64(v)
 	}
 
-	entryJSON, err := json.Marshal(vclockEntry)
+	metaBytes, err := avro.Marshal(vclockAvroParsed, meta)
 	if err != nil {
-		return fmt.Errorf("failed to marshal VClock entry: %w", err)
+		return fmt.Errorf("failed to marshal avro meta: %w", err)
 	}
+
+	// Final payload: [4-byte metaLen][metaBytes][value bytes]
+	final := make([]byte, 4+len(metaBytes)+len(value))
+	binary.BigEndian.PutUint32(final[:4], uint32(len(metaBytes)))
+	copy(final[4:4+len(metaBytes)], metaBytes)
+	copy(final[4+len(metaBytes):], value)
 
 	// Записываем в ETCD (синхронно, CP гарантия)
-	if err := s.kvStore.Put(ctx, key, string(entryJSON), int64(timestamp)); err != nil {
+	if err := s.kvStore.Put(ctx, key, string(final), int64(timestamp)); err != nil {
 		return fmt.Errorf("failed to write to ETCD: %w", err)
 	}
 
@@ -282,13 +324,29 @@ func (s *SynchronizerVClock) GetCurrentVersion(ctx context.Context, key []byte) 
 		return nil, fmt.Errorf("failed to get current version: %w", err)
 	}
 
-	var vclockEntry VClockEntry
-	if err := json.Unmarshal([]byte(entry.Value), &vclockEntry); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal VClock entry: %w", err)
+	// Try to parse binary payload: [4-byte metaLen][avro(meta)][value bytes]
+	data := []byte(entry.Value)
+	if len(data) < 4 {
+		// unknown format, return empty vclock
+		return core.NewVectorClock(), nil
+	}
+	metaLen := binary.BigEndian.Uint32(data[:4])
+	if int(metaLen) > len(data)-4 {
+		return core.NewVectorClock(), nil
+	}
+	metaBytes := data[4 : 4+metaLen]
+
+	var meta VClockEntryMeta
+	if err := avro.Unmarshal(vclockAvroParsed, metaBytes, &meta); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal avro meta in GetCurrentVersion: %w", err)
 	}
 
 	vclock := core.NewVectorClock()
-	vclock.UpdateFromMap(vclockEntry.VectorClock)
+	vmap := make(map[string]uint64, len(meta.VectorClock))
+	for k, v := range meta.VectorClock {
+		vmap[k] = uint64(v)
+	}
+	vclock.UpdateFromMap(vmap)
 	return vclock, nil
 }
 

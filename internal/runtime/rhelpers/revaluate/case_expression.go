@@ -1,15 +1,17 @@
 package revaluate
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/logger"
 	"petacore/internal/runtime/rhelpers"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 )
 
 // evaluateCaseExpression evaluates a CASE WHEN THEN ELSE END expression
-func EvaluateCaseExpression(caseExpr *rmodels.CaseExpression, row *table.ResultRow) (rmodels.Expression, error) {
+func EvaluateCaseExpression(goCtx context.Context, caseExpr *rmodels.CaseExpression, row *table.ResultRow, subExec subquery.SubqueryExecutor, runtimeParams map[int]interface{}) (rmodels.Expression, error) {
 	ctx := caseExpr.Context
 	// In new grammar: CASE (WHEN expression THEN expression)+ (ELSE expression)? END
 	// AllExpression returns all expressions: WHEN1, THEN1, WHEN2, THEN2, ..., ELSE (if present)
@@ -30,11 +32,10 @@ func EvaluateCaseExpression(caseExpr *rmodels.CaseExpression, row *table.ResultR
 		}
 
 		// Evaluate WHEN condition
-		condition, err := EvaluateExpressionContext(allExpressions[whenIdx], row)
+		condition, err := EvaluateExpressionContext(goCtx, allExpressions[whenIdx], row, subExec, runtimeParams)
 		if err != nil {
 			return nil, err
 		}
-		logger.Debugf("CASE condition: %v, value: %v (type: %T)", allExpressions[whenIdx].GetText(), condition, condition)
 
 		// Check if true - нужно правильно извлечь булево значение
 		isTrue := false
@@ -56,16 +57,13 @@ func EvaluateCaseExpression(caseExpr *rmodels.CaseExpression, row *table.ResultR
 			isTrue = rhelpers.IsTrue(condition)
 		}
 
-		logger.Debugf("CASE condition evaluated to: %v", isTrue)
-
 		if isTrue {
 			if thenIdx < len(allExpressions) {
 				// Evaluate THEN result
-				result, err := EvaluateExpressionContext(allExpressions[thenIdx], row)
+				result, err := EvaluateExpressionContext(goCtx, allExpressions[thenIdx], row, subExec, runtimeParams)
 				if err != nil {
 					return nil, err
 				}
-				logger.Debugf("CASE THEN result: %v", result)
 				return result, nil
 			}
 		}
@@ -74,7 +72,7 @@ func EvaluateCaseExpression(caseExpr *rmodels.CaseExpression, row *table.ResultR
 	// Check for ELSE
 	elseIdx := numWhen * 2
 	if elseIdx < len(allExpressions) {
-		result, err := EvaluateExpressionContext(allExpressions[elseIdx], row)
+		result, err := EvaluateExpressionContext(goCtx, allExpressions[elseIdx], row, subExec, runtimeParams)
 		if err != nil {
 			return nil, err
 		}

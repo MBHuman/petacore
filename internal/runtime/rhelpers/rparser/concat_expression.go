@@ -1,15 +1,17 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 )
 
 // ParseConcatExpression handles string concatenation with ||
-func ParseConcatExpression(concatExpr parser.IConcatExpressionContext, row *table.ResultRow) (rmodels.Expression, error) {
+func ParseConcatExpression(ctx context.Context, concatExpr parser.IConcatExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	// logger.Debug("ParseConcatExpression")
 	if concatExpr == nil {
 		return nil, nil
@@ -23,7 +25,7 @@ func ParseConcatExpression(concatExpr parser.IConcatExpressionContext, row *tabl
 
 	// If only one expression and no CONCAT operators, return it directly
 	if len(exprs) == 1 && len(concatExpr.AllCONCAT()) == 0 {
-		return ParseAdditiveExpression(exprs[0], row)
+		return ParseAdditiveExpression(ctx, exprs[0], row, subExec)
 	}
 
 	// Multiple expressions with CONCAT, concatenate as strings
@@ -34,7 +36,7 @@ func ParseConcatExpression(concatExpr parser.IConcatExpressionContext, row *tabl
 		},
 	}
 	for _, e := range exprs {
-		val, err := ParseAdditiveExpression(e, row)
+		val, err := ParseAdditiveExpression(ctx, e, row, subExec)
 		if err != nil {
 			return nil, err
 		}

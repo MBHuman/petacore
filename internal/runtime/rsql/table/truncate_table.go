@@ -19,7 +19,7 @@ func (t *Table) TruncateTable(name string) error {
 				if colMeta.IsSerial {
 					seqKey := t.getSequencePrefixKey(colName)
 					logger.Debugf("Resetting sequence for column %s: %s", colName, seqKey)
-					tx.Write([]byte(seqKey), "1")
+					tx.Write([]byte(seqKey), []byte("1"))
 				}
 			}
 		}

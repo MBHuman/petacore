@@ -70,3 +70,27 @@ func ToInt(v interface{}) (int, bool) {
 		return 0, false
 	}
 }
+
+func ToInt64(v interface{}) (int64, bool) {
+	switch val := v.(type) {
+	case int:
+		return int64(val), true
+	case int32:
+		return int64(val), true
+	case int64:
+		return val, true
+	case float32:
+		return int64(val), true
+	case float64:
+		return int64(val), true
+	case string:
+		var i int64
+		n, err := fmt.Sscanf(val, "%d", &i)
+		if err == nil && n == 1 {
+			return i, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}

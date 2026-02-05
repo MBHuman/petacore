@@ -2,18 +2,10 @@ package visitor
 
 import (
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rsql/items"
-	"petacore/internal/runtime/rsql/statements"
 )
 
+// EnterWhereClause больше не используется
+// WHERE обрабатывается в parsePrimarySelectStatement в select.go
 func (l *sqlListener) EnterWhereClause(ctx *parser.WhereClauseContext) {
-	if ctx.Expression() != nil {
-		where := &items.WhereClause{
-			ExpressionContext: ctx.Expression(),
-		}
-
-		if selectStmt, ok := l.stmt.(*statements.SelectStatement); ok {
-			selectStmt.Where = where
-		}
-	}
+	// No-op: WHERE clause is now handled in parsePrimarySelectStatement
 }

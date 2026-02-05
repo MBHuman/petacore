@@ -1,17 +1,43 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+
+	"go.uber.org/zap"
 )
 
 // parseNotExpression handles NOT expression
-func ParseNotExpression(notExpr parser.INotExpressionContext, row *table.ResultRow) (rmodels.Expression, error) {
-	// logger.Debug("ParseNotExpression")
+func ParseNotExpression(ctx context.Context, notExpr parser.INotExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	if notExpr == nil {
 		return nil, nil
+	}
+
+	if notExpr.SubqueryExpression() != nil {
+		subqCtx := notExpr.SubqueryExpression()
+		selCtx := subqCtx.SelectStatement()
+		if selCtx == nil {
+			return nil, fmt.Errorf("expected select statement in NOT EXISTS subquery")
+		}
+		selectStmt, err := ParseSelectStatement(selCtx)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing subquery in NOT EXISTS operator: %w", err)
+		}
+		res, err := subExec(selectStmt)
+		if err != nil {
+			return nil, err
+		}
+		logger.Debug("NOT EXISTS subquery result", zap.Any("result", res))
+		exists := len(res.Rows) > 0
+		if notExpr.NOT() != nil {
+			exists = !exists
+		}
+		return &rmodels.BoolExpression{Value: exists}, nil
 	}
 
 	compExpr := notExpr.ComparisonExpression()
@@ -19,7 +45,7 @@ func ParseNotExpression(notExpr parser.INotExpressionContext, row *table.ResultR
 		return nil, nil
 	}
 
-	result, err := ParseComparisonExpression(compExpr, row)
+	result, err := ParseComparisonExpression(ctx, compExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}

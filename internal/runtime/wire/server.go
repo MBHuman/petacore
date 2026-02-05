@@ -2,34 +2,38 @@
 package wire
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
-	"petacore/internal/logger"
-	"petacore/internal/runtime/executor"
 	"regexp"
 	"strconv"
-
-	"petacore/internal/runtime/rsql/statements"
-	"petacore/internal/runtime/rsql/table"
-	"petacore/internal/runtime/rsql/visitor"
-	"petacore/internal/runtime/system"
-	"petacore/internal/storage"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgproto3/v2"
 	"go.uber.org/zap"
+
+	"petacore/internal/logger"
+	"petacore/internal/runtime/executor"
+	"petacore/internal/runtime/functions"
+	"petacore/internal/runtime/rsql/statements"
+	"petacore/internal/runtime/rsql/table"
+	"petacore/internal/runtime/rsql/visitor"
+	"petacore/internal/runtime/system"
+	"petacore/internal/storage"
+	psdk "petacore/sdk"
 )
 
-// Session represents a client session with prepared statements and portals
+// Session stores prepared statements, portals and session params
 type Session struct {
 	preparedStatements map[string]*PreparedStatement
 	portals            map[string]*PreparedStatement
 	params             map[string]string
 }
 
-// NewSession creates a new session
+// NewSession creates a new session with initialized maps
 func NewSession() *Session {
 	return &Session{
 		preparedStatements: make(map[string]*PreparedStatement),
@@ -227,8 +231,63 @@ func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse
 		Stmt:      stmt,
 		ParamOIDs: paramOIDs,
 	}
-	// Populate columns for description
-	session.preparedStatements[msg.Name].Columns = ws.getFieldDescriptions(stmt)
+	// Build placeholder FieldDescriptions for SELECT prepared statements when possible.
+	// If the SELECT contains a '*' (IsSelectAll) we cannot know column count yet, so leave Columns nil.
+	inferredCols := ws.getFieldDescriptions(stmt)
+	if sel, ok := stmt.(*statements.SelectStatement); ok {
+		hasSelectAll := false
+		if sel.Primary != nil {
+			for _, c := range sel.Primary.Columns {
+				if c.IsSelectAll {
+					hasSelectAll = true
+					break
+				}
+			}
+		}
+
+		if hasSelectAll {
+			// Defer RowDescription until Execute when we know actual columns
+			session.preparedStatements[msg.Name].Columns = nil
+		} else if sel.Primary != nil && len(inferredCols) == len(sel.Primary.Columns) && len(inferredCols) > 0 {
+			// We were able to infer exact column descriptions (e.g., SELECT expressions without table)
+			session.preparedStatements[msg.Name].Columns = inferredCols
+		} else if sel.Primary != nil {
+			// Create placeholder descriptions from AST (names only, default to TEXT)
+			var fields []pgproto3.FieldDescription
+			for i, col := range sel.Primary.Columns {
+				var name string
+				if col.Alias != "" {
+					name = col.Alias
+				} else if col.Function != nil {
+					name = col.Function.Name
+				} else if col.ColumnName != "" {
+					name = col.ColumnName
+				} else {
+					name = fmt.Sprintf("column%d", i+1)
+				}
+				oid := uint32(25)
+				if col.Function != nil {
+					if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
+						oid = uint32(fn.GetFunction().ProRetType)
+					}
+				}
+				fields = append(fields, pgproto3.FieldDescription{
+					Name:                 []byte(name),
+					TableOID:             0,
+					TableAttributeNumber: 0,
+					DataTypeOID:          oid,
+					DataTypeSize:         -1,
+					TypeModifier:         -1,
+					Format:               0,
+				})
+			}
+			session.preparedStatements[msg.Name].Columns = fields
+		} else {
+			session.preparedStatements[msg.Name].Columns = nil
+		}
+	} else {
+		session.preparedStatements[msg.Name].Columns = inferredCols
+	}
 	logger.Infof("Prepared statement '%s' created", msg.Name)
 	backend.Send(&pgproto3.ParseComplete{})
 }
@@ -268,7 +327,7 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 		return
 	}
 
-	logger.Debugf("Parsed statement %+v", stmt)
+	logger.Debugf("Parsed statement: ", zap.Any("stmt", stmt))
 
 	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
 	if err != nil {
@@ -323,8 +382,12 @@ func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.De
 		}
 		// Send ParameterDescription (empty for now)
 		backend.Send(&pgproto3.ParameterDescription{ParameterOIDs: ps.ParamOIDs})
-		// Send RowDescription
-		backend.Send(&pgproto3.RowDescription{Fields: ps.Columns})
+		// Do not execute the statement during Describe to infer columns - this
+		// may observe a different projection/state than will be produced on
+		// Execute and introduce mismatches. Only send RowDescription when we
+		// already have `ps.Columns` cached (set earlier by an explicit Prepare
+		// flow). This keeps Describe idempotent and avoids side-effects.
+		logger.Debugf("Describe prepared statement '%s': ps.Columns=%d (not sending RowDescription on Describe)", msg.Name, len(ps.Columns))
 	case 'P':
 		// Describe portal
 		ps, ok := session.portals[msg.Name]
@@ -337,8 +400,10 @@ func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.De
 			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 			return
 		}
-		// Send RowDescription
-		backend.Send(&pgproto3.RowDescription{Fields: ps.Columns})
+		// Do not execute the statement during Describe to infer columns for the
+		// same reasons as for prepared statements above. Only send a
+		// RowDescription when portal already carries column metadata.
+		logger.Debugf("Describe portal '%s': ps.Columns=%d (not sending RowDescription on Describe)", msg.Name, len(ps.Columns))
 	}
 }
 
@@ -438,16 +503,54 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 	switch s := stmt.(type) {
 	case *statements.SelectStatement:
 		var fields []pgproto3.FieldDescription
-		if s.From == nil {
-			// TODO избавиться от хардкода
+
+		// With new structure, SelectStatement has Primary or Combined
+		// For now, only handle Primary SELECT for field descriptions
+		if s.Primary == nil {
+			// Combined statement or no primary - return empty for now
 			return fields
 		}
 
-		tableName := s.From.TableName
+		primary := s.Primary
+		if primary.From == nil {
+			// When there's no FROM (SELECT expressions without table), infer column types
+			for _, col := range primary.Columns {
+				var name string
+				var oid uint32 = 25 // default TEXT
+				if col.Alias != "" {
+					name = col.Alias
+				} else if col.Function != nil {
+					name = col.Function.Name
+					// Try to infer type from registered functions
+					if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
+						oid = uint32(fn.GetFunction().ProRetType)
+					} else {
+						// Fallback: if aggregate or known, keep TEXT
+						oid = 25
+					}
+				} else if col.ColumnName != "" {
+					name = col.ColumnName
+				} else {
+					name = "?column?"
+				}
+				fields = append(fields, pgproto3.FieldDescription{
+					Name:                 []byte(name),
+					TableOID:             0,
+					TableAttributeNumber: 0,
+					DataTypeOID:          oid,
+					DataTypeSize:         -1,
+					TypeModifier:         -1,
+					Format:               0,
+				})
+			}
+			return fields
+		}
+
+		tableName := primary.From.TableName
 
 		if tableName == "" {
 			// System functions
-			for _, col := range s.Columns {
+			for _, col := range primary.Columns {
 				var name string
 				if col.Alias != "" {
 					name = col.Alias
@@ -468,7 +571,7 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 			}
 		} else if system.IsSystemTable(tableName) {
 			// For system tables, determine columns from stmt.Columns
-			for _, col := range s.Columns {
+			for _, col := range primary.Columns {
 				var name string
 				var oid uint32 = 25 // Default TEXT
 				if col.ColumnName == "*" {
@@ -598,9 +701,39 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	case *statements.DropTableStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("DROP TABLE")})
 	case *statements.SelectStatement:
-		// Force text format for system tables since we can't reliably encode them in binary
+		// For portals, if a RowDescription was already provided during Describe, send that
 		formatCodes := ps.ResultFormatCodes
-		ws.sendSelectResultWithFormats(backend, result, true, formatCodes)
+		if len(ps.Columns) > 0 {
+			// Send RowDescription based on prepared/portal columns, applying requested format codes
+			rowDesc := &pgproto3.RowDescription{}
+			for i, fd := range ps.Columns {
+				// Determine OID: prefer actual executed result column type when available
+				var oid uint32 = uint32(fd.DataTypeOID)
+				if i < len(result.Columns) {
+					oid = uint32(psdk.FromColType(result.Columns[i].Type))
+				}
+				// Force text format for data rows for now
+				format := int16(0)
+
+				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
+					Name:                 fd.Name,
+					TableOID:             fd.TableOID,
+					TableAttributeNumber: fd.TableAttributeNumber,
+					DataTypeOID:          oid,
+					DataTypeSize:         fd.DataTypeSize,
+					TypeModifier:         fd.TypeModifier,
+					Format:               format,
+				})
+			}
+			logger.Debugf("Execute (portal) - sending RowDescription: ps.Columns=%d, result.Columns=%d", len(ps.Columns), len(result.Columns))
+			backend.Send(rowDesc)
+			// Send only data rows; do not resend RowDescription. Use portal's column count as expected.
+			ws.sendSelectResultWithFormats(backend, result, false, formatCodes, len(ps.Columns))
+		} else {
+			// No prior description; let sendSelectResultWithFormats send RowDescription
+			logger.Debugf("Execute - no prior description, will send RowDescription from result.Columns: result.Columns=%d", len(result.Columns))
+			ws.sendSelectResultWithFormats(backend, result, true, formatCodes, len(result.Columns))
+		}
 	case *statements.SetStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
 		// case *statements.ShowStatement:
@@ -608,47 +741,30 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	}
 }
 
-func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16) {
+func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16, expectedCols int) {
+	logger.Debugf("sendSelectResultWithFormats: sendRowDesc=%v, result.Columns=%d, expectedCols=%d, rows=%d, formatCodes=%v", sendRowDesc, len(result.Columns), expectedCols, len(result.Rows), formatCodes)
 
 	if len(result.Rows) == 0 {
 		// No data
 		if sendRowDesc {
 			rowDesc := &pgproto3.RowDescription{}
-			for i, column := range result.Columns {
-				oid := uint32(25) // Default TEXT
-				switch column.Type {
-				case table.ColTypeInt:
-					oid = 23 // INT4
-				case table.ColTypeBigInt:
-					oid = 20 // INT8
-				case table.ColTypeFloat:
-					oid = 701 // FLOAT8
-				case table.ColTypeBool:
-					oid = 16 // BOOL
-				case table.ColTypeString:
-					oid = 25 // VARCHAR
-				}
+			for _, column := range result.Columns {
+				oid := psdk.FromColType(column.Type)
 
-				// Determine format for this column
-				format := int16(0) // default text
-				if len(formatCodes) == 1 {
-					// Single format applies to all columns
-					format = formatCodes[0]
-				} else if i < len(formatCodes) {
-					// Per-column format
-					format = formatCodes[i]
-				}
+				// Always advertise text format to clients for now
+				format := int16(0)
 
 				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
 					Name:                 []byte(column.Name),
 					TableOID:             0,
 					TableAttributeNumber: 0,
-					DataTypeOID:          oid,
+					DataTypeOID:          uint32(oid),
 					DataTypeSize:         -1,
 					TypeModifier:         -1,
 					Format:               format,
 				})
 			}
+			logger.Debug("Sending RowDescription", zap.Int("fields", len(rowDesc.Fields)), zap.Any("fieldsDesc", rowDesc.Fields))
 			backend.Send(rowDesc)
 		}
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", 0))})
@@ -658,57 +774,261 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 	// RowDescription
 	if sendRowDesc {
 		rowDesc := &pgproto3.RowDescription{}
-		for i, column := range result.Columns {
-			oid := uint32(0) // Use UNKNOWN to force text format decoding
-			switch column.Type {
-			case table.ColTypeInt:
-				oid = 23
-			case table.ColTypeBigInt:
-				oid = 20
-			case table.ColTypeFloat:
-				oid = 701
-			case table.ColTypeBool:
-				oid = 16
-			case table.ColTypeString:
-				oid = 25
-			}
+		logger.Debug("sendSelectResultWithFormats: columns", zap.Any("result.Columns", result.Columns))
+		for _, column := range result.Columns {
+			oid := psdk.FromColType(column.Type)
 
-			// Determine format for this column
-			format := int16(0) // default text
-			if len(formatCodes) == 1 {
-				// Single format applies to all columns
-				format = formatCodes[0]
-			} else if i < len(formatCodes) {
-				// Per-column format
-				format = formatCodes[i]
-			}
+			// Always advertise text format (0) for each column for now.
+			format := int16(0)
 
 			rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
 				Name:                 []byte(column.Name),
 				TableOID:             0,
 				TableAttributeNumber: 0,
-				DataTypeOID:          oid,
+				DataTypeOID:          uint32(oid),
 				DataTypeSize:         -1,
 				TypeModifier:         -1,
 				Format:               format,
 			})
 		}
+		logger.Debug("Sending RowDescription", zap.Int("fields", len(rowDesc.Fields)), zap.Any("fieldsDesc", rowDesc.Fields))
 		backend.Send(rowDesc)
 	}
 
 	// Data rows
-	for _, row := range result.Rows {
+	for rIdx, row := range result.Rows {
+		if rIdx < 5 {
+			logger.Debugf("DataRow %d: len(row)=%d", rIdx, len(row))
+		}
 		logger.Debug("DEBUG: Sending row:", zap.Any("row", row))
+
+		// Determine how many columns we must emit for this DataRow. If we
+		// just sent a RowDescription in this call, use the result.Columns
+		// length; otherwise use the expectedCols provided by the caller
+		// (which should match the RowDescription already sent earlier).
+		colCount := expectedCols
+		if sendRowDesc {
+			colCount = len(result.Columns)
+		}
+
 		dataRow := &pgproto3.DataRow{}
-		// Text format
-		for _, value := range row {
+		for i := 0; i < colCount; i++ {
+			var value interface{}
+			if i < len(row) {
+				value = row[i]
+			} else {
+				value = nil
+			}
+
+			// Determine format for this column
+			format := int16(0)
+			if len(formatCodes) == 1 {
+				format = formatCodes[0]
+			} else if i < len(formatCodes) {
+				format = formatCodes[i]
+			}
+
+			if rIdx < 3 {
+				// Log per-column format info for first few rows to help debug
+				colType := table.ColTypeString
+				if i < len(result.Columns) {
+					colType = result.Columns[i].Type
+				}
+				logger.Debugf("Row %d col %d: format=%d, colType=%d, valueType=%T", rIdx, i, format, colType, value)
+			}
+
 			if value == nil {
 				dataRow.Values = append(dataRow.Values, nil)
+				continue
+			}
+
+			if format == 1 {
+				// Binary format encoding based on column type. If the
+				// result doesn't have type information for this index,
+				// default to string behavior.
+				colType := table.ColTypeString
+				if i < len(result.Columns) {
+					colType = result.Columns[i].Type
+				}
+				switch colType {
+				case table.ColTypeBool:
+					if b, ok := value.(bool); ok {
+						if b {
+							dataRow.Values = append(dataRow.Values, []byte{1})
+						} else {
+							dataRow.Values = append(dataRow.Values, []byte{0})
+						}
+					} else {
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
+					}
+				case table.ColTypeInt:
+					var v32 int32
+					appended := false
+					switch vv := value.(type) {
+					case int:
+						v32 = int32(vv)
+					case int32:
+						v32 = vv
+					case int64:
+						v32 = int32(vv)
+					case string:
+						if parsed, err := strconv.ParseInt(vv, 10, 32); err == nil {
+							v32 = int32(parsed)
+						} else {
+							dataRow.Values = append(dataRow.Values, []byte(vv))
+							appended = true
+						}
+					default:
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
+						appended = true
+					}
+					if appended {
+						break
+					}
+					buf := make([]byte, 4)
+					binary.BigEndian.PutUint32(buf, uint32(v32))
+					dataRow.Values = append(dataRow.Values, buf)
+				case table.ColTypeBigInt:
+					var v64 int64
+					appended := false
+					switch vv := value.(type) {
+					case int:
+						v64 = int64(vv)
+					case int32:
+						v64 = int64(vv)
+					case int64:
+						v64 = vv
+					case string:
+						if parsed, err := strconv.ParseInt(vv, 10, 64); err == nil {
+							v64 = parsed
+						} else {
+							dataRow.Values = append(dataRow.Values, []byte(vv))
+							appended = true
+						}
+					default:
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
+						appended = true
+					}
+					if appended {
+						break
+					}
+					buf8 := make([]byte, 8)
+					binary.BigEndian.PutUint64(buf8, uint64(v64))
+					dataRow.Values = append(dataRow.Values, buf8)
+				case table.ColTypeTimestamp, table.ColTypeTimestampTz:
+					logger.Debug("Handling timestamp column in binary format", zap.Any("value", value), zap.Any("valueType", fmt.Sprintf("%T", value)))
+					// Return timestamps as int64 microseconds since epoch in binary format
+					var v64 int64
+					switch vv := value.(type) {
+					case int64:
+						v64 = vv
+					case int:
+						v64 = int64(vv)
+					case string:
+						if parsed, err := strconv.ParseInt(vv, 10, 64); err == nil {
+							v64 = parsed
+						} else {
+							dataRow.Values = append(dataRow.Values, []byte(vv))
+							continue
+						}
+					default:
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
+						continue
+					}
+					timestampValue := time.UnixMicro(v64)
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", timestampValue)))
+				case table.ColTypeFloat:
+					var f64 float64
+					appended := false
+					switch vv := value.(type) {
+					case float32:
+						f64 = float64(vv)
+					case float64:
+						f64 = vv
+					case string:
+						if parsed, err := strconv.ParseFloat(vv, 64); err == nil {
+							f64 = parsed
+						} else {
+							dataRow.Values = append(dataRow.Values, []byte(vv))
+							appended = true
+						}
+					default:
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
+						appended = true
+					}
+					if appended {
+						break
+					}
+					buff := make([]byte, 8)
+					binary.BigEndian.PutUint64(buff, math.Float64bits(f64))
+					dataRow.Values = append(dataRow.Values, buff)
+				case table.ColTypeString:
+					switch vv := value.(type) {
+					case string:
+						dataRow.Values = append(dataRow.Values, []byte(vv))
+					default:
+						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
+					}
+				// Array types (binary format)
+				case table.ColTypeStringArray, table.ColTypeIntArray, table.ColTypeBigIntArray,
+					table.ColTypeFloatArray, table.ColTypeBoolArray:
+					// For arrays in binary format, we'll use text representation for simplicity
+					dataRow.Values = append(dataRow.Values, []byte(formatArrayAsText(value)))
+				default:
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
+				}
 			} else {
-				dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
+				// Text format
+				// Check if we have column type info to format timestamps specially
+				colType := table.ColTypeString
+				if i < len(result.Columns) {
+					colType = result.Columns[i].Type
+				}
+
+				// Special handling for timestamp types
+				if colType == table.ColTypeTimestamp || colType == table.ColTypeTimestampTz {
+					if ts, ok := value.(int64); ok {
+						// Convert int64 microseconds to timestamp string
+						t := time.UnixMicro(ts)
+						if colType == table.ColTypeTimestampTz {
+							// timestamp with time zone - include timezone
+							dataRow.Values = append(dataRow.Values, []byte(t.Format("2006-01-02 15:04:05.999999-07")))
+						} else {
+							// timestamp without time zone
+							dataRow.Values = append(dataRow.Values, []byte(t.UTC().Format("2006-01-02 15:04:05.999999")))
+						}
+						continue
+					}
+				}
+
+				switch v := value.(type) {
+				case bool:
+					if v {
+						dataRow.Values = append(dataRow.Values, []byte("t"))
+					} else {
+						dataRow.Values = append(dataRow.Values, []byte("f"))
+					}
+				case int, int8, int16, int32, int64:
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+				case uint, uint8, uint16, uint32, uint64:
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+				case float32:
+					dataRow.Values = append(dataRow.Values, []byte(strconv.FormatFloat(float64(v), 'f', -1, 32)))
+				case float64:
+					dataRow.Values = append(dataRow.Values, []byte(strconv.FormatFloat(v, 'f', -1, 64)))
+				case string:
+					dataRow.Values = append(dataRow.Values, []byte(v))
+				case []string, []int, []int32, []int64, []float32, []float64, []bool:
+					// Array types - format as PostgreSQL array text: {val1,val2,val3}
+					dataRow.Values = append(dataRow.Values, []byte(formatArrayAsText(v)))
+				default:
+					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
+				}
 			}
 		}
-		// }
+
+		// Sanity log: actual values count must match the RowDescription/colCount
+		logger.Debugf("Sending DataRow: values=%d, colCount=%d, sourceRowLen=%d", len(dataRow.Values), colCount, len(row))
 		backend.Send(dataRow)
 	}
 
@@ -717,5 +1037,123 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 
 // sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
 func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool) {
-	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0})
+	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0}, len(result.Columns))
+}
+
+// formatArrayAsText formats a Go slice as a PostgreSQL array text representation: {val1,val2,val3}
+func formatArrayAsText(value interface{}) string {
+	switch arr := value.(type) {
+	case []string:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			// Quote strings and escape special characters if needed
+			if strings.ContainsAny(v, ",{}\" ") || v == "" {
+				sb.WriteString(`"`)
+				sb.WriteString(strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`))
+				sb.WriteString(`"`)
+			} else {
+				sb.WriteString(v)
+			}
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []int:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.Itoa(v))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []int32:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatInt(int64(v), 10))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []int64:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatInt(v, 10))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []float32:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatFloat(float64(v), 'f', -1, 32))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []float64:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatFloat(v, 'f', -1, 64))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []bool:
+		if len(arr) == 0 {
+			return "{}"
+		}
+		var sb strings.Builder
+		sb.WriteString("{")
+		for i, v := range arr {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			if v {
+				sb.WriteString("t")
+			} else {
+				sb.WriteString("f")
+			}
+		}
+		sb.WriteString("}")
+		return sb.String()
+	default:
+		// Fallback to standard string representation
+		return fmt.Sprintf("%v", value)
+	}
 }

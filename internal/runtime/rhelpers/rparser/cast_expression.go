@@ -1,15 +1,17 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 	"strings"
 )
 
 // parseCastExpression handles type casting with ::<type>, COLLATE, AT TIME ZONE
-func ParseCastExpression(castExpr parser.ICastExpressionContext, row *table.ResultRow) (result rmodels.Expression, err error) {
+func ParseCastExpression(ctx context.Context, castExpr parser.ICastExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
 	// logger.Debug("ParseCastExpression")
 	if castExpr == nil {
 		return nil, nil
@@ -22,7 +24,7 @@ func ParseCastExpression(castExpr parser.ICastExpressionContext, row *table.Resu
 	}
 
 	// Parse the primary expression
-	value, err := ParsePrimaryExpression(primExpr, row)
+	value, err := ParsePrimaryExpression(ctx, primExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
@@ -46,15 +48,23 @@ func ParseCastExpression(castExpr parser.ICastExpressionContext, row *table.Resu
 				typeName := strings.ToLower(castingOp.QualifiedName().GetText())
 				colType := table.ColTypeFromString(typeName)
 				if val, ok := value.(*rmodels.ResultRowsExpression); ok {
-					value, err = CastValue(val, colType)
+					tableIdent := ""
+					if row != nil && len(row.Columns) > 0 {
+						tableIdent = row.Columns[0].TableIdentifier
+					}
+					value, err = CastValue(val, tableIdent, colType)
 				} else if val, ok := value.(*rmodels.BoolExpression); ok {
+					tableIdent := ""
+					if row != nil && len(row.Columns) > 0 {
+						tableIdent = row.Columns[0].TableIdentifier
+					}
 					newVal := &rmodels.ResultRowsExpression{
 						Row: &table.ExecuteResult{
 							Rows:    [][]interface{}{{val.Value}},
-							Columns: []table.TableColumn{{Type: table.ColTypeBool}},
+							Columns: []table.TableColumn{{TableIdentifier: tableIdent, Type: table.ColTypeBool}},
 						},
 					}
-					value, err = CastValue(newVal, colType)
+					value, err = CastValue(newVal, row.Columns[0].TableIdentifier, colType)
 				}
 				if err != nil {
 					return nil, err
@@ -75,7 +85,7 @@ func ApplyTimeZone(value *rmodels.ResultRowsExpression, tzStr string) rmodels.Ex
 
 // castValue performs type casting to the specified type
 // TODO перевести cast в отдельный модуль + пересмотреть работу с типами
-func CastValue(expression *rmodels.ResultRowsExpression, colType table.ColType) (rmodels.Expression, error) {
+func CastValue(expression *rmodels.ResultRowsExpression, tableIdentifier string, colType table.ColType) (rmodels.Expression, error) {
 	err := checkCastExpr(expression, colType)
 	if err != nil {
 		return nil, err
@@ -99,7 +109,7 @@ func CastValue(expression *rmodels.ResultRowsExpression, colType table.ColType) 
 	return &rmodels.ResultRowsExpression{
 		Row: &table.ExecuteResult{
 			Rows:    [][]interface{}{{castedVal}},
-			Columns: []table.TableColumn{{Name: colName, Type: colType}},
+			Columns: []table.TableColumn{{TableIdentifier: tableIdentifier, Name: colName, Type: colType}},
 		},
 	}, nil
 }

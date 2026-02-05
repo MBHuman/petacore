@@ -1,17 +1,18 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/rops"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 	"sort"
 )
 
 // parseMultiplicativeExpression handles multiplication and division
-func ParseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionContext, row *table.ResultRow) (result rmodels.Expression, err error) {
-	// logger.Debug("ParseMultiplicativeExpression")
+func ParseMultiplicativeExpression(ctx context.Context, multExpr parser.IMultiplicativeExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
 	if multExpr == nil {
 		return nil, nil
 	}
@@ -22,13 +23,13 @@ func ParseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionCont
 		return nil, nil
 	}
 
-	// Get the first unary expression
-	result, err = ParseUnaryExpression(unaryExprs[0], row)
+	// Evaluate first unary expression
+	result, err = ParseUnaryExpression(ctx, unaryExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle additional terms with operators
+	// Evaluate subsequent unary expressions and apply * or /
 	stars := multExpr.AllSTAR()
 	slashes := multExpr.AllSLASH()
 
@@ -54,7 +55,7 @@ func ParseMultiplicativeExpression(multExpr parser.IMultiplicativeExpressionCont
 		if i+1 >= len(unaryExprs) {
 			break
 		}
-		nextValue, err := ParseUnaryExpression(unaryExprs[i+1], row)
+		nextValue, err := ParseUnaryExpression(ctx, unaryExprs[i+1], row, subExec)
 		if err != nil {
 			return nil, err
 		}

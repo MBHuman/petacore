@@ -1,25 +1,26 @@
 package revaluate
 
 import (
+	"context"
 	"petacore/internal/logger"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/items"
+	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 )
 
-func EvaluateWhereCondition(where *items.WhereClause, row *table.ResultRow) bool {
+func EvaluateWhereCondition(goCtx context.Context, where *items.WhereClause, row *table.ResultRow, statement *statements.SelectStatement, subExec subquery.SubqueryExecutor, runtimeParams map[int]interface{}) bool {
 	if where == nil {
 		return true
 	}
-	result, err := EvaluateExpressionContext(where.ExpressionContext, row)
+	result, err := EvaluateExpressionContext(goCtx, where.ExpressionContext, row, subExec, runtimeParams)
 	if err != nil {
 		logger.Errorf("Error evaluating WHERE condition: %v", err)
 		return false
 	}
-	logger.Debugf("WHERE condition result: %v (type: %T)", result, result)
 
 	if boolVal, ok := result.(*rmodels.BoolExpression); ok {
-		logger.Debugf("BoolExpression value: %v", boolVal.Value)
 		return boolVal.Value
 	}
 
@@ -34,6 +35,13 @@ func EvaluateWhereCondition(where *items.WhereClause, row *table.ResultRow) bool
 		}
 	}
 
-	logger.Debugf("WHERE condition returned non-bool result, treating as false")
 	return false
+}
+
+// getSubqueryCache извлекает кэш подзапросов из row, если возможно
+func getSubqueryCache(statement *statements.SelectStatement) map[*statements.SelectStatement]interface{} {
+	if statement == nil {
+		return nil
+	}
+	return statement.SubqueryCache
 }
