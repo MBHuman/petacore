@@ -13,6 +13,16 @@ const (
 	ColTypeBigInt
 	ColTypeFloat
 	ColTypeBool
+	ColTypeTimestamp
+	ColTypeTimestampTz
+	ColTypeInterval
+	ColTypeUnknown
+	// Array types
+	ColTypeStringArray
+	ColTypeIntArray
+	ColTypeBigIntArray
+	ColTypeFloatArray
+	ColTypeBoolArray
 )
 
 func (c ColType) String() string {
@@ -27,6 +37,22 @@ func (c ColType) String() string {
 		return "real"
 	case ColTypeBool:
 		return "boolean"
+	case ColTypeTimestamp:
+		return "timestamp"
+	case ColTypeTimestampTz:
+		return "timestamp with time zone"
+	case ColTypeInterval:
+		return "interval"
+	case ColTypeStringArray:
+		return "text[]"
+	case ColTypeIntArray:
+		return "integer[]"
+	case ColTypeBigIntArray:
+		return "bigint[]"
+	case ColTypeFloatArray:
+		return "real[]"
+	case ColTypeBoolArray:
+		return "boolean[]"
 	default:
 		return "text"
 	}
@@ -44,6 +70,20 @@ func (c ColType) TypeOps() TypeOps {
 		return &FloatOps{}
 	case ColTypeBool:
 		return &BoolOps{}
+	case ColTypeTimestamp, ColTypeTimestampTz:
+		return &IntOps{} // Treat timestamp as int64
+	case ColTypeInterval:
+		return &IntOps{} // Treat interval as int64 (microseconds)
+	case ColTypeStringArray:
+		return &ArrayOps{ElementType: ColTypeString}
+	case ColTypeIntArray:
+		return &ArrayOps{ElementType: ColTypeInt}
+	case ColTypeBigIntArray:
+		return &ArrayOps{ElementType: ColTypeBigInt}
+	case ColTypeFloatArray:
+		return &ArrayOps{ElementType: ColTypeFloat}
+	case ColTypeBoolArray:
+		return &ArrayOps{ElementType: ColTypeBool}
 	default:
 		panic("unexpected ColType")
 	}
@@ -129,7 +169,19 @@ func (i *IntOps) CastTo(value interface{}, targetType ColType) (interface{}, err
 
 func (i *IntOps) Compare(a, b interface{}, rightTyp ColType) (int, error) {
 	switch rightTyp {
-	case ColTypeInt:
+	case ColTypeInt, ColTypeBigInt, ColTypeTimestamp, ColTypeTimestampTz, ColTypeInterval:
+		// All these types are stored as int64, so we can compare them directly
+		ai64, aok := utils.ToInt64(a)
+		bi64, bok := utils.ToInt64(b)
+		if aok && bok {
+			if ai64 < bi64 {
+				return -1, nil
+			} else if ai64 > bi64 {
+				return 1, nil
+			}
+			return 0, nil
+		}
+		// Fallback to int comparison for smaller values
 		ai, aok := utils.ToInt(a)
 		bi, bok := utils.ToInt(b)
 		if aok && bok {
@@ -261,6 +313,25 @@ func (b *BoolOps) Compare(a, bval interface{}, rightTyp ColType) (int, error) {
 	}
 }
 
+// ArrayOps handles array type operations
+type ArrayOps struct {
+	ElementType ColType
+}
+
+func (ao *ArrayOps) CastTo(value interface{}, targetType ColType) (interface{}, error) {
+	// Arrays can be cast to string representation
+	if targetType == ColTypeString {
+		return fmt.Sprintf("%v", value), nil
+	}
+	// For now, we don't support casting arrays to other types
+	return nil, fmt.Errorf("cannot cast array to %v", targetType)
+}
+
+func (ao *ArrayOps) Compare(a, b interface{}, rightTyp ColType) (int, error) {
+	// Array comparison is not commonly needed, but we provide basic support
+	return 0, fmt.Errorf("array comparison not implemented")
+}
+
 type TableColumn struct {
 	Idx               int
 	Name              string
@@ -271,7 +342,7 @@ type TableColumn struct {
 
 func ColTypeFromString(typeStr string) ColType {
 	switch typeStr {
-	case "text", "varchar", "character varying":
+	case "text", "varchar", "character varying", "name":
 		return ColTypeString
 	case "int", "int4", "integer":
 		return ColTypeInt
@@ -281,6 +352,22 @@ func ColTypeFromString(typeStr string) ColType {
 		return ColTypeFloat
 	case "bool", "boolean":
 		return ColTypeBool
+	case "timestamp", "timestamp without time zone":
+		return ColTypeTimestamp
+	case "timestamptz", "timestamp with time zone":
+		return ColTypeTimestampTz
+	case "interval":
+		return ColTypeInterval
+	case "text[]", "varchar[]", "name[]":
+		return ColTypeStringArray
+	case "int[]", "int4[]", "integer[]":
+		return ColTypeIntArray
+	case "bigint[]", "int8[]":
+		return ColTypeBigIntArray
+	case "float[]", "float8[]", "double precision[]":
+		return ColTypeFloatArray
+	case "bool[]", "boolean[]":
+		return ColTypeBoolArray
 	default:
 		return ColTypeString
 	}

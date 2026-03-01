@@ -1,17 +1,32 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
+	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
+	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"regexp"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
+func getSubqueryCache(statement *statements.SelectStatement) map[*statements.SelectStatement]interface{} {
+	if statement == nil {
+		return nil
+	}
+	return statement.SubqueryCache
+}
+
 // parseComparisonExpression handles comparison expressions including IN, LIKE, IS NULL
-func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row *table.ResultRow) (rmodels.Expression, error) {
+func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
+	// getSubqueryCache извлекает кэш подзапросов из row, если возможно
+
 	// logger.Debug("ParseComparisonExpression")
 	if compExpr == nil {
 		return nil, nil
@@ -22,9 +37,43 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		return nil, nil
 	}
 
-	left, err := ParseConcatExpression(concatExprs[0], row)
+	left, err := ParseConcatExpression(ctx, concatExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
+	}
+
+	// Если правый операнд есть
+	var right rmodels.Expression
+	if len(concatExprs) > 1 {
+		right, err = ParseConcatExpression(ctx, concatExprs[1], row, subExec)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Если один из операндов — SubqueryExpression, извлекаем скалярное значение и используем кэш
+	var scalarLeft, scalarRight interface{}
+	if subq, ok := left.(*rmodels.SubqueryExpression); ok {
+		cache := getSubqueryCache(subq.Select)
+		if cache != nil {
+			if val, ok := cache[subq.Select]; ok {
+				scalarLeft = val
+			} else {
+				res, err := subExec(subq.Select)
+				if err != nil {
+					return nil, err
+				}
+				if res != nil && len(res.Rows) > 0 && len(res.Rows[0]) > 0 {
+					scalarLeft = res.Rows[0][0]
+					cache[subq.Select] = scalarLeft
+				}
+			}
+		}
+	}
+
+	// Подставляем скалярные значения вместо выражений
+	if scalarLeft != nil {
+		left = &rmodels.ResultRowsExpression{Row: &table.ExecuteResult{Rows: [][]interface{}{{scalarLeft}}, Columns: []table.TableColumn{{Type: table.ColTypeString}}}}
 	}
 
 	// OPERATOR: =, !=, <, >, <=, >=, LIKE, ~ etc (смотря что в грамматике)
@@ -55,31 +104,94 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		}
 
 		// Нормальный бинарный case: left OP right
-		right, err := ParseConcatExpression(concatExprs[1], row)
+		right, err = ParseConcatExpression(ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
 
-		lvv, okL := left.(*rmodels.ResultRowsExpression)
-		idxLeft := 0
-
-		for idx, col := range row.Columns {
-			if col.Name == lvv.Row.Columns[0].Name {
-				idxLeft = idx
-				break
+		if subq, ok := right.(*rmodels.SubqueryExpression); ok {
+			logger.Debug("Entering into subquery expression on right side of comparison", zap.Any("subquery", subq.Select))
+			// cache := getSubqueryCache(subq.Select)
+			// if cache != nil {
+			// 	if val, ok := cache[subq.Select]; ok {
+			// 		logger.Debug("Getting cached value for subquery", zap.Any("value", val))
+			// 		scalarRight = val
+			// 	} else {
+			logger.Debug("Executing subquery for right side of comparison", zap.Any("subquery", subq.Select))
+			res, err := subExec(subq.Select)
+			if err != nil {
+				return nil, err
 			}
+			logger.Debug("Getting value from subquery result", zap.Any("result", res))
+			// if res != nil && len(res.Rows) > 0 && len(res.Rows[0]) > 0 {
+			scalarRight = res.Rows[0][0]
+			// 	cache[subq.Select] = scalarRight
+			// }
+			// }
+			// }
 		}
 
-		lrr := &rmodels.ResultRowsExpression{
-			Row: &table.ExecuteResult{
-				Rows:    [][]interface{}{{row.Row[idxLeft]}},
-				Columns: []table.TableColumn{row.Columns[idxLeft]},
-			},
+		if scalarRight != nil {
+			right = &rmodels.ResultRowsExpression{Row: &table.ExecuteResult{Rows: [][]interface{}{{scalarRight}}, Columns: []table.TableColumn{{Type: table.ColTypeString}}}}
 		}
 
+		lvv, okL := left.(*rmodels.ResultRowsExpression)
 		rrr, okR := right.(*rmodels.ResultRowsExpression)
 		if !okL || !okR {
 			return nil, fmt.Errorf("comparison operands must be ResultRowsExpression, got %T and %T", left, right)
+		}
+
+		// If left expression represents a computed scalar (function result, literal,
+		// or otherwise not bound to a table column), use its scalar value directly
+		// instead of trying to map it to a column from the input row.
+		var lrr *rmodels.ResultRowsExpression
+		if lvv == nil || lvv.Row == nil || len(lvv.Row.Columns) == 0 {
+			return nil, fmt.Errorf("left operand has no result row")
+		}
+
+		leftCol := lvv.Row.Columns[0]
+		// If left is not a table-bound column (no TableIdentifier or placeholder name),
+		// create a ResultRowsExpression from its scalar value.
+		if leftCol.TableIdentifier == "" || leftCol.Name == "?column?" {
+			leftVal := interface{}(nil)
+			if len(lvv.Row.Rows) > 0 && len(lvv.Row.Rows[0]) > 0 {
+				leftVal = lvv.Row.Rows[0][0]
+			}
+			lrr = &rmodels.ResultRowsExpression{
+				Row: &table.ExecuteResult{
+					Rows:    [][]interface{}{{leftVal}},
+					Columns: []table.TableColumn{{Type: leftCol.Type}},
+				},
+			}
+		} else {
+			// Try to find matching column in the input row by TableIdentifier/Name.
+			idxLeft := -1
+			for idx, col := range row.Columns {
+				if col.TableIdentifier == leftCol.TableIdentifier && col.Name == leftCol.Name {
+					idxLeft = idx
+					break
+				}
+			}
+			if idxLeft >= 0 && idxLeft < len(row.Row) {
+				lrr = &rmodels.ResultRowsExpression{
+					Row: &table.ExecuteResult{
+						Rows:    [][]interface{}{{row.Row[idxLeft]}},
+						Columns: []table.TableColumn{row.Columns[idxLeft]},
+					},
+				}
+			} else {
+				// Fallback: use computed scalar value
+				leftVal := interface{}(nil)
+				if len(lvv.Row.Rows) > 0 && len(lvv.Row.Rows[0]) > 0 {
+					leftVal = lvv.Row.Rows[0][0]
+				}
+				lrr = &rmodels.ResultRowsExpression{
+					Row: &table.ExecuteResult{
+						Rows:    [][]interface{}{{leftVal}},
+						Columns: []table.TableColumn{{Type: leftCol.Type}},
+					},
+				}
+			}
 		}
 
 		if err := checkComparisonExpr(lrr, rrr); err != nil {
@@ -109,6 +221,9 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		lOps := lType.TypeOps()
 
 		compareResult, err := lOps.Compare(lrr.Row.Rows[0][0], rightValue, lType)
+		if err != nil {
+			return nil, fmt.Errorf("comparison error: %w", err)
+		}
 		switch op {
 		case "=":
 			return &rmodels.BoolExpression{Value: compareResult == 0}, nil
@@ -165,7 +280,7 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 			return left, nil
 		}
 		opExpr := compExpr.OperatorExpr()
-		right, err := ParseConcatExpression(concatExprs[1], row)
+		right, err := ParseConcatExpression(ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
@@ -194,33 +309,72 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 
 		// Проверяем каждое значение из IN списка
 		found := false
-		for _, e := range compExpr.AllExpression() {
-			v, err := ParseExpression(e, row)
+
+		if sqCtx := compExpr.SubqueryExpression(); sqCtx != nil {
+			sqCtx := compExpr.SubqueryExpression()
+			selCtx := sqCtx.SelectStatement()
+			if selCtx == nil {
+				return nil, fmt.Errorf("expected subquery in IN operator")
+			}
+			selectStmt, err := ParseSelectStatement(selCtx)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing subquery in IN operator: %w", err)
+			}
+			res, err := subExec(selectStmt)
 			if err != nil {
 				return nil, err
 			}
+			for _, r := range res.Rows {
+				if len(r) == 0 {
+					continue
+				}
+				rightValue := r[0]
+				rightType := res.Columns[0].Type
 
-			rightExpr, ok := v.(*rmodels.ResultRowsExpression)
-			if !ok {
-				return nil, fmt.Errorf("IN value must be ResultRowsExpression, got %T", v)
-			}
+				// Приводим правое значение к типу левого, если типы не совпадают
+				if leftType != rightType {
+					convertedValue, err := leftOps.CastTo(rightValue, leftType)
+					if err == nil {
+						rightValue = convertedValue
+					}
+				}
 
-			rightValue := rightExpr.Row.Rows[0][0]
-			rightType := rightExpr.Row.Columns[0].Type
-
-			// Приводим правое значение к типу левого, если типы не совпадают
-			if leftType != rightType {
-				convertedValue, err := leftOps.CastTo(rightValue, leftType)
-				if err == nil {
-					rightValue = convertedValue
+				// Используем Compare для проверки равенства
+				compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
+				if err == nil && compareResult == 0 {
+					found = true
+					break
 				}
 			}
+		} else if compExpr.AllExpression() != nil {
+			for _, e := range compExpr.AllExpression() {
+				v, err := ParseExpression(ctx, e, row, subExec)
+				if err != nil {
+					return nil, err
+				}
 
-			// Используем Compare для проверки равенства
-			compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
-			if err == nil && compareResult == 0 {
-				found = true
-				break
+				rightExpr, ok := v.(*rmodels.ResultRowsExpression)
+				if !ok {
+					return nil, fmt.Errorf("IN value must be ResultRowsExpression, got %T", v)
+				}
+
+				rightValue := rightExpr.Row.Rows[0][0]
+				rightType := rightExpr.Row.Columns[0].Type
+
+				// Приводим правое значение к типу левого, если типы не совпадают
+				if leftType != rightType {
+					convertedValue, err := leftOps.CastTo(rightValue, leftType)
+					if err == nil {
+						rightValue = convertedValue
+					}
+				}
+
+				// Используем Compare для проверки равенства
+				compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
+				if err == nil && compareResult == 0 {
+					found = true
+					break
+				}
 			}
 		}
 
@@ -237,7 +391,7 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		}
 		not := compExpr.NOT() != nil
 
-		right, err := ParseConcatExpression(concatExprs[1], row)
+		right, err := ParseConcatExpression(ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
@@ -273,6 +427,7 @@ func ParseComparisonExpression(compExpr parser.IComparisonExpressionContext, row
 		return &rmodels.BoolExpression{Value: isNull}, nil
 	}
 
+	logger.Debug("Comparison expression result", zap.Any("result", left))
 	return left, nil
 }
 

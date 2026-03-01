@@ -137,7 +137,8 @@ func (vc *VectorClock) Clone() *VectorClock {
 	vc.mu.RLock()
 	defer vc.mu.RUnlock()
 
-	newVC := NewVectorClock()
+	// Preallocate map with known capacity to avoid repeated growth allocations
+	newVC := &VectorClock{clock: make(map[string]uint64, len(vc.clock))}
 	for nodeID, timestamp := range vc.clock {
 		newVC.clock[nodeID] = timestamp
 	}

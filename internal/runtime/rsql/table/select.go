@@ -23,7 +23,7 @@ func (t *Table) Select(
 	// Получаем метаданные таблицы
 	tableKey := t.getMetadataPrefixKey()
 	metaStr, found := tx.Read([]byte(tableKey))
-	if !found || metaStr == "" {
+	if !found || len(metaStr) == 0 {
 		return nil, fmt.Errorf("table %s does not exist", tableName)
 	}
 
@@ -102,7 +102,23 @@ func (t *Table) Select(
 
 		for _, finalColumn := range finalColumns {
 			if tableColumn, ok := tableColumnsMap[finalColumn.Name]; ok {
-				resultRow = append(resultRow, singleRow[tableColumn.Idx-1])
+				raw := singleRow[tableColumn.Idx-1]
+
+				// Convert JSON-decoded numbers (which become float64) back to
+				// integer types for timestamp/bigint/interval/int columns so
+				// downstream code sees the original integer-like types.
+				switch finalColumn.Type {
+				case ColTypeTimestamp, ColTypeTimestampTz, ColTypeBigInt, ColTypeInterval:
+					if f, ok := raw.(float64); ok {
+						raw = int64(f)
+					}
+				case ColTypeInt:
+					if f, ok := raw.(float64); ok {
+						raw = int(int64(f))
+					}
+				}
+
+				resultRow = append(resultRow, raw)
 				continue
 			}
 			return nil, fmt.Errorf("column %s not found in table columns map", finalColumn.Name)

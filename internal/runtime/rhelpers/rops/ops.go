@@ -22,6 +22,40 @@ func AddValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpressio
 	aType := a.Row.Columns[0].Type
 	bType := b.Row.Columns[0].Type
 
+	// Handle timestamp + interval
+	if (aType == table.ColTypeTimestamp || aType == table.ColTypeTimestampTz) && bType == table.ColTypeInterval {
+		// timestamp + interval = timestamp
+		tsMicros, tsOk := utils.ToInt64(aVal)
+		intervalMicros, intOk := utils.ToInt64(bVal)
+		if tsOk && intOk {
+			resultRow := &table.ExecuteResult{
+				Rows: [][]interface{}{{tsMicros + intervalMicros}},
+				Columns: []table.TableColumn{
+					{Idx: 0, Name: "?column?", Type: aType}, // preserve timestamp type
+				},
+			}
+			return &rmodels.ResultRowsExpression{Row: resultRow}, nil
+		}
+		return nil, fmt.Errorf("cannot add timestamp and interval")
+	}
+
+	// Handle interval + timestamp
+	if aType == table.ColTypeInterval && (bType == table.ColTypeTimestamp || bType == table.ColTypeTimestampTz) {
+		// interval + timestamp = timestamp
+		intervalMicros, intOk := utils.ToInt64(aVal)
+		tsMicros, tsOk := utils.ToInt64(bVal)
+		if intOk && tsOk {
+			resultRow := &table.ExecuteResult{
+				Rows: [][]interface{}{{tsMicros + intervalMicros}},
+				Columns: []table.TableColumn{
+					{Idx: 0, Name: "?column?", Type: bType}, // preserve timestamp type
+				},
+			}
+			return &rmodels.ResultRowsExpression{Row: resultRow}, nil
+		}
+		return nil, fmt.Errorf("cannot add interval and timestamp")
+	}
+
 	// Если типы не совпадают, пробуем привести к типу левой части
 	if aType != bType {
 		aOps := aType.TypeOps()
@@ -69,6 +103,23 @@ func SubtractValues(a, b *rmodels.ResultRowsExpression) (*rmodels.ResultRowsExpr
 	bVal := bRows[0][0]
 	aType := a.Row.Columns[0].Type
 	bType := b.Row.Columns[0].Type
+
+	// Handle timestamp - interval
+	if (aType == table.ColTypeTimestamp || aType == table.ColTypeTimestampTz) && bType == table.ColTypeInterval {
+		// timestamp - interval = timestamp
+		tsMicros, tsOk := utils.ToInt64(aVal)
+		intervalMicros, intOk := utils.ToInt64(bVal)
+		if tsOk && intOk {
+			resultRow := &table.ExecuteResult{
+				Rows: [][]interface{}{{tsMicros - intervalMicros}},
+				Columns: []table.TableColumn{
+					{Idx: 0, Name: "?column?", Type: aType}, // preserve timestamp type
+				},
+			}
+			return &rmodels.ResultRowsExpression{Row: resultRow}, nil
+		}
+		return nil, fmt.Errorf("cannot subtract interval from timestamp")
+	}
 
 	// Если типы не совпадают, пробуем привести к типу левой части
 	if aType != bType {
@@ -215,6 +266,14 @@ func checkOps(a, b *rmodels.ResultRowsExpression) error {
 	aType := a.Row.Columns[0].Type
 	bType := b.Row.Columns[0].Type
 
+	// Allow timestamp +/- interval operations
+	if (aType == table.ColTypeTimestamp || aType == table.ColTypeTimestampTz) && bType == table.ColTypeInterval {
+		return nil
+	}
+	if aType == table.ColTypeInterval && (bType == table.ColTypeTimestamp || bType == table.ColTypeTimestampTz) {
+		return nil
+	}
+
 	// Проверяем, что хотя бы один из типов поддерживает арифметику
 	if !(aType == table.ColTypeInt || aType == table.ColTypeFloat ||
 		bType == table.ColTypeInt || bType == table.ColTypeFloat) {
@@ -253,6 +312,13 @@ func applyAdd(a, b interface{}, colType table.ColType) (interface{}, error) {
 			return ai + bi, nil
 		}
 		return nil, fmt.Errorf("applyAdd: cannot convert to int")
+	case table.ColTypeBigInt, table.ColTypeTimestamp, table.ColTypeTimestampTz, table.ColTypeInterval:
+		ai, aok := utils.ToInt64(a)
+		bi, bok := utils.ToInt64(b)
+		if aok && bok {
+			return ai + bi, nil
+		}
+		return nil, fmt.Errorf("applyAdd: cannot convert to int64")
 	default:
 		panic(fmt.Sprintf("unexpected table.ColType: %#v", colType))
 	}
@@ -274,6 +340,13 @@ func applySubtract(a, b interface{}, colType table.ColType) (interface{}, error)
 			return ai - bi, nil
 		}
 		return nil, fmt.Errorf("applySubtract: cannot convert to int")
+	case table.ColTypeBigInt, table.ColTypeTimestamp, table.ColTypeTimestampTz, table.ColTypeInterval:
+		ai, aok := utils.ToInt64(a)
+		bi, bok := utils.ToInt64(b)
+		if aok && bok {
+			return ai - bi, nil
+		}
+		return nil, fmt.Errorf("applySubtract: cannot convert to int64")
 	default:
 		panic(fmt.Sprintf("unexpected table.ColType: %#v", colType))
 	}

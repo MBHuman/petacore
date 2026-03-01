@@ -1,6 +1,7 @@
 package visitor
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
@@ -14,6 +15,7 @@ func (l *sqlListener) EnterInsertStatement(ctx *parser.InsertStatementContext) {
 	if ctx.TableName() != nil {
 		stmt.TableName = ctx.TableName().GetText()
 	}
+	goCtx := context.Background()
 
 	// Columns
 	if ctx.ColumnList() != nil {
@@ -32,7 +34,7 @@ func (l *sqlListener) EnterInsertStatement(ctx *parser.InsertStatementContext) {
 	for _, vl := range ctx.AllValueList() {
 		var rowValues []interface{}
 		for _, expr := range vl.AllExpression() {
-			value, err := rparser.ParseExpression(expr, nil)
+			value, err := rparser.ParseExpression(goCtx, expr, nil, l.subExec)
 			if err != nil {
 				l.err = err
 				return

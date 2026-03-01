@@ -26,6 +26,9 @@ type sqlListener interface {
 	// EnterDataType is called when entering the dataType production.
 	EnterDataType(c *DataTypeContext)
 
+	// EnterIntervalFields is called when entering the intervalFields production.
+	EnterIntervalFields(c *IntervalFieldsContext)
+
 	// EnterInsertStatement is called when entering the insertStatement production.
 	EnterInsertStatement(c *InsertStatementContext)
 
@@ -49,6 +52,15 @@ type sqlListener interface {
 
 	// EnterSelectStatement is called when entering the selectStatement production.
 	EnterSelectStatement(c *SelectStatementContext)
+
+	// EnterUnionExceptStatement is called when entering the unionExceptStatement production.
+	EnterUnionExceptStatement(c *UnionExceptStatementContext)
+
+	// EnterIntersectStatement is called when entering the intersectStatement production.
+	EnterIntersectStatement(c *IntersectStatementContext)
+
+	// EnterPrimarySelectStatement is called when entering the primarySelectStatement production.
+	EnterPrimarySelectStatement(c *PrimarySelectStatementContext)
 
 	// EnterSelectList is called when entering the selectList production.
 	EnterSelectList(c *SelectListContext)
@@ -164,6 +176,9 @@ type sqlListener interface {
 	// EnterValue is called when entering the value production.
 	EnterValue(c *ValueContext)
 
+	// EnterTypedLiteral is called when entering the typedLiteral production.
+	EnterTypedLiteral(c *TypedLiteralContext)
+
 	// ExitQuery is called when exiting the query production.
 	ExitQuery(c *QueryContext)
 
@@ -181,6 +196,9 @@ type sqlListener interface {
 
 	// ExitDataType is called when exiting the dataType production.
 	ExitDataType(c *DataTypeContext)
+
+	// ExitIntervalFields is called when exiting the intervalFields production.
+	ExitIntervalFields(c *IntervalFieldsContext)
 
 	// ExitInsertStatement is called when exiting the insertStatement production.
 	ExitInsertStatement(c *InsertStatementContext)
@@ -205,6 +223,15 @@ type sqlListener interface {
 
 	// ExitSelectStatement is called when exiting the selectStatement production.
 	ExitSelectStatement(c *SelectStatementContext)
+
+	// ExitUnionExceptStatement is called when exiting the unionExceptStatement production.
+	ExitUnionExceptStatement(c *UnionExceptStatementContext)
+
+	// ExitIntersectStatement is called when exiting the intersectStatement production.
+	ExitIntersectStatement(c *IntersectStatementContext)
+
+	// ExitPrimarySelectStatement is called when exiting the primarySelectStatement production.
+	ExitPrimarySelectStatement(c *PrimarySelectStatementContext)
 
 	// ExitSelectList is called when exiting the selectList production.
 	ExitSelectList(c *SelectListContext)
@@ -319,4 +346,7 @@ type sqlListener interface {
 
 	// ExitValue is called when exiting the value production.
 	ExitValue(c *ValueContext)
+
+	// ExitTypedLiteral is called when exiting the typedLiteral production.
+	ExitTypedLiteral(c *TypedLiteralContext)
 }

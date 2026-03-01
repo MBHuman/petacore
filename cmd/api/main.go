@@ -164,7 +164,7 @@ func (s *APIServer) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 	// Выполняем транзакцию записи
 	err := s.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
-		tx.Write([]byte(req.Key), req.Value)
+		tx.Write([]byte(req.Key), []byte(req.Value))
 		return nil
 	})
 
@@ -205,7 +205,7 @@ func (s *APIServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	// Выполняем транзакцию чтения с quorum проверкой
 	err := s.storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		if value, ok := tx.Read([]byte(key)); ok {
-			response.Value = value
+			response.Value = string(value)
 			response.Found = true
 		} else {
 			response.Found = false

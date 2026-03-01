@@ -18,7 +18,7 @@ func (t *Table) CreateTable(
 		// Проверяем, существует ли таблица
 		metaPrefixKey := t.getMetadataPrefixKey()
 		existing, found := tx.Read([]byte(metaPrefixKey))
-		if found && existing != "" {
+		if found && len(existing) > 0 {
 			if ifNotExists {
 				// Table exists, but IF NOT EXISTS was specified - return success
 				return nil
@@ -50,13 +50,13 @@ func (t *Table) CreateTable(
 		if err != nil {
 			return err
 		}
-		tx.Write([]byte(metaPrefixKey), string(metaData))
+		tx.Write([]byte(metaPrefixKey), metaData)
 
 		// Инициализируем sequences для SERIAL колонок
 		for _, col := range columns {
 			if col.IsSerial {
 				seqKey := t.getSequencePrefixKey(col.Name)
-				tx.Write([]byte(seqKey), "1")
+				tx.Write([]byte(seqKey), []byte("1"))
 			}
 		}
 

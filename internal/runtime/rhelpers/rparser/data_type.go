@@ -15,6 +15,10 @@ func ParseDataType(typeStr string) table.ColType {
 		return table.ColTypeFloat
 	case "BOOL":
 		return table.ColTypeBool
+	case "TIMESTAMP":
+		return table.ColTypeTimestamp
+	case "TIMESTAMPTZ":
+		return table.ColTypeTimestampTz
 	default:
 		return table.ColTypeString
 	}

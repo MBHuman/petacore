@@ -1,12 +1,13 @@
 package rparser
 
 import (
+	"context"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
 )
 
 // parseCaseExpression handles CASE WHEN THEN ELSE END expressions
-func ParseCaseExpression(caseExpr parser.ICaseExpressionContext) (rmodels.Expression, error) {
+func ParseCaseExpression(ctx context.Context, caseExpr parser.ICaseExpressionContext) (rmodels.Expression, error) {
 	// logger.Debug("ParseCaseExpression")
 	if caseExpr == nil {
 		return nil, nil

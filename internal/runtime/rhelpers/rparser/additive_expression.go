@@ -1,17 +1,18 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/rops"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 	"sort"
 )
 
 // parseAdditiveExpression handles addition and subtraction
-func ParseAdditiveExpression(addExpr parser.IAdditiveExpressionContext, row *table.ResultRow) (result rmodels.Expression, err error) {
-	// logger.Debug("ParseAdditiveExpression")
+func ParseAdditiveExpression(ctx context.Context, addExpr parser.IAdditiveExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
 	if addExpr == nil {
 		return nil, nil
 	}
@@ -22,16 +23,16 @@ func ParseAdditiveExpression(addExpr parser.IAdditiveExpressionContext, row *tab
 		return nil, nil
 	}
 
-	result, err = ParseMultiplicativeExpression(multExpr, row)
+	result, err = ParseMultiplicativeExpression(ctx, multExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle additional terms with operators
+	// Handle subsequent multiplicative expressions with operators
 	plusOps := addExpr.AllPLUS()
 	minusOps := addExpr.AllMINUS()
 
-	// Merge operators by token index
+	// Build operator order by token index
 	type opInfo struct {
 		op    string
 		index int
@@ -48,13 +49,14 @@ func ParseAdditiveExpression(addExpr parser.IAdditiveExpressionContext, row *tab
 		return ops[i].index < ops[j].index
 	})
 
+	// Simple stable order since grammar preserves order of terms
 	multExprs := addExpr.AllMultiplicativeExpression()
 	// Skip the first one since we already processed it
 	for i, op := range ops {
 		if i+1 >= len(multExprs) {
 			break
 		}
-		nextValue, err := ParseMultiplicativeExpression(multExprs[i+1], row)
+		nextValue, err := ParseMultiplicativeExpression(ctx, multExprs[i+1], row, subExec)
 		if err != nil {
 			return nil, err
 		}

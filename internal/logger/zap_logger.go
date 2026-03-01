@@ -10,7 +10,7 @@ var (
 )
 
 // Init initializes the global logger
-func Init(development bool) error {
+func Init(development bool, outputs ...string) error {
 	var err error
 	var config zap.Config
 
@@ -19,6 +19,10 @@ func Init(development bool) error {
 		config.DisableStacktrace = true
 	} else {
 		config = zap.NewProductionConfig()
+	}
+
+	if len(outputs) > 0 {
+		config.OutputPaths = outputs
 	}
 
 	logger, err = config.Build()

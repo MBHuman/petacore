@@ -2,6 +2,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"petacore/internal/logger"
@@ -18,6 +19,7 @@ type ExecuteResult struct {
 type ResultRow struct {
 	Row     []interface{}
 	Columns []TableColumn
+	Context context.Context // For passing queryStartTime and other runtime context
 }
 
 type SelectColumn struct {
@@ -158,14 +160,14 @@ func (t *Table) genSequenceKey(tx *storage.DistributedTransactionVClock, colName
 
 	seqValueStr, found := tx.Read([]byte(sequencePrefixKey))
 	seqValue := uint64(1)
-	if found && seqValueStr != "" {
-		if parsed, err := strconv.ParseUint(seqValueStr, 10, 64); err == nil {
+	if found && len(seqValueStr) > 0 {
+		if parsed, err := strconv.ParseUint(string(seqValueStr), 10, 64); err == nil {
 			seqValue = parsed
 		}
 	}
 
 	logger.Debugf("Using sequence prefix key %s with value %d", sequencePrefixKey, seqValue)
-	tx.Write([]byte(sequencePrefixKey), strconv.FormatUint(seqValue+1, 10))
+	tx.Write([]byte(sequencePrefixKey), []byte(strconv.FormatUint(seqValue+1, 10)))
 	return seqValue
 }
 
@@ -199,7 +201,7 @@ func (t *Table) TableExists(tx *storage.DistributedTransactionVClock) bool {
 func (t *Table) GetTableMetadataInTx(tx *storage.DistributedTransactionVClock) (*TableMetadata, error) {
 	metaPrefixKey := t.getMetadataPrefixKey()
 	metaDataStr, found := tx.Read([]byte(metaPrefixKey))
-	if !found || metaDataStr == "" {
+	if !found || len(metaDataStr) == 0 {
 		return nil, fmt.Errorf("table %s does not exist", t.Name)
 	}
 

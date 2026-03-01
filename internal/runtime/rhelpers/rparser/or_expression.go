@@ -1,14 +1,21 @@
 package rparser
 
 import (
+	"context"
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 )
 
 // parseOrExpression handles OR expressions
-func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow) (rmodels.Expression, error) {
+func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
+	return ParseOrExpressionWithContext(context.Background(), orExpr, row, subExec)
+}
+
+// ParseOrExpressionWithContext парсит OR выражение с контекстом
+func ParseOrExpressionWithContext(ctx context.Context, orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	// logger.Debug("ParseOrExpression")
 	if orExpr == nil {
 		return nil, nil
@@ -20,7 +27,7 @@ func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow)
 	}
 
 	// Evaluate first AND expression
-	result, err := ParseAndExpression(andExprs[0], row)
+	result, err := ParseAndExpression(ctx, andExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +37,7 @@ func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow)
 
 		// If multiple AND expressions connected by OR
 		for i := 1; i < len(andExprs); i++ {
-			rightVal, err := ParseAndExpression(andExprs[i], row)
+			rightVal, err := ParseAndExpression(ctx, andExprs[i], row, subExec)
 			if err != nil {
 				return nil, err
 			}
@@ -43,6 +50,8 @@ func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow)
 	} else if leftVal, ok := result.(*rmodels.ResultRowsExpression); ok {
 		return leftVal, nil
 	} else if leftVal, ok := result.(*rmodels.CaseExpression); ok {
+		return leftVal, nil
+	} else if leftVal, ok := result.(*rmodels.SubqueryExpression); ok {
 		return leftVal, nil
 	} else {
 		return nil, fmt.Errorf("expected BoolExpression, got %T", result)
