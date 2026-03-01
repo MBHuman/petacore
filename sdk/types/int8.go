@@ -134,3 +134,7 @@ func (t TypeInt8) ShiftRight(allocator pmem.Allocator, n uint) BitwiseType[int64
 	v, _ := int8FromVal(allocator, t.IntoGo()>>n)
 	return v
 }
+
+func (t TypeInt8) String() string {
+	return "int8(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}

@@ -282,3 +282,7 @@ func (w *arrayElemWrapper[K, T]) Compare(other BaseType[T]) int {
 	return bytes.Compare(w.val.GetBuffer(), other.GetBuffer())
 }
 func (w *arrayElemWrapper[K, T]) IntoGo() T { return w.val }
+
+func (t *TypeArray[K, T]) String() string {
+	return fmt.Sprintf("array(len=%d)", t.Len())
+}

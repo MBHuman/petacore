@@ -283,3 +283,11 @@ func (t TypeNumeric) Abs(allocator pmem.Allocator) NumericType[[]byte] {
 	result, _ := numericFromBigFloat(allocator, t.Meta, f.Abs(f))
 	return result
 }
+
+func (t TypeNumeric) String() string {
+	f, err := t.toBigFloat()
+	if err != nil {
+		return "numeric(invalid)"
+	}
+	return "numeric(" + f.Text('f', int(t.Meta.Scale)) + ")"
+}

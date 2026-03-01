@@ -119,3 +119,11 @@ func (t TypeTime) Second() int {
 func (t TypeTime) Microsecond() int {
 	return int(t.usec() % 1_000_000)
 }
+
+func (t TypeTime) String() string {
+	tm := t.IntoGo()
+	if tm == nil {
+		return "time(NULL)"
+	}
+	return "time(" + fmt.Sprintf("%02d:%02d:%02d.%06d", t.Hour(), t.Minute(), t.Second(), t.Microsecond()) + ")"
+}

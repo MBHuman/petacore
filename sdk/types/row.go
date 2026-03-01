@@ -57,3 +57,26 @@ func (r *Row) GetFieldOID(idx int) (OID, error) {
 	oidPos := 4 + idx*4
 	return OID(binary.BigEndian.Uint32(r.BufferPtr[oidPos : oidPos+4])), nil
 }
+
+func (t Row) String() string {
+	count := t.FieldCount()
+	result := "row{"
+	for i := 0; i < count; i++ {
+		oid, err := t.GetFieldOID(i)
+		if err != nil {
+			result += fmt.Sprintf("field%d: error(%v)", i, err)
+			continue
+		}
+		buf, err := t.GetFieldBuffer(i)
+		if err != nil {
+			result += fmt.Sprintf("field%d(oid %d): error(%v)", i, oid, err)
+			continue
+		}
+		result += fmt.Sprintf("field%d(oid %d): %d bytes", i, oid, len(buf))
+		if i < count-1 {
+			result += ", "
+		}
+	}
+	result += "}"
+	return result
+}

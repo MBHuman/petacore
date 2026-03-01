@@ -134,3 +134,7 @@ func (t TypeInt4) ShiftRight(allocator pmem.Allocator, n uint) BitwiseType[int32
 	v, _ := int4FromVal(allocator, t.IntoGo()>>n)
 	return v
 }
+
+func (t TypeInt4) String() string {
+	return "int4(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}

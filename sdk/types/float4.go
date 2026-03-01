@@ -98,3 +98,7 @@ func (t TypeFloat4) Abs(allocator pmem.Allocator) NumericType[float32] {
 	v, _ := float4FromVal(allocator, float32(math.Abs(float64(t.IntoGo()))))
 	return v
 }
+
+func (t TypeFloat4) String() string {
+	return "float4(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}

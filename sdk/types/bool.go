@@ -89,3 +89,7 @@ func (t TypeBool) Not(allocator pmem.Allocator) (TypeBool, error) {
 	}
 	return TypeBool{BufferPtr: buf}, nil
 }
+
+func (t TypeBool) String() string {
+	return "bool(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}

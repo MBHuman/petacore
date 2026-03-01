@@ -110,3 +110,7 @@ func (t TypeBytea) Overlay(allocator pmem.Allocator, replacement []byte, start, 
 
 	return TypeBytea{BufferPtr: buf}, nil
 }
+
+func (t TypeBytea) String() string {
+	return "bytea(" + fmt.Sprintf("%v", t.BufferPtr) + ")"
+}

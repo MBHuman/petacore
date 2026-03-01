@@ -189,3 +189,11 @@ func (t TypeTimestamp) Weekday() time.Weekday {
 	}
 	return tm.Weekday()
 }
+
+func (t TypeTimestamp) String() string {
+	tm := t.IntoGo()
+	if tm == nil {
+		return "timestamp(NULL)"
+	}
+	return "timestamp(" + fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d", t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.usec()%1_000_000) + ")"
+}

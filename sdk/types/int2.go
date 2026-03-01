@@ -134,3 +134,7 @@ func (t TypeInt2) ShiftRight(allocator pmem.Allocator, n uint) BitwiseType[int16
 	v, _ := int2FromVal(allocator, t.IntoGo()>>n)
 	return v
 }
+
+func (t TypeInt2) String() string {
+	return "int2(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}

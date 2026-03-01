@@ -190,3 +190,11 @@ func (t TypeTimestampz) Weekday() time.Weekday {
 	}
 	return tm.UTC().Weekday()
 }
+
+func (t TypeTimestampz) String() string {
+	tm := t.IntoGo()
+	if tm == nil {
+		return "timestampz(NULL)"
+	}
+	return "timestampz(" + fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d %s", t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.usec()%1_000_000, tm.Location()) + ")"
+}

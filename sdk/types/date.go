@@ -151,3 +151,11 @@ func (t TypeDate) Weekday() time.Weekday {
 	}
 	return tm.Weekday()
 }
+
+func (t TypeDate) String() string {
+	tm := t.IntoGo()
+	if tm == nil {
+		return "date(NULL)"
+	}
+	return "date(" + tm.Format("2006-01-02") + ")"
+}
