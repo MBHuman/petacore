@@ -1,6 +1,7 @@
 package ptypes
 
 import (
+	"bytes"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/sdk/pmem"
 	"reflect"
@@ -77,6 +78,25 @@ type NullableType[T any] interface {
 	IsNull() bool
 	IsNotNull() bool
 }
+
+type CastableType[T any] interface {
+	BaseType[T]
+
+	CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error)
+}
+
+// anyWrapper оборачивает конкретный BaseType[T] в BaseType[any]
+// нужен для реализации CastableType — CastTo возвращает BaseType[any]
+type anyWrapper[T any] struct {
+	inner BaseType[T]
+}
+
+func (w anyWrapper[T]) GetType() OID      { return w.inner.GetType() }
+func (w anyWrapper[T]) GetBuffer() []byte { return w.inner.GetBuffer() }
+func (w anyWrapper[T]) Compare(other BaseType[any]) int {
+	return bytes.Compare(w.inner.GetBuffer(), other.GetBuffer())
+}
+func (w anyWrapper[T]) IntoGo() any { return w.inner.IntoGo() }
 
 const (
 	// OIDs for basic types

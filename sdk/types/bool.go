@@ -3,6 +3,7 @@ package ptypes
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"petacore/sdk/pmem"
 )
@@ -92,4 +93,65 @@ func (t TypeBool) Not(allocator pmem.Allocator) (TypeBool, error) {
 
 func (t TypeBool) String() string {
 	return "bool(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}
+
+func (t TypeBool) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	switch targetType {
+	case PTypeInt2:
+		buf, err := allocator.AllocAligned(2, 2)
+		if err != nil {
+			return nil, fmt.Errorf("bool cast to int2: %w", err)
+		}
+		var v uint16
+		if t.IntoGo() {
+			v = uint16(1) ^ 0x8000
+		} else {
+			v = uint16(0) ^ 0x8000
+		}
+		binary.BigEndian.PutUint16(buf, v)
+		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+
+	case PTypeInt4:
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("bool cast to int4: %w", err)
+		}
+		var v uint32
+		if t.IntoGo() {
+			v = uint32(1) ^ 0x80000000
+		} else {
+			v = uint32(0) ^ 0x80000000
+		}
+		binary.BigEndian.PutUint32(buf, v)
+		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+
+	case PTypeInt8:
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("bool cast to int8: %w", err)
+		}
+		var v uint64
+		if t.IntoGo() {
+			v = uint64(1) ^ 0x8000000000000000
+		} else {
+			v = uint64(0) ^ 0x8000000000000000
+		}
+		binary.BigEndian.PutUint64(buf, v)
+		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+
+	case PTypeText, PTypeVarchar:
+		s := "false"
+		if t.IntoGo() {
+			s = "true"
+		}
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("bool cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("bool: unsupported cast to OID %d", targetType)
+	}
 }
