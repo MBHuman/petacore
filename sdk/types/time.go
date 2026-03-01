@@ -127,3 +127,51 @@ func (t TypeTime) String() string {
 	}
 	return "time(" + fmt.Sprintf("%02d:%02d:%02d.%06d", t.Hour(), t.Minute(), t.Second(), t.Microsecond()) + ")"
 }
+
+var _ CastableType[*time.Time] = (*TypeTime)(nil)
+
+// CastableType
+
+func (t TypeTime) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	switch targetType {
+	case PTypeText:
+		s := fmt.Sprintf("%02d:%02d:%02d.%06d", t.Hour(), t.Minute(), t.Second(), t.Microsecond())
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("time cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		s := fmt.Sprintf("%02d:%02d:%02d.%06d", t.Hour(), t.Minute(), t.Second(), t.Microsecond())
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("time cast to varchar: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	case PTypeTimestamp:
+		// time → timestamp: комбинируем с PgEpoch (2000-01-01)
+		usec := t.usec()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("time cast to timestamp: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+
+	case PTypeTimestampz:
+		// time → timestampz: то же самое но интерпретируется как UTC
+		usec := t.usec()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("time cast to timestampz: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+	default:
+		return nil, fmt.Errorf("time: unsupported cast to OID %d", targetType)
+	}
+}

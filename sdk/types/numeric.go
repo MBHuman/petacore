@@ -3,7 +3,9 @@ package ptypes
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"math/big"
 	"petacore/sdk/pmem"
 )
@@ -290,4 +292,102 @@ func (t TypeNumeric) String() string {
 		return "numeric(invalid)"
 	}
 	return "numeric(" + f.Text('f', int(t.Meta.Scale)) + ")"
+}
+
+var _ CastableType[[]byte] = (*TypeNumeric)(nil)
+
+// CastableType
+
+func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	f, err := t.toBigFloat()
+	if err != nil {
+		return nil, fmt.Errorf("numeric cast: %w", err)
+	}
+
+	switch targetType {
+	case PTypeInt2:
+		i64, _ := f.Int64()
+		if i64 < math.MinInt16 || i64 > math.MaxInt16 {
+			return nil, fmt.Errorf("numeric cast to int2: value out of range")
+		}
+		buf, err := allocator.AllocAligned(2, 2)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to int2: %w", err)
+		}
+		binary.BigEndian.PutUint16(buf, uint16(int16(i64))^0x8000)
+		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+
+	case PTypeInt4:
+		i64, _ := f.Int64()
+		if i64 < math.MinInt32 || i64 > math.MaxInt32 {
+			return nil, fmt.Errorf("numeric cast to int4: value out of range")
+		}
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to int4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, uint32(int32(i64))^0x80000000)
+		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+
+	case PTypeInt8:
+		i64, acc := f.Int64()
+		if acc != big.Exact && (i64 == math.MinInt64 || i64 == math.MaxInt64) {
+			return nil, fmt.Errorf("numeric cast to int8: value out of range")
+		}
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to int8: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(i64)^0x8000000000000000)
+		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+
+	case PTypeFloat4:
+		f32, _ := f.Float32()
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to float4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, OrderableFloat32bits(f32))
+		return anyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
+
+	case PTypeFloat8:
+		f64, _ := f.Float64()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to float8: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, OrderableFloat64bits(f64))
+		return anyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
+
+	case PTypeNumeric:
+		// каст в numeric с другой Meta — просто пересериализуем
+		targetMeta := t.Meta // без смены Meta не знаем target precision/scale,
+		// поэтому возвращаем копию с той же Meta
+		result, err := numericFromBigFloat(allocator, targetMeta, f)
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to numeric: %w", err)
+		}
+		return anyWrapper[[]byte]{result}, nil
+
+	case PTypeText:
+		s := f.Text('f', int(t.Meta.Scale))
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		s := f.Text('f', int(t.Meta.Scale))
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("numeric cast to varchar: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("numeric: unsupported cast to OID %d", targetType)
+	}
 }

@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/big"
 	"petacore/sdk/pmem"
+	"strconv"
 )
 
 type TypeFloat8 struct {
@@ -101,4 +103,89 @@ func (t TypeFloat8) Abs(allocator pmem.Allocator) NumericType[float64] {
 
 func (t TypeFloat8) String() string {
 	return "float8(" + fmt.Sprintf("%v", t.IntoGo()) + ")"
+}
+
+var _ CastableType[float64] = (*TypeFloat8)(nil)
+
+// CastableType
+
+func (t TypeFloat8) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	v := t.IntoGo()
+
+	switch targetType {
+	case PTypeFloat4:
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to float4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, OrderableFloat32bits(float32(v)))
+		return anyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
+
+	case PTypeInt2:
+		if v < math.MinInt16 || v > math.MaxInt16 {
+			return nil, fmt.Errorf("float8 cast to int2: value %v out of range", v)
+		}
+		buf, err := allocator.AllocAligned(2, 2)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to int2: %w", err)
+		}
+		binary.BigEndian.PutUint16(buf, uint16(int16(v))^0x8000)
+		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+
+	case PTypeInt4:
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return nil, fmt.Errorf("float8 cast to int4: value %v out of range", v)
+		}
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to int4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, uint32(int32(v))^0x80000000)
+		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+
+	case PTypeInt8:
+		if v < math.MinInt64 || v > math.MaxInt64 {
+			return nil, fmt.Errorf("float8 cast to int8: value %v out of range", v)
+		}
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to int8: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(int64(v))^0x8000000000000000)
+		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+
+	case PTypeNumeric:
+		meta := NumericMeta{Precision: 38, Scale: 10}
+		s := strconv.FormatFloat(v, 'f', 10, 64)
+		f, _, err := new(big.Float).SetPrec(256).Parse(s, 10)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to numeric: %w", err)
+		}
+		result, err := numericFromBigFloat(allocator, meta, f)
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to numeric: %w", err)
+		}
+		return anyWrapper[[]byte]{result}, nil
+
+	case PTypeText:
+		s := strconv.FormatFloat(v, 'f', -1, 64)
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		s := strconv.FormatFloat(v, 'f', -1, 64)
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("float8 cast to varchar: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("float8: unsupported cast to OID %d", targetType)
+	}
 }

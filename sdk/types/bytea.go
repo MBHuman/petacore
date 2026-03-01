@@ -114,3 +114,30 @@ func (t TypeBytea) Overlay(allocator pmem.Allocator, replacement []byte, start, 
 func (t TypeBytea) String() string {
 	return "bytea(" + fmt.Sprintf("%v", t.BufferPtr) + ")"
 }
+
+var _ CastableType[[]byte] = (*TypeBytea)(nil)
+
+// CastableType
+
+func (t TypeBytea) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	switch targetType {
+	case PTypeText:
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("bytea cast to text: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("bytea cast to varchar: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("bytea: unsupported cast to OID %d", targetType)
+	}
+}

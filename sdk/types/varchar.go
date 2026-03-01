@@ -179,13 +179,36 @@ func (t TypeVarchar) ToText() TypeText {
 // CastableType
 // ============================================================
 
+var _ CastableType[string] = (*TypeVarchar)(nil)
+
 func (t TypeVarchar) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
-	// делегируем в TypeText — логика кастов одинакова
-	result, err := TypeText{BufferPtr: t.BufferPtr}.CastTo(allocator, targetType)
-	if err != nil {
-		return nil, fmt.Errorf("varchar cast: %w", err)
+	switch targetType {
+	case PTypeText:
+		// varchar → text: zero copy, просто меняем тип
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("varchar cast to text: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		// varchar → varchar: копируем с той же Meta
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("varchar cast to varchar: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf, Meta: t.Meta}}, nil
+
+	default:
+		// всё остальное делегируем в TypeText
+		result, err := TypeText{BufferPtr: t.BufferPtr}.CastTo(allocator, targetType)
+		if err != nil {
+			return nil, fmt.Errorf("varchar cast: %w", err)
+		}
+		return result, nil
 	}
-	return result, nil
 }
 
 func (t TypeVarchar) String() string {

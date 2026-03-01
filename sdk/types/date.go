@@ -159,3 +159,67 @@ func (t TypeDate) String() string {
 	}
 	return "date(" + tm.Format("2006-01-02") + ")"
 }
+
+var _ CastableType[*time.Time] = (*TypeDate)(nil)
+
+// CastableType
+
+func (t TypeDate) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	switch targetType {
+	case PTypeTimestamp:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("date cast to timestamp: nil buffer")
+		}
+		// дата → полночь UTC
+		usec := tm.Sub(PgEpoch).Microseconds()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("date cast to timestamp: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+
+	case PTypeTimestampz:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("date cast to timestampz: nil buffer")
+		}
+		usec := tm.Sub(PgEpoch).Microseconds()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("date cast to timestampz: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+
+	case PTypeText:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("date cast to text: nil buffer")
+		}
+		s := tm.Format("2006-01-02")
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("date cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("date cast to varchar: nil buffer")
+		}
+		s := tm.Format("2006-01-02")
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("date cast to varchar: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("date: unsupported cast to OID %d", targetType)
+	}
+}

@@ -2,9 +2,13 @@ package ptypes
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"math/big"
 	"petacore/sdk/pmem"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -175,56 +179,6 @@ func (t TypeText) Position(sub string) int {
 	return utf8.RuneCountInString(s[:idx])
 }
 
-// ============================================================
-// CastableType
-// ============================================================
-
-func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
-	s := string(t.BufferPtr)
-
-	switch targetType {
-	case PTypeBool:
-		var v bool
-		switch strings.ToLower(strings.TrimSpace(s)) {
-		case "true", "t", "yes", "y", "1", "on":
-			v = true
-		case "false", "f", "no", "n", "0", "off":
-			v = false
-		default:
-			return nil, fmt.Errorf("text cast to bool: invalid value %q", s)
-		}
-		buf, err := allocator.Alloc(1)
-		if err != nil {
-			return nil, fmt.Errorf("text cast to bool: %w", err)
-		}
-		if v {
-			buf[0] = 1
-		} else {
-			buf[0] = 0
-		}
-		return anyWrapper[bool]{TypeBool{BufferPtr: buf}}, nil
-
-	case PTypeBytea:
-		buf, err := allocator.Alloc(len(t.BufferPtr))
-		if err != nil {
-			return nil, fmt.Errorf("text cast to bytea: %w", err)
-		}
-		copy(buf, t.BufferPtr)
-		return anyWrapper[[]byte]{TypeBytea{BufferPtr: buf}}, nil
-
-	case PTypeVarchar:
-		buf, err := allocator.Alloc(len(t.BufferPtr))
-		if err != nil {
-			return nil, fmt.Errorf("text cast to varchar: %w", err)
-		}
-		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
-
-	default:
-		return nil, fmt.Errorf("text: unsupported cast to OID %d", targetType)
-	}
-}
-
 func (t TypeText) String() string {
 	return "text(" + string(t.BufferPtr) + ")"
 }
@@ -276,4 +230,181 @@ func likeMatchRunes(s, p []rune) bool {
 		}
 	}
 	return len(s) == 0
+}
+
+var _ CastableType[string] = (*TypeText)(nil)
+
+func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	s := strings.TrimSpace(string(t.BufferPtr))
+
+	switch targetType {
+	case PTypeBool:
+		var v bool
+		switch strings.ToLower(s) {
+		case "true", "t", "yes", "y", "1", "on":
+			v = true
+		case "false", "f", "no", "n", "0", "off":
+			v = false
+		default:
+			return nil, fmt.Errorf("text cast to bool: invalid value %q", s)
+		}
+		buf, err := allocator.Alloc(1)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to bool: %w", err)
+		}
+		if v {
+			buf[0] = 1
+		} else {
+			buf[0] = 0
+		}
+		return anyWrapper[bool]{TypeBool{BufferPtr: buf}}, nil
+
+	case PTypeBytea:
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("text cast to bytea: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[[]byte]{TypeBytea{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("text cast to varchar: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	case PTypeInt2:
+		v, err := strconv.ParseInt(s, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int2: invalid value %q", s)
+		}
+		buf, err := allocator.AllocAligned(2, 2)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int2: %w", err)
+		}
+		binary.BigEndian.PutUint16(buf, uint16(int16(v))^0x8000)
+		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+
+	case PTypeInt4:
+		v, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int4: invalid value %q", s)
+		}
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, uint32(int32(v))^0x80000000)
+		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+
+	case PTypeInt8:
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int8: invalid value %q", s)
+		}
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to int8: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(v)^0x8000000000000000)
+		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+
+	case PTypeFloat4:
+		v, err := strconv.ParseFloat(s, 32)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to float4: invalid value %q", s)
+		}
+		buf, err := allocator.AllocAligned(4, 4)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to float4: %w", err)
+		}
+		binary.BigEndian.PutUint32(buf, OrderableFloat32bits(float32(v)))
+		return anyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
+
+	case PTypeFloat8:
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to float8: invalid value %q", s)
+		}
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to float8: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, OrderableFloat64bits(v))
+		return anyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
+
+	case PTypeNumeric:
+		meta := NumericMeta{Precision: 38, Scale: 10}
+		f, _, err := new(big.Float).SetPrec(256).Parse(s, 10)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to numeric: invalid value %q", s)
+		}
+		result, err := numericFromBigFloat(allocator, meta, f)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to numeric: %w", err)
+		}
+		return anyWrapper[[]byte]{result}, nil
+
+	case PTypeDate:
+		tm, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to date: invalid value %q, expected YYYY-MM-DD", s)
+		}
+		result, err := NewTypeDate(allocator, tm)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to date: %w", err)
+		}
+		return anyWrapper[*time.Time]{result}, nil
+
+	case PTypeTimestamp:
+		tm, err := parseTimestampString(s)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to timestamp: %w", err)
+		}
+		usec := tm.Sub(PgEpoch).Microseconds()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to timestamp: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+
+	case PTypeTimestampz:
+		tm, err := parseTimestampString(s)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to timestampz: %w", err)
+		}
+		usec := tm.UTC().Sub(PgEpoch).Microseconds()
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("text cast to timestampz: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("text: unsupported cast to OID %d", targetType)
+	}
+}
+
+// parseTimestampString парсит строку в несколько форматов ISO 8601
+var timestampFormats = []string{
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04:05.999999",
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04:05.999999",
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02T15:04:05Z07:00",
+	"2006-01-02T15:04:05.999999Z07:00",
+}
+
+func parseTimestampString(s string) (time.Time, error) {
+	for _, layout := range timestampFormats {
+		if tm, err := time.Parse(layout, s); err == nil {
+			return tm, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp %q, expected ISO 8601", s)
 }

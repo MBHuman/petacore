@@ -197,3 +197,85 @@ func (t TypeTimestamp) String() string {
 	}
 	return "timestamp(" + fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d", t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.usec()%1_000_000) + ")"
 }
+
+var _ CastableType[*time.Time] = (*TypeTimestamp)(nil)
+
+// CastableType
+
+func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	switch targetType {
+	case PTypeDate:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("timestamp cast to date: nil buffer")
+		}
+		result, err := NewTypeDate(allocator, *tm)
+		if err != nil {
+			return nil, fmt.Errorf("timestamp cast to date: %w", err)
+		}
+		return anyWrapper[*time.Time]{result}, nil
+
+	case PTypeTime:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("timestamp cast to time: nil buffer")
+		}
+		// извлекаем только время суток в микросекундах
+		usec := int64(tm.Hour())*3_600_000_000 +
+			int64(tm.Minute())*60_000_000 +
+			int64(tm.Second())*1_000_000 +
+			int64(tm.Nanosecond()/1000)
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("timestamp cast to time: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
+		return anyWrapper[*time.Time]{TypeTime{BufferPtr: buf}}, nil
+
+	case PTypeTimestampz:
+		// timestamp → timestampz: интерпретируем как UTC, буфер идентичен
+		buf, err := allocator.AllocAligned(8, 8)
+		if err != nil {
+			return nil, fmt.Errorf("timestamp cast to timestampz: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+
+	case PTypeText:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("timestamp cast to text: nil buffer")
+		}
+		s := fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			tm.Year(), tm.Month(), tm.Day(),
+			tm.Hour(), tm.Minute(), tm.Second(),
+			tm.Nanosecond()/1000,
+		)
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("timestamp cast to text: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+
+	case PTypeVarchar:
+		tm := t.IntoGo()
+		if tm == nil {
+			return nil, fmt.Errorf("timestamp cast to varchar: nil buffer")
+		}
+		s := fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			tm.Year(), tm.Month(), tm.Day(),
+			tm.Hour(), tm.Minute(), tm.Second(),
+			tm.Nanosecond()/1000,
+		)
+		buf, err := allocator.Alloc(len(s))
+		if err != nil {
+			return nil, fmt.Errorf("timestamp cast to varchar: %w", err)
+		}
+		copy(buf, s)
+		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+
+	default:
+		return nil, fmt.Errorf("timestamp: unsupported cast to OID %d", targetType)
+	}
+}
