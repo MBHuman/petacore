@@ -16,7 +16,7 @@ const (
 	ColTypeTimestamp
 	ColTypeTimestampTz
 	ColTypeInterval
-	ColTypeUnknown
+	ColTypeDate
 	// Array types
 	ColTypeStringArray
 	ColTypeIntArray
@@ -43,6 +43,8 @@ func (c ColType) String() string {
 		return "timestamp with time zone"
 	case ColTypeInterval:
 		return "interval"
+	case ColTypeDate:
+		return "date"
 	case ColTypeStringArray:
 		return "text[]"
 	case ColTypeIntArray:
@@ -162,6 +164,11 @@ func (i *IntOps) CastTo(value interface{}, targetType ColType) (interface{}, err
 			return b, nil
 		}
 		return false, fmt.Errorf("cannot cast to bool")
+	case ColTypeTimestamp, ColTypeTimestampTz, ColTypeInterval, ColTypeDate:
+		if iv, ok := utils.ToInt(value); ok {
+			return iv, nil
+		}
+		return 0, fmt.Errorf("cannot cast to timestamp/interval/date")
 	default:
 		panic("unexpected target ColType")
 	}
@@ -169,7 +176,7 @@ func (i *IntOps) CastTo(value interface{}, targetType ColType) (interface{}, err
 
 func (i *IntOps) Compare(a, b interface{}, rightTyp ColType) (int, error) {
 	switch rightTyp {
-	case ColTypeInt, ColTypeBigInt, ColTypeTimestamp, ColTypeTimestampTz, ColTypeInterval:
+	case ColTypeInt, ColTypeBigInt, ColTypeTimestamp, ColTypeTimestampTz, ColTypeInterval, ColTypeDate:
 		// All these types are stored as int64, so we can compare them directly
 		ai64, aok := utils.ToInt64(a)
 		bi64, bok := utils.ToInt64(b)

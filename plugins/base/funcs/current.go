@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"time"
 )
 
@@ -16,8 +17,8 @@ func (f *CurrentDatabaseFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1000,
 		ProName:     "CURRENT_DATABASE",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -39,8 +40,8 @@ func (f *CurrentSchemaFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1001,
 		ProName:     "CURRENT_SCHEMA",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -62,8 +63,8 @@ func (f *CurrentSchemasFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1003,
 		ProName:     "CURRENT_SCHEMAS",
-		ProArgTypes: []psdk.OID{psdk.PTypeBool},
-		ProRetType:  psdk.PTypeNameArray,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeBool},
+		ProRetType:  ptypes.PTypeNameArray,
 	}
 }
 
@@ -96,8 +97,8 @@ func (f *CurrentUserFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1002,
 		ProName:     "CURRENT_USER",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -120,8 +121,8 @@ func (f *CurrentCatalogFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1010,
 		ProName:     "CURRENT_CATALOG",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeName,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeName,
 	}
 }
 
@@ -142,8 +143,8 @@ func (f *NowFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1015,
 		ProName:     "NOW",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeTimestampz,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeTimestampz,
 	}
 }
 
@@ -168,8 +169,8 @@ func (f *CurrentRoleFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1011,
 		ProName:     "CURRENT_ROLE",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeName,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeName,
 	}
 }
 
@@ -190,8 +191,8 @@ func (f *SessionUserFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1012,
 		ProName:     "SESSION_USER",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeName,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeName,
 	}
 }
 
@@ -212,8 +213,8 @@ func (f *UserFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1013,
 		ProName:     "USER",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeName,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeName,
 	}
 }
 
@@ -234,8 +235,8 @@ func (f *VersionFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1004,
 		ProName:     "VERSION",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -272,8 +273,8 @@ func (r *RoundFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1005,
 		ProName:     "ROUND",
-		ProArgTypes: []psdk.OID{psdk.PTypeNumeric},
-		ProRetType:  psdk.PTypeInt2,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeNumeric},
+		ProRetType:  ptypes.PTypeInt2,
 	}
 }
 
@@ -303,8 +304,8 @@ func (p *PgTableIsVisibleFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1006,
 		ProName:     "PG_TABLE_IS_VISIBLE",
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeBool,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeBool,
 	}
 }
 
@@ -331,8 +332,8 @@ func (p *PgGetUserbyIDFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1007,
 		ProName:     "PG_GET_USERBYID",
-		ProArgTypes: []psdk.OID{psdk.PTypeInt2},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt2},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -357,8 +358,8 @@ func (p *PgPostmasterStartTimeFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1008,
 		ProName:     "PG_POSTMASTER_START_TIME",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeTimestampz,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeTimestampz,
 	}
 }
 
@@ -382,8 +383,8 @@ func (p *PgBackendPidFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         2026,
 		ProName:     "PG_BACKEND_PID",
-		ProArgTypes: []psdk.OID{},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{},
+		ProRetType:  ptypes.PTypeInt4,
 	}
 }
 
@@ -420,7 +421,7 @@ func (m *MaxFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1009,
 		ProName:     "MAX",
-		ProArgTypes: []psdk.OID{psdk.PTypeInt2},
-		ProRetType:  psdk.PTypeInt2,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt2},
+		ProRetType:  ptypes.PTypeInt2,
 	}
 }

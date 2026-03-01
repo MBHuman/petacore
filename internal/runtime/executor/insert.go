@@ -26,6 +26,7 @@ func ExecuteInsert(stmt *statements.InsertStatement, store *storage.DistributedS
 		// }
 
 		values := make([]interface{}, len(stmt.Columns))
+		// TODO убрать лишнее копирование
 		copy(values, rowValues)
 
 		insertValues = append(insertValues, values)

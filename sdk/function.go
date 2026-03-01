@@ -3,6 +3,7 @@ package psdk
 import (
 	"context"
 	"fmt"
+	ptypes "petacore/sdk/types"
 	"sync"
 )
 
@@ -24,26 +25,26 @@ type IAggFunction interface {
 
 // Function represents a user-defined function
 type Function struct {
-	OID         OID    // Unique identifier for the function
-	ProName     string // Function name
-	ProArgTypes []OID  // Argument types (as OIDs)
-	ProRetType  OID    // Return type (as OID)
+	OID         ptypes.OID   // Unique identifier for the function
+	ProName     string       // Function name
+	ProArgTypes []ptypes.OID // Argument types (as OIDs)
+	ProRetType  ptypes.OID   // Return type (as OID)
 	IsAggregate bool
 
 	Meta FunctionMeta // Additional metadata about the function
 }
 
 type FunctionAgg struct {
-	AggValOID OID // type for aggVal
+	AggValOID ptypes.OID // type for aggVal
 }
 
 type FunctionMeta struct {
-	ProNamespace    OID   // Namespace OID
-	ProOwner        int32 // Owner's user ID
-	ProLang         OID   // Language OID (e.g., SQL, PL/pgSQL, etc.)
-	ProCost         int32 // Estimated execution cost
-	ProRows         int32 // Estimated number of rows returned by the function
-	ProVariadic     int32 // Is this a variadic function?
+	ProNamespace    ptypes.OID // Namespace OID
+	ProOwner        int32      // Owner's user ID
+	ProLang         ptypes.OID // Language OID (e.g., SQL, PL/pgSQL, etc.)
+	ProCost         int32      // Estimated execution cost
+	ProRows         int32      // Estimated number of rows returned by the function
+	ProVariadic     int32      // Is this a variadic function?
 	ProSupport      int32
 	ProKind         byte  // 'f' for normal function, 'p' for procedure, 'a' for aggregate, 'w' for window function
 	ProSecDef       bool  // Security definer?
@@ -54,11 +55,11 @@ type FunctionMeta struct {
 	ProNArgs        int16 // Number of arguments
 	ProNArgDefaults int16 // Number of default arguments (from the right)
 
-	ProAllArgTypes []OID    // All argument types (including variadic)
-	ProArgModes    []byte   // Argument modes ('i' for IN, 'o' for OUT, 'b' for INOUT, 'v' for VARIADIC, 't' for TABLE)
-	ProArgNames    []string // Argument names
-	ProArgDefaults []string // Default argument values (as strings)
-	ProTrfTypes    []OID    // Transform types
+	ProAllArgTypes []ptypes.OID // All argument types (including variadic)
+	ProArgModes    []byte       // Argument modes ('i' for IN, 'o' for OUT, 'b' for INOUT, 'v' for VARIADIC, 't' for TABLE)
+	ProArgNames    []string     // Argument names
+	ProArgDefaults []string     // Default argument values (as strings)
+	ProTrfTypes    []ptypes.OID // Transform types
 
 	ProSrc     string // Source code of the function (Depends on language) For SQL functions, this is the SQL definition; for PL/pgSQL, this is the function body.
 	ProBin     []byte // Binary representation (if applicable)
@@ -70,14 +71,14 @@ type FunctionMeta struct {
 // FunctionRegistry manages registered user-defined functions
 type FunctionRegistry struct {
 	mu              sync.RWMutex
-	functions       map[OID]IFunction      // Функции по OID
-	functionsByName map[string][]IFunction // Функции по имени (для перегрузки)
+	functions       map[ptypes.OID]IFunction // Функции по OID
+	functionsByName map[string][]IFunction   // Функции по имени (для перегрузки)
 }
 
 // NewFunctionRegistry creates a new function registry
 func NewFunctionRegistry() *FunctionRegistry {
 	return &FunctionRegistry{
-		functions:       make(map[OID]IFunction),
+		functions:       make(map[ptypes.OID]IFunction),
 		functionsByName: make(map[string][]IFunction),
 	}
 }
@@ -104,7 +105,7 @@ func (r *FunctionRegistry) Register(fn IFunction) error {
 }
 
 // Get retrieves a function by OID
-func (r *FunctionRegistry) Get(oid OID) (IFunction, bool) {
+func (r *FunctionRegistry) Get(oid ptypes.OID) (IFunction, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	fn, exists := r.functions[oid]
@@ -127,7 +128,7 @@ func (r *FunctionRegistry) GetByName(name string) (IFunction, bool) {
 }
 
 // GetByNameAndArgTypes retrieves a function by name and argument types (поддержка перегрузки)
-func (r *FunctionRegistry) GetByNameAndArgTypes(name string, argTypes []OID) (IFunction, bool) {
+func (r *FunctionRegistry) GetByNameAndArgTypes(name string, argTypes []ptypes.OID) (IFunction, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -174,7 +175,7 @@ func (r *FunctionRegistry) GetAllByName(name string) []IFunction {
 }
 
 // Unregister removes a function from the registry
-func (r *FunctionRegistry) Unregister(oid OID) {
+func (r *FunctionRegistry) Unregister(oid ptypes.OID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

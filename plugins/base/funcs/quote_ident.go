@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"strings"
 )
 
@@ -26,8 +27,8 @@ func (f *QuoteIdentFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1014,
 		ProName:     "QUOTE_IDENT",
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 

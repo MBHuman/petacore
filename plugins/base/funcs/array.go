@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"strings"
 )
 
@@ -17,8 +18,8 @@ func (f *ArrayToStringFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         395,
 		ProName:     "ARRAY_TO_STRING",
-		ProArgTypes: []psdk.OID{psdk.PTypeTextArray, psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeTextArray, ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -97,8 +98,8 @@ func (f *ArrayToStringIntFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         376,
 		ProName:     "ARRAY_TO_STRING",
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4Array, psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4Array, ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 
@@ -146,8 +147,8 @@ func (f *ArrayLengthFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         2176,
 		ProName:     "ARRAY_LENGTH",
-		ProArgTypes: []psdk.OID{psdk.PTypeTextArray, psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeTextArray, ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 	}
 }
 
@@ -203,8 +204,8 @@ func (f *ArrayLengthIntFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         2177,
 		ProName:     "ARRAY_LENGTH",
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4Array, psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4Array, ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 	}
 }
 

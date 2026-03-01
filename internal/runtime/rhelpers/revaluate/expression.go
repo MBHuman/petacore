@@ -26,7 +26,7 @@ func EvaluateExpressionContext(goCtx context.Context, ctx parser.IExpressionCont
 		return &rmodels.ResultRowsExpression{
 			Row: &table.ExecuteResult{
 				Rows:    [][]interface{}{{val}},
-				Columns: []table.TableColumn{{Idx: 0, Name: "?param?", Type: table.ColTypeUnknown}},
+				Columns: []table.TableColumn{{Idx: 0, Name: "?param?", Type: table.ColTypeString}},
 			},
 		}, nil
 	}

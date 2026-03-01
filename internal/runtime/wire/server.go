@@ -23,7 +23,7 @@ import (
 	"petacore/internal/runtime/rsql/visitor"
 	"petacore/internal/runtime/system"
 	"petacore/internal/storage"
-	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 )
 
 // Session stores prepared statements, portals and session params
@@ -710,7 +710,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 				// Determine OID: prefer actual executed result column type when available
 				var oid uint32 = uint32(fd.DataTypeOID)
 				if i < len(result.Columns) {
-					oid = uint32(psdk.FromColType(result.Columns[i].Type))
+					oid = uint32(ptypes.FromColType(result.Columns[i].Type))
 				}
 				// Force text format for data rows for now
 				format := int16(0)
@@ -749,7 +749,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 		if sendRowDesc {
 			rowDesc := &pgproto3.RowDescription{}
 			for _, column := range result.Columns {
-				oid := psdk.FromColType(column.Type)
+				oid := ptypes.FromColType(column.Type)
 
 				// Always advertise text format to clients for now
 				format := int16(0)
@@ -776,7 +776,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 		rowDesc := &pgproto3.RowDescription{}
 		logger.Debug("sendSelectResultWithFormats: columns", zap.Any("result.Columns", result.Columns))
 		for _, column := range result.Columns {
-			oid := psdk.FromColType(column.Type)
+			oid := ptypes.FromColType(column.Type)
 
 			// Always advertise text format (0) for each column for now.
 			format := int16(0)

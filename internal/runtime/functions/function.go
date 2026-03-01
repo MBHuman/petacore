@@ -6,6 +6,7 @@ import (
 	"petacore/internal/logger"
 	"petacore/internal/runtime/rsql/table"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"strings"
 )
 
@@ -127,10 +128,10 @@ func ExecuteAggregateFunction(name string, args []interface{}) (*table.ExecuteRe
 		upper := strings.ToUpper(name)
 		// If there is an overload matching argument types, prefer it
 		// Build argTypes: for aggregates, args are slices of values (one slice per argument)
-		argOIDs := make([]psdk.OID, 0, len(args))
+		argOIDs := make([]ptypes.OID, 0, len(args))
 		for _, a := range args {
 			// each a is expected to be []interface{}
-			var detected psdk.OID = psdk.PTypeText
+			var detected ptypes.OID = ptypes.PTypeText
 			if slice, ok := a.([]interface{}); ok {
 				// find first non-nil value to detect type
 				for _, v := range slice {
@@ -139,15 +140,15 @@ func ExecuteAggregateFunction(name string, args []interface{}) (*table.ExecuteRe
 					}
 					switch v.(type) {
 					case int, int32, int64:
-						detected = psdk.PTypeInt4
+						detected = ptypes.PTypeInt4
 					case float32, float64:
-						detected = psdk.PTypeFloat8
+						detected = ptypes.PTypeFloat8
 					case bool:
-						detected = psdk.PTypeBool
+						detected = ptypes.PTypeBool
 					case string:
-						detected = psdk.PTypeText
+						detected = ptypes.PTypeText
 					default:
-						detected = psdk.PTypeText
+						detected = ptypes.PTypeText
 					}
 					break
 				}
@@ -156,15 +157,15 @@ func ExecuteAggregateFunction(name string, args []interface{}) (*table.ExecuteRe
 				if a != nil {
 					switch a.(type) {
 					case int, int32, int64:
-						detected = psdk.PTypeInt4
+						detected = ptypes.PTypeInt4
 					case float32, float64:
-						detected = psdk.PTypeFloat8
+						detected = ptypes.PTypeFloat8
 					case bool:
-						detected = psdk.PTypeBool
+						detected = ptypes.PTypeBool
 					case string:
-						detected = psdk.PTypeText
+						detected = ptypes.PTypeText
 					default:
-						detected = psdk.PTypeText
+						detected = ptypes.PTypeText
 					}
 				}
 			}

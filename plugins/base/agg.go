@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 )
 
 // CountFunction - агрегатная функция COUNT
@@ -17,8 +18,8 @@ func (f *CountFunction) GetFunction() *psdk.Function {
 		OID:         2147,
 		ProName:     "COUNT",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -55,8 +56,8 @@ func (f *SumFunction) GetFunction() *psdk.Function {
 		OID:         2108,
 		ProName:     "SUM",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -104,8 +105,8 @@ func (f *AvgFunction) GetFunction() *psdk.Function {
 		OID:         2101,
 		ProName:     "AVG",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -160,8 +161,8 @@ func (f *MaxFunction) GetFunction() *psdk.Function {
 		OID:         2116,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -238,8 +239,8 @@ func (f *MinFunction) GetFunction() *psdk.Function {
 		OID:         2131,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -316,8 +317,8 @@ func (f *MaxFunctionInt) GetFunction() *psdk.Function {
 		OID:         2117,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -379,8 +380,8 @@ func (f *MinFunctionInt) GetFunction() *psdk.Function {
 		OID:         2132,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -442,8 +443,8 @@ func (f *MaxFunctionText) GetFunction() *psdk.Function {
 		OID:         2129,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -496,8 +497,8 @@ func (f *MinFunctionText) GetFunction() *psdk.Function {
 		OID:         2145,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},

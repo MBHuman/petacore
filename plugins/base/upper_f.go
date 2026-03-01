@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"strings"
 )
 
@@ -15,10 +16,10 @@ func (f *UpperFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:     0, // OID will be assigned by the registry
 		ProName: "UPPER",
-		ProArgTypes: []psdk.OID{
-			psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{
+			ptypes.PTypeText,
 		},
-		ProRetType: psdk.PTypeText,
+		ProRetType: ptypes.PTypeText,
 	}
 }
 

@@ -1,9 +1,82 @@
-package psdk
+package ptypes
 
 import (
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
 	"reflect"
 )
+
+type BaseType[T any] interface {
+	GetType() OID
+	Compare(other BaseType[T]) int
+	GetBuffer() []byte
+	IntoGo() T
+}
+
+// NumericType — Add/Sub/Mul/Div/Mod создают новое значение — нужен аллокатор
+// Neg/Abs тоже создают новое значение
+// IsZero — только читает, аллокатор не нужен
+type NumericType[T any] interface {
+	BaseType[T]
+
+	Add(allocator pmem.Allocator, other NumericType[T]) (NumericType[T], error)
+	Sub(allocator pmem.Allocator, other NumericType[T]) (NumericType[T], error)
+	Mul(allocator pmem.Allocator, other NumericType[T]) (NumericType[T], error)
+	Div(allocator pmem.Allocator, other NumericType[T]) (NumericType[T], error)
+	Mod(allocator pmem.Allocator, other NumericType[T]) (NumericType[T], error)
+
+	IsZero() bool
+	Neg(allocator pmem.Allocator) NumericType[T]
+	Abs(allocator pmem.Allocator) NumericType[T]
+}
+
+// OrderedType — только сравнения, ничего не создаёт — аллокатор не нужен
+type OrderedType[T any] interface {
+	BaseType[T]
+
+	LessThan(other BaseType[T]) bool
+	GreaterThan(other BaseType[T]) bool
+	LessOrEqual(other BaseType[T]) bool
+	GreaterOrEqual(other BaseType[T]) bool
+	Between(low, high BaseType[T]) bool
+}
+
+// BitwiseType — все операции создают новое значение — нужен аллокатор
+type BitwiseType[T any] interface {
+	BaseType[T]
+
+	And(allocator pmem.Allocator, other BitwiseType[T]) BitwiseType[T]
+	Or(allocator pmem.Allocator, other BitwiseType[T]) BitwiseType[T]
+	Xor(allocator pmem.Allocator, other BitwiseType[T]) BitwiseType[T]
+	Not(allocator pmem.Allocator) BitwiseType[T]
+	ShiftLeft(allocator pmem.Allocator, n uint) BitwiseType[T]
+	ShiftRight(allocator pmem.Allocator, n uint) BitwiseType[T]
+}
+
+// TextType — все операции создающие новую строку требуют аллокатор
+// Like/ILike/StartsWith/Contains/Length — только читают, аллокатор не нужен
+type TextType[T any] interface {
+	BaseType[T]
+
+	Concat(allocator pmem.Allocator, other TextType[T]) (TextType[T], error)
+	Length() int
+	Like(pattern string) bool
+	ILike(pattern string) bool
+	StartsWith(prefix string) bool
+	Contains(substr string) bool
+	ToUpper(allocator pmem.Allocator) (TextType[T], error)
+	ToLower(allocator pmem.Allocator) (TextType[T], error)
+	Trim(allocator pmem.Allocator) (TextType[T], error)
+	Substring(allocator pmem.Allocator, start, length int) (TextType[T], error)
+}
+
+// NullableType — только читает, аллокатор не нужен
+type NullableType[T any] interface {
+	BaseType[T]
+
+	IsNull() bool
+	IsNotNull() bool
+}
 
 const (
 	// OIDs for basic types
@@ -22,6 +95,8 @@ const (
 	PTypeTimestamp  OID = 1114
 	PTypeTimestampz OID = 1184 // timestamp with time zone
 	PTypeInterval   OID = 1186 // interval
+	PTypeDate       OID = 1082
+	PTypeTime       OID = 1083
 
 	// OIDs for array types
 	PTypeBoolArray    OID = 1000
@@ -63,6 +138,8 @@ func FromColType(colType table.ColType) OID {
 		return PTypeFloat8Array
 	case table.ColTypeBoolArray:
 		return PTypeBoolArray
+	case table.ColTypeDate:
+		return PTypeDate
 	default:
 		return PTypeText
 	}
@@ -94,6 +171,8 @@ func TypeToGoType(oid OID) reflect.Type {
 		return reflect.TypeFor[int64]() // timestamp as int64 (microseconds since epoch)
 	case PTypeInterval:
 		return reflect.TypeFor[int64]() // interval as int64 (microseconds)
+	case PTypeDate:
+		return reflect.TypeFor[int32]() // date as int32 (days since epoch)
 	// Array types
 	case PTypeBoolArray:
 		return reflect.TypeFor[[]bool]()
@@ -132,6 +211,10 @@ func (oid OID) ToColType() table.ColType {
 		return table.ColTypeTimestamp
 	case PTypeTimestampz:
 		return table.ColTypeTimestampTz
+	case PTypeInterval:
+		return table.ColTypeInterval
+	case PTypeDate:
+		return table.ColTypeDate
 	case PTypeBoolArray:
 		return table.ColTypeBoolArray
 	case PTypeInt2Array, PTypeInt4Array, PTypeInt8Array:
