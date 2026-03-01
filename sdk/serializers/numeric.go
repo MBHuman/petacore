@@ -21,7 +21,7 @@ func NewNumericSerializer(precision, scale int32) (*NumericSerializer, error) {
 	return &NumericSerializer{Meta: meta}, nil
 }
 
-var NumericSerializerInstance BaseSerializer[string, ptypes.TypeNumeric] = &NumericSerializer{
+var NumericSerializerInstance = &NumericSerializer{
 	Meta: ptypes.NumericMeta{Precision: 38, Scale: 10},
 }
 
@@ -32,7 +32,6 @@ func (s *NumericSerializer) Serialize(allocator pmem.Allocator, value string) ([
 		return nil, fmt.Errorf("numeric serialize: empty string")
 	}
 
-	// парсим через big.Float для точности
 	f, _, err := new(big.Float).SetPrec(256).Parse(value, 10)
 	if err != nil {
 		return nil, fmt.Errorf("numeric serialize: invalid value %q: %w", value, err)
@@ -47,28 +46,24 @@ func (s *NumericSerializer) Serialize(allocator pmem.Allocator, value string) ([
 	scale := new(big.Float).SetPrec(256).SetInt(pow10Big(s.Meta.Scale))
 	f.Mul(f, scale)
 
-	// конвертируем в big.Int (усекаем дробную часть)
 	intVal, _ := f.Int(nil)
 
-	// проверяем precision
-	digits := len(intVal.String())
-	if neg && intVal.Sign() != 0 {
-		digits = len(intVal.String())
-	}
-	if int32(digits) > s.Meta.Precision {
-		return nil, fmt.Errorf("numeric serialize: value exceeds precision %d", s.Meta.Precision)
+	// проверяем precision по количеству значащих цифр
+	if intVal.Sign() != 0 {
+		digits := len(intVal.String())
+		if int32(digits) > s.Meta.Precision {
+			return nil, fmt.Errorf("numeric serialize: value exceeds precision %d", s.Meta.Precision)
+		}
 	}
 
-	mag := intVal.Bytes() // big-endian magnitude
+	mag := intVal.Bytes()
 
-	// для отрицательных инвертируем байты — order-preserving
 	if neg {
 		for i := range mag {
 			mag[i] ^= 0xFF
 		}
 	}
 
-	// sign byte
 	var signByte byte
 	switch {
 	case neg:
@@ -84,17 +79,20 @@ func (s *NumericSerializer) Serialize(allocator pmem.Allocator, value string) ([
 	if err != nil {
 		return nil, fmt.Errorf("numeric serialize: %w", err)
 	}
-
 	buf[0] = signByte
 	copy(buf[1:], mag)
 	return buf, nil
 }
 
+// Deserialize — ОБЯЗАТЕЛЬНО передаём Meta чтобы ToNumericValue знал Scale
 func (s *NumericSerializer) Deserialize(data []byte) (ptypes.TypeNumeric, error) {
 	if len(data) < 1 {
 		return ptypes.TypeNumeric{}, fmt.Errorf("numeric deserialize: empty data")
 	}
-	return ptypes.TypeNumeric{BufferPtr: data}, nil
+	return ptypes.TypeNumeric{
+		BufferPtr: data,
+		Meta:      s.Meta, // ← вот ключевое исправление
+	}, nil
 }
 
 func (s *NumericSerializer) Validate(value ptypes.TypeNumeric) error {

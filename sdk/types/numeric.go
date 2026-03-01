@@ -23,6 +23,9 @@ func (m NumericMeta) Validate() error {
 	return nil
 }
 
+// NumericValue — распакованное значение
+// Value хранит целое число = реальное_значение * 10^Scale
+// Например: 123.456 при Scale=6 → Value = 123456000, Neg = false
 type NumericValue struct {
 	Value *big.Int
 	Scale int32
@@ -30,9 +33,11 @@ type NumericValue struct {
 }
 
 func (n NumericValue) ToBigFloat() *big.Float {
-	f := new(big.Float).SetInt(n.Value)
-	divisor := new(big.Float).SetInt(pow10(n.Scale))
-	f.Quo(f, divisor)
+	f := new(big.Float).SetPrec(256).SetInt(n.Value)
+	if n.Scale > 0 {
+		divisor := new(big.Float).SetPrec(256).SetInt(pow10(n.Scale))
+		f.Quo(f, divisor)
+	}
 	if n.Neg {
 		f.Neg(f)
 	}
@@ -58,14 +63,13 @@ var _ NumericType[[]byte] = (*TypeNumeric)(nil)
 var _ OrderedType[[]byte] = (*TypeNumeric)(nil)
 var _ NullableType[[]byte] = (*TypeNumeric)(nil)
 
-func (t TypeNumeric) GetType() OID { return PTypeNumeric }
+func (t TypeNumeric) GetType() OID      { return PTypeNumeric }
+func (t TypeNumeric) GetBuffer() []byte { return t.BufferPtr }
+func (t TypeNumeric) IntoGo() []byte    { return t.BufferPtr }
 
 func (t TypeNumeric) Compare(other BaseType[[]byte]) int {
 	return bytes.Compare(t.BufferPtr, other.GetBuffer())
 }
-
-func (t TypeNumeric) GetBuffer() []byte { return t.BufferPtr }
-func (t TypeNumeric) IntoGo() []byte    { return t.BufferPtr }
 
 // NullableType
 
@@ -82,7 +86,17 @@ func (t TypeNumeric) Between(low, high BaseType[[]byte]) bool {
 	return t.GreaterOrEqual(low) && t.LessOrEqual(high)
 }
 
+// IsZero
+
+func (t TypeNumeric) IsZero() bool {
+	if len(t.BufferPtr) < 1 {
+		return true
+	}
+	return t.BufferPtr[0] == 0x01
+}
+
 // ToNumericValue распаковывает буфер в NumericValue
+// Value = abs(реальное_значение) * 10^Scale (целое)
 func (t TypeNumeric) ToNumericValue() (*NumericValue, error) {
 	if len(t.BufferPtr) < 1 {
 		return nil, fmt.Errorf("numeric: empty buffer")
@@ -90,54 +104,43 @@ func (t TypeNumeric) ToNumericValue() (*NumericValue, error) {
 	sign := t.BufferPtr[0]
 	mag := make([]byte, len(t.BufferPtr)-1)
 	copy(mag, t.BufferPtr[1:])
+
+	// для отрицательных magnitude хранится инвертированным
 	if sign == 0x00 {
 		for i := range mag {
 			mag[i] ^= 0xFF
 		}
 	}
+
 	return &NumericValue{
 		Value: new(big.Int).SetBytes(mag),
-		Scale: t.Meta.Scale,
+		Scale: t.Meta.Scale, // Scale берём из Meta — он не хранится в буфере
 		Neg:   sign == 0x00,
 	}, nil
 }
 
-// IsZero — только читает
-
-func (t TypeNumeric) IsZero() bool {
-	if len(t.BufferPtr) < 1 {
-		return true
-	}
-	return t.BufferPtr[0] == 0x01 // sign byte для нуля
-}
-
-// helpers
-
-func numericFromBigFloat(allocator pmem.Allocator, meta NumericMeta, f *big.Float) (TypeNumeric, error) {
-	neg := f.Sign() < 0
-	if neg {
-		f.Neg(f)
+// numericFromScaledInt создаёт TypeNumeric из целого Value = реальное * 10^Scale
+func numericFromScaledInt(allocator pmem.Allocator, meta NumericMeta, value *big.Int, neg bool) (TypeNumeric, error) {
+	// если значение нулевое — знак неважен
+	if value.Sign() == 0 {
+		buf, err := allocator.Alloc(1)
+		if err != nil {
+			return TypeNumeric{}, fmt.Errorf("numeric: alloc failed: %w", err)
+		}
+		buf[0] = 0x01 // zero sign byte
+		return TypeNumeric{BufferPtr: buf, Meta: meta}, nil
 	}
 
-	scale := new(big.Float).SetPrec(256).SetInt(pow10(meta.Scale))
-	f.Mul(f, scale)
+	mag := value.Bytes()
 
-	intVal, _ := f.Int(nil)
-	mag := intVal.Bytes()
-
+	var signByte byte
 	if neg {
+		signByte = 0x00
+		// инвертируем magnitude для order-preserving
 		for i := range mag {
 			mag[i] ^= 0xFF
 		}
-	}
-
-	var signByte byte
-	switch {
-	case neg:
-		signByte = 0x00
-	case intVal.Sign() == 0:
-		signByte = 0x01
-	default:
+	} else {
 		signByte = 0x02
 	}
 
@@ -149,6 +152,22 @@ func numericFromBigFloat(allocator pmem.Allocator, meta NumericMeta, f *big.Floa
 	copy(buf[1:], mag)
 
 	return TypeNumeric{BufferPtr: buf, Meta: meta}, nil
+}
+
+// numericFromBigFloat конвертирует big.Float → TypeNumeric
+// f должен быть уже в реальных единицах (не масштабированным)
+func numericFromBigFloat(allocator pmem.Allocator, meta NumericMeta, f *big.Float) (TypeNumeric, error) {
+	neg := f.Sign() < 0
+	if neg {
+		f.Neg(f)
+	}
+
+	// умножаем на 10^Scale чтобы получить целое Value
+	scale := new(big.Float).SetPrec(256).SetInt(pow10(meta.Scale))
+	scaled := new(big.Float).SetPrec(256).Mul(f, scale)
+
+	intVal, _ := scaled.Int(nil)
+	return numericFromScaledInt(allocator, meta, intVal, neg)
 }
 
 func (t TypeNumeric) toBigFloat() (*big.Float, error) {
@@ -166,13 +185,12 @@ func (t TypeNumeric) Add(allocator pmem.Allocator, other NumericType[[]byte]) (N
 	if err != nil {
 		return nil, err
 	}
-	b := new(big.Float).SetPrec(256)
 	bOther, err := TypeNumeric{BufferPtr: other.GetBuffer(), Meta: t.Meta}.toBigFloat()
 	if err != nil {
 		return nil, err
 	}
-	b.Add(a, bOther)
-	return numericFromBigFloat(allocator, t.Meta, b)
+	result := new(big.Float).SetPrec(256).Add(a, bOther)
+	return numericFromBigFloat(allocator, t.Meta, result)
 }
 
 func (t TypeNumeric) Sub(allocator pmem.Allocator, other NumericType[[]byte]) (NumericType[[]byte], error) {
@@ -221,6 +239,7 @@ func (t TypeNumeric) Mod(allocator pmem.Allocator, other NumericType[[]byte]) (N
 	if other.IsZero() {
 		return nil, fmt.Errorf("numeric: modulo by zero")
 	}
+	// Mod работает на целых Value (уже масштабированных)
 	a, err := t.ToNumericValue()
 	if err != nil {
 		return nil, err
@@ -229,12 +248,22 @@ func (t TypeNumeric) Mod(allocator pmem.Allocator, other NumericType[[]byte]) (N
 	if err != nil {
 		return nil, err
 	}
-	// Mod через big.Int — точная операция
-	result := new(big.Int).Mod(a.Value, b.Value)
-	f := new(big.Float).SetPrec(256).SetInt(result)
-	divisor := new(big.Float).SetPrec(256).SetInt(pow10(t.Meta.Scale))
-	f.Quo(f, divisor)
-	return numericFromBigFloat(allocator, t.Meta, f)
+
+	aVal := new(big.Int).Set(a.Value)
+	bVal := new(big.Int).Set(b.Value)
+	if a.Neg {
+		aVal.Neg(aVal)
+	}
+	if b.Neg {
+		bVal.Neg(bVal)
+	}
+
+	modVal := new(big.Int).Mod(aVal, bVal)
+	neg := modVal.Sign() < 0
+	if neg {
+		modVal.Neg(modVal)
+	}
+	return numericFromScaledInt(allocator, t.Meta, modVal, neg)
 }
 
 func (t TypeNumeric) Neg(allocator pmem.Allocator) NumericType[[]byte] {

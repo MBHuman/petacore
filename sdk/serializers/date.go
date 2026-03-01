@@ -2,7 +2,6 @@
 package serializers
 
 import (
-	"encoding/binary"
 	"fmt"
 	"petacore/sdk/pmem"
 	ptypes "petacore/sdk/types"
@@ -13,37 +12,30 @@ type DateSerializer struct{}
 
 var DateSerializerInstance BaseSerializer[*time.Time, ptypes.TypeDate] = &DateSerializer{}
 
-func (d *DateSerializer) Serialize(allocator pmem.Allocator, value *time.Time) ([]byte, error) {
-	if value == nil {
-		return nil, fmt.Errorf("date serialize: value is nil")
+func (s DateSerializer) Serialize(allocator pmem.Allocator, val *time.Time) ([]byte, error) {
+	if val == nil {
+		return nil, nil
 	}
-
-	v := time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
-	days := int32(v.Sub(ptypes.PgEpoch).Hours() / 24)
-
-	buf, err := allocator.AllocAligned(4, 4)
+	d, err := ptypes.NewTypeDate(allocator, *val)
 	if err != nil {
 		return nil, fmt.Errorf("date serialize: %w", err)
 	}
-
-	binary.BigEndian.PutUint32(buf, uint32(days))
-	return buf, nil
+	return d.GetBuffer(), nil
 }
 
-func (d *DateSerializer) Deserialize(data []byte) (ptypes.TypeDate, error) {
-	if len(data) < 4 {
-		return ptypes.TypeDate{}, fmt.Errorf("date deserialize: expected 4 bytes, got %d", len(data))
+func (s DateSerializer) Deserialize(buf []byte) (ptypes.TypeDate, error) {
+	if buf == nil {
+		return ptypes.TypeDate{}, nil
 	}
-	return ptypes.TypeDate{BufferPtr: data[:4]}, nil
+	if len(buf) < 4 {
+		return ptypes.TypeDate{}, fmt.Errorf("date deserialize: buffer too short %d", len(buf))
+	}
+	return ptypes.TypeDate{BufferPtr: buf}, nil
 }
 
-func (d *DateSerializer) Validate(value ptypes.TypeDate) error {
-	if len(value.BufferPtr) < 4 {
-		return fmt.Errorf("date validate: buffer too short, expected 4, got %d", len(value.BufferPtr))
+func (s DateSerializer) Validate(val ptypes.TypeDate) error {
+	if len(val.GetBuffer()) != 4 {
+		return fmt.Errorf("date validate: expected 4 bytes, got %d", len(val.GetBuffer()))
 	}
 	return nil
-}
-
-func (d *DateSerializer) GetType() ptypes.OID {
-	return ptypes.PTypeDate
 }

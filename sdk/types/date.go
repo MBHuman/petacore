@@ -27,13 +27,45 @@ func (t TypeDate) Compare(other BaseType[*time.Time]) int {
 
 func (t TypeDate) GetBuffer() []byte { return t.BufferPtr }
 
+// daysFromTime вычисляет количество дней от PgEpoch до tm
+func daysFromTime(tm time.Time) int32 {
+	return int32(tm.UTC().Truncate(24*time.Hour).Sub(PgEpoch).Hours() / 24)
+}
+
 func (t TypeDate) IntoGo() *time.Time {
 	if len(t.BufferPtr) < 4 {
 		return nil
 	}
-	days := int32(binary.BigEndian.Uint32(t.BufferPtr) ^ 0x80000000)
+	// читаем order-preserving значение и восстанавливаем знаковое int32
+	raw := binary.BigEndian.Uint32(t.BufferPtr)
+	days := int32(raw ^ 0x80000000)
 	result := PgEpoch.AddDate(0, 0, int(days))
 	return &result
+}
+
+// days читает количество дней из буфера
+func (t TypeDate) days() int32 {
+	if len(t.BufferPtr) < 4 {
+		return 0
+	}
+	raw := binary.BigEndian.Uint32(t.BufferPtr)
+	return int32(raw ^ 0x80000000)
+}
+
+// dateFromDays создаёт TypeDate из количества дней от PgEpoch
+func dateFromDays(allocator pmem.Allocator, days int32) (TypeDate, error) {
+	buf, err := allocator.AllocAligned(4, 4)
+	if err != nil {
+		return TypeDate{}, fmt.Errorf("date: alloc failed: %w", err)
+	}
+	// XOR с 0x80000000 для order-preserving: отрицательные < нулевых < положительных
+	binary.BigEndian.PutUint32(buf, uint32(days)^0x80000000)
+	return TypeDate{BufferPtr: buf}, nil
+}
+
+// NewTypeDate создаёт TypeDate из time.Time без аллокатора — для тестов и одноразовых значений
+func NewTypeDate(allocator pmem.Allocator, tm time.Time) (TypeDate, error) {
+	return dateFromDays(allocator, daysFromTime(tm))
 }
 
 // NullableType
@@ -51,24 +83,6 @@ func (t TypeDate) Between(low, high BaseType[*time.Time]) bool {
 	return t.GreaterOrEqual(low) && t.LessOrEqual(high)
 }
 
-// операции специфичные для дат — через аллокатор
-
-func (t TypeDate) days() int32 {
-	if len(t.BufferPtr) < 4 {
-		return 0
-	}
-	return int32(binary.BigEndian.Uint32(t.BufferPtr) ^ 0x80000000)
-}
-
-func dateFromDays(allocator pmem.Allocator, days int32) (TypeDate, error) {
-	buf, err := allocator.AllocAligned(4, 4)
-	if err != nil {
-		return TypeDate{}, fmt.Errorf("date: alloc failed: %w", err)
-	}
-	binary.BigEndian.PutUint32(buf, uint32(days)^0x80000000)
-	return TypeDate{BufferPtr: buf}, nil
-}
-
 // AddDays добавляет количество дней
 func (t TypeDate) AddDays(allocator pmem.Allocator, days int32) (TypeDate, error) {
 	return dateFromDays(allocator, t.days()+days)
@@ -79,34 +93,32 @@ func (t TypeDate) SubDays(allocator pmem.Allocator, days int32) (TypeDate, error
 	return dateFromDays(allocator, t.days()-days)
 }
 
-// DiffDays возвращает разницу в днях между двумя датами — только читает
+// DiffDays возвращает разницу в днях — только читает
 func (t TypeDate) DiffDays(other TypeDate) int32 {
 	return t.days() - other.days()
 }
 
-// AddMonths добавляет месяцы — создаёт новую дату
+// AddMonths добавляет месяцы
 func (t TypeDate) AddMonths(allocator pmem.Allocator, months int) (TypeDate, error) {
 	tm := t.IntoGo()
 	if tm == nil {
 		return TypeDate{}, fmt.Errorf("date: nil buffer")
 	}
 	result := tm.AddDate(0, months, 0)
-	days := int32(result.Sub(PgEpoch).Hours() / 24)
-	return dateFromDays(allocator, days)
+	return dateFromDays(allocator, daysFromTime(result))
 }
 
-// AddYears добавляет годы — создаёт новую дату
+// AddYears добавляет годы
 func (t TypeDate) AddYears(allocator pmem.Allocator, years int) (TypeDate, error) {
 	tm := t.IntoGo()
 	if tm == nil {
 		return TypeDate{}, fmt.Errorf("date: nil buffer")
 	}
 	result := tm.AddDate(years, 0, 0)
-	days := int32(result.Sub(PgEpoch).Hours() / 24)
-	return dateFromDays(allocator, days)
+	return dateFromDays(allocator, daysFromTime(result))
 }
 
-// Year / Month / Day — только читают, аллокатор не нужен
+// только читают
 
 func (t TypeDate) Year() int {
 	tm := t.IntoGo()
