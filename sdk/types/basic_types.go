@@ -20,8 +20,8 @@ func TryIntoBool(val BaseType[any]) (BaseType[bool], bool) {
 	if !ok {
 		return nil, false
 	}
-	inner, ok := w.Inner().(BaseType[bool])
-	return inner, ok
+	inner := w.Inner()
+	return inner, true
 }
 
 func TryIntoNumeric[T any](val BaseType[any]) (NumericType[T], bool) {
@@ -136,55 +136,6 @@ type CastableType[T any] interface {
 	BaseType[T]
 
 	CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error)
-}
-
-func ApplyNeg(allocator pmem.Allocator, val BaseType[any], oid OID) (BaseType[any], error) {
-	switch oid {
-	case PTypeInt2:
-		n, ok := TryIntoNumeric[int16](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract int2")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	case PTypeInt4:
-		n, ok := TryIntoNumeric[int32](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract int4")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	case PTypeInt8:
-		n, ok := TryIntoNumeric[int64](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract int8")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	case PTypeFloat4:
-		n, ok := TryIntoNumeric[float32](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract float4")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	case PTypeFloat8:
-		n, ok := TryIntoNumeric[float64](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract float8")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	case PTypeNumeric:
-		n, ok := TryIntoNumeric[[]byte](val)
-		if !ok {
-			return nil, fmt.Errorf("unary minus: failed to extract numeric")
-		}
-		return NewAnyWrapper(n.Neg(allocator)), nil
-
-	default:
-		return nil, fmt.Errorf("unary minus can only be applied to numeric values, got OID %d", oid)
-	}
 }
 
 // AnyWrapper оборачивает конкретный BaseType[T] в BaseType[any]
@@ -319,7 +270,7 @@ func (w AnyWrapper[T]) Mod(allocator pmem.Allocator, other NumericType[any]) (Nu
 		if err != nil {
 			return nil, err
 		}
-		return NewAnyWrapper[T](result), nil
+		return NewAnyWrapper(result), nil
 	}
 	return nil, fmt.Errorf("inner type is not numeric")
 }

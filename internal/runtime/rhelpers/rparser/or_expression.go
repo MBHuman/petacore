@@ -17,7 +17,6 @@ func ParseOrExpression(allocator pmem.Allocator, orExpr parser.IOrExpressionCont
 
 // ParseOrExpressionWithContext парсит OR выражение с контекстом
 func ParseOrExpressionWithContext(allocator pmem.Allocator, ctx context.Context, orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// logger.Debug("ParseOrExpression")
 	if orExpr == nil {
 		return nil, nil
 	}

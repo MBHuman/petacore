@@ -12,7 +12,6 @@ import (
 
 // parseAndExpression handles AND expressions
 func ParseAndExpression(allocator pmem.Allocator, ctx context.Context, andExpr parser.IAndExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// logger.Debug("ParseAndExpression")
 	if andExpr == nil {
 		return nil, nil
 	}
@@ -37,7 +36,7 @@ func ParseAndExpression(allocator pmem.Allocator, ctx context.Context, andExpr p
 			if rv, ok := rightVal.(*rmodels.BoolExpression); ok {
 				leftVal.Value = leftVal.Value && rv.Value
 			} else {
-				return nil, fmt.Errorf("expected BoolExpression, got %T", rightVal)
+				return nil, fmt.Errorf("[ParseAndExpression] expected BoolExpression, got %T", rightVal)
 			}
 		}
 		return leftVal, nil
@@ -48,6 +47,6 @@ func ParseAndExpression(allocator pmem.Allocator, ctx context.Context, andExpr p
 	} else if leftVal, ok := result.(*rmodels.SubqueryExpression); ok {
 		return leftVal, nil
 	} else {
-		return nil, fmt.Errorf("expected BoolExpression, got %T", result)
+		return nil, fmt.Errorf("[ParseAndExpression] expected BoolExpression, got %T", result)
 	}
 }

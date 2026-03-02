@@ -3,7 +3,6 @@ package revaluate
 import (
 	"context"
 	"fmt"
-	"petacore/internal/logger"
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
@@ -28,7 +27,7 @@ func EvaluateCaseExpression(
 	numWhen := len(ctx.AllWHEN())
 
 	if numWhen == 0 {
-		return nil, fmt.Errorf("invalid CASE expression")
+		return nil, fmt.Errorf("[EvaluateCaseExpression] invalid CASE expression")
 	}
 
 	// Expressions alternate: WHEN1, THEN1, WHEN2, THEN2, ...
@@ -67,7 +66,7 @@ func EvaluateCaseExpression(
 					isTrue = valueBool.IntoGo()
 				} else {
 					// TODO возможно тут падать будет
-					return nil, fmt.Errorf("CASE WHEN condition does not evaluate to boolean")
+					return nil, fmt.Errorf("[EvaluateCaseExpression] CASE WHEN condition does not evaluate to boolean")
 				}
 			}
 		}
@@ -91,10 +90,9 @@ func EvaluateCaseExpression(
 		if err != nil {
 			return nil, err
 		}
-		logger.Debugf("CASE ELSE result: %v", result)
 		return result, nil
 	}
 
 	// No match and no ELSE
-	return nil, nil
+	return nil, fmt.Errorf("[EvaluateCaseExpression] CASE expression has no matching WHEN condition and no ELSE clause")
 }

@@ -374,13 +374,9 @@ func ParseComparisonExpression(
 				}
 
 				// Compare
-				if lComp, ok := leftValue.(ptypes.BaseType[any]); ok {
-					if rComp, ok := rightValue.(ptypes.BaseType[any]); ok {
-						if lComp.Compare(rComp) == 0 {
-							found = true
-							break
-						}
-					}
+				if leftValue.Compare(rightValue) == 0 {
+					found = true
+					break
 				}
 			}
 		} else if compExpr.AllExpression() != nil {
@@ -409,13 +405,9 @@ func ParseComparisonExpression(
 				}
 
 				// Compare
-				if lComp, ok := leftValue.(ptypes.BaseType[any]); ok {
-					if rComp, ok := rightValue.(ptypes.BaseType[any]); ok {
-						if lComp.Compare(rComp) == 0 {
-							found = true
-							break
-						}
-					}
+				if leftValue.Compare(rightValue) == 0 {
+					found = true
+					break
 				}
 			}
 		}

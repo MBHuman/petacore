@@ -33,7 +33,7 @@ func ParseExtractFunction(allocator pmem.Allocator, ctx context.Context, extract
 		return nil, err
 	}
 	if value == nil {
-		return nil, fmt.Errorf("extract function returned nil")
+		return nil, fmt.Errorf("[ParseExtractFunction] extract function returned nil")
 	}
 	return &rmodels.ResultRowsExpression{Row: value}, nil
 }

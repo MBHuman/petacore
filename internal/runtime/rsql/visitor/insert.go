@@ -41,19 +41,19 @@ func (l *sqlListener) EnterInsertStatement(ctx *parser.InsertStatementContext) {
 				return
 			}
 			if value == nil {
-				l.err = fmt.Errorf("invalid expression in INSERT")
+				l.err = fmt.Errorf("[InsertStatement] invalid expression in INSERT")
 				return
 			}
 			if val, ok := value.(*rmodels.ResultRowsExpression); ok {
 				if len(val.Row.Rows) > 0 && len(val.Row.Schema.Fields) > 0 {
 					buf, oid, err := val.Row.Schema.GetField(val.Row.Rows[0], 0)
 					if err != nil {
-						l.err = fmt.Errorf("failed to get field: %w", err)
+						l.err = fmt.Errorf("[InsertStatement] failed to get field: %w", err)
 						return
 					}
 					desVal, err := serializers.DeserializeGeneric(buf, oid)
 					if err != nil {
-						l.err = fmt.Errorf("failed to deserialize: %w", err)
+						l.err = fmt.Errorf("[InsertStatement] failed to deserialize: %w", err)
 						return
 					}
 					rowValues = append(rowValues, desVal)

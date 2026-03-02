@@ -30,7 +30,7 @@ func ParsePrimarySelectStatement(ctx parser.IPrimarySelectStatementContext) (stm
 	if ctx.FromClause() != nil {
 		primary.From, err = ParseFromClause(ctx.FromClause())
 		if err != nil {
-			return nil, fmt.Errorf("error parsing Primary SELECT FROM clause: %v", err)
+			return nil, fmt.Errorf("[ParsePrimarySelectStatement] error parsing Primary SELECT FROM clause: %v", err)
 		}
 	}
 
@@ -50,7 +50,7 @@ func ParsePrimarySelectStatement(ctx parser.IPrimarySelectStatementContext) (stm
 	if ctx.GroupByClause() != nil {
 		primary.GroupBy, err = ParseGroupByClause(ctx.GroupByClause())
 		if err != nil {
-			return nil, fmt.Errorf("error parsing GROUP BY clause: %v", err)
+			return nil, fmt.Errorf("[ParsePrimarySelectStatement] error parsing GROUP BY clause: %v", err)
 		}
 	}
 
@@ -64,7 +64,7 @@ func ParsePrimarySelectStatement(ctx parser.IPrimarySelectStatementContext) (stm
 		limitStr := ctx.LimitValue().GetText()
 		limit, err := strconv.Atoi(limitStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid LIMIT value: %v", err)
+			return nil, fmt.Errorf("[ParsePrimarySelectStatement] invalid LIMIT value: %v", err)
 		}
 		primary.Limit = limit
 	}
@@ -74,7 +74,7 @@ func ParsePrimarySelectStatement(ctx parser.IPrimarySelectStatementContext) (stm
 		offsetStr := ctx.OffsetValue().GetText()
 		offset, err := strconv.Atoi(offsetStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid OFFSET value: %v", err)
+			return nil, fmt.Errorf("[ParsePrimarySelectStatement] invalid OFFSET value: %v", err)
 		}
 		primary.Offset = offset
 	}

@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/rops"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/sdk/pmem"
-	"petacore/sdk/serializers"
-	ptypes "petacore/sdk/types"
 )
 
 // ParseUnaryExpression handles unary operators (+ and -)
@@ -44,30 +43,13 @@ func ParseUnaryExpression(
 		if val, ok := result.(*rmodels.ResultRowsExpression); ok {
 			// TODO перевести на inplace если есть возможность, сейчас это будет создавать новый результат, что не очень эффективно
 			if len(val.Row.Rows) == 1 && len(val.Row.Schema.Fields) == 1 {
-				fieldVal, oid, err := val.Row.Schema.GetField(val.Row.Rows[0], 0)
+				result, err = rops.NegateValue(allocator, val.Row.Rows[0], val.Row.Schema)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("[ParseUnaryExpression] NegateValue error: %w", err)
 				}
-				desVal, err := serializers.DeserializeGeneric(fieldVal, oid)
-				if err != nil {
-					return nil, err
-				}
-				negated, err := ptypes.ApplyNeg(allocator, desVal, oid)
-				if err != nil {
-					return nil, err
-				}
-				resultRow, err := val.Row.Schema.Pack(allocator, [][]byte{negated.GetBuffer()})
-				if err != nil {
-					return nil, err
-				}
-				result = &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows:   []*ptypes.Row{resultRow},
-						Schema: val.Row.Schema,
-					},
-				}
+				return result, nil
 			} else {
-				return nil, fmt.Errorf("unary minus is only supported for single-row single-column result expressions")
+				return nil, fmt.Errorf("[ParseUnaryExpression] unary minus is only supported for single-row single-column result expressions")
 			}
 		}
 	}

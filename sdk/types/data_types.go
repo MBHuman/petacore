@@ -1,11 +1,10 @@
-package rparser
+package ptypes
 
 import (
-	ptypes "petacore/sdk/types"
 	"strings"
 )
 
-func ParseDataType(typeStr string) ptypes.OID {
+func ParseDataType(typeStr string) OID {
 	upper := strings.ToUpper(typeStr)
 
 	// Strip size/precision modifiers, e.g. CHAR(1) -> CHAR, VARCHAR(255) -> VARCHAR
@@ -15,38 +14,38 @@ func ParseDataType(typeStr string) ptypes.OID {
 
 	switch upper {
 	case "BOOL", "BOOLEAN":
-		return ptypes.PTypeBool
+		return PTypeBool
 	case "BYTEA":
-		return ptypes.PTypeBytea
+		return PTypeBytea
 	case "CHAR", "\"CHAR\"":
-		return ptypes.PTypeChar
+		return PTypeChar
 	case "NAME":
-		return ptypes.PTypeName
+		return PTypeName
 	case "INT8", "BIGINT":
-		return ptypes.PTypeInt8
+		return PTypeInt8
 	case "INT2", "SMALLINT":
-		return ptypes.PTypeInt2
+		return PTypeInt2
 	case "INT", "INT4", "INTEGER":
-		return ptypes.PTypeInt4
+		return PTypeInt4
 	case "STRING", "TEXT":
-		return ptypes.PTypeText
+		return PTypeText
 	case "FLOAT4", "REAL":
-		return ptypes.PTypeFloat4
+		return PTypeFloat4
 	case "FLOAT", "FLOAT8", "DOUBLE", "DOUBLEPRECISION":
-		return ptypes.PTypeFloat8
+		return PTypeFloat8
 	case "VARCHAR", "CHARACTERVARYING":
-		return ptypes.PTypeVarchar
+		return PTypeVarchar
 	case "NUMERIC", "DECIMAL":
-		return ptypes.PTypeNumeric
+		return PTypeNumeric
 	case "DATE":
-		return ptypes.PTypeDate
+		return PTypeDate
 	case "TIME", "TIMEWITHOUTtimezone":
-		return ptypes.PTypeTime
+		return PTypeTime
 	case "TIMESTAMP", "TIMESTAMPWITHOUTTIMEZONE":
-		return ptypes.PTypeTimestamp
+		return PTypeTimestamp
 	case "TIMESTAMPTZ", "TIMESTAMPWITHTIMEZONE":
-		return ptypes.PTypeTimestampz
+		return PTypeTimestampz
 	default:
-		return ptypes.PTypeText
+		return PTypeText
 	}
 }

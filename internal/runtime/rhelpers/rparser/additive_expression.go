@@ -54,7 +54,7 @@ func ParseAdditiveExpression(
 	})
 
 	if len(ops) != len(multExprs)-1 {
-		return nil, fmt.Errorf("additive: operator count mismatch: %d ops for %d expressions",
+		return nil, fmt.Errorf("[ParseAdditiveExpression] operator count mismatch: %d ops for %d expressions",
 			len(ops), len(multExprs))
 	}
 
@@ -67,10 +67,10 @@ func ParseAdditiveExpression(
 		a, aOk := result.(*rmodels.ResultRowsExpression)
 		b, bOk := nextResult.(*rmodels.ResultRowsExpression)
 		if !aOk || !bOk {
-			return nil, fmt.Errorf("additive: only result row expressions supported")
+			return nil, fmt.Errorf("[ParseAdditiveExpression] only result row expressions supported")
 		}
 		if len(a.Row.Rows) != 1 || len(b.Row.Rows) != 1 {
-			return nil, fmt.Errorf("additive: only single-row expressions supported")
+			return nil, fmt.Errorf("[ParseAdditiveExpression] only single-row expressions supported")
 		}
 
 		switch op.op {
@@ -79,7 +79,7 @@ func ParseAdditiveExpression(
 		case "-":
 			result, err = rops.SubtractValues(allocator, a.Row.Rows[0], b.Row.Rows[0], a.Row.Schema, b.Row.Schema)
 		default:
-			return nil, fmt.Errorf("additive: unknown operator %q", op.op)
+			return nil, fmt.Errorf("[ParseAdditiveExpression] unknown operator %q", op.op)
 		}
 		if err != nil {
 			return nil, err

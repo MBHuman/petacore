@@ -2,7 +2,6 @@ package visitor
 
 import (
 	"fmt"
-	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/sdk/pmem"
@@ -30,9 +29,7 @@ func ParseSQL(allocator pmem.Allocator, query string) (statements.SQLStatement, 
 	}
 
 	if listener.stmt == nil {
-		return nil, fmt.Errorf("failed to parse SQL query with err: %v", listener.err)
+		return nil, fmt.Errorf("[ParseSQL] failed to parse SQL query with err: %v", listener.err)
 	}
-
-	logger.Debugf("DEBUG: Parsed statement type: %s\n", listener.stmt.Type())
 	return listener.stmt, nil
 }

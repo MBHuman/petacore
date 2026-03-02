@@ -75,6 +75,45 @@ func applyArithmetic(
 	}, nil
 }
 
+func applySelfArithmetic(
+	allocator pmem.Allocator,
+	a *ptypes.Row,
+	aSchema *serializers.BaseSchema,
+	opName string,
+	op func(pmem.Allocator, ptypes.NumericType[any]) (ptypes.NumericType[any], error),
+) (*rmodels.ResultRowsExpression, error) {
+	aVal, aOid, err := aSchema.GetField(a, 0)
+	if err != nil {
+		return nil, err
+	}
+	aDesVal, err := serializers.DeserializeGeneric(aVal, aOid)
+	if err != nil {
+		return nil, err
+	}
+
+	aN, aOk := extractNumericAny(aDesVal, aOid)
+	if !aOk {
+		return nil, fmt.Errorf("%s: value must be numeric (OID %d)", opName, aOid)
+	}
+
+	res, err := op(allocator, aN)
+	if err != nil {
+		return nil, err
+	}
+
+	resultRow, err := aSchema.Pack(allocator, [][]byte{res.GetBuffer()})
+	if err != nil {
+		return nil, err
+	}
+
+	return &rmodels.ResultRowsExpression{
+		Row: &table.ExecuteResult{
+			Rows:   []*ptypes.Row{resultRow},
+			Schema: aSchema,
+		},
+	}, nil
+}
+
 // extractNumericAny извлекает NumericType[any] по известному OID
 func extractNumericAny(val ptypes.BaseType[any], oid ptypes.OID) (ptypes.NumericType[any], bool) {
 	switch oid {
@@ -236,6 +275,15 @@ func AddValues(allocator pmem.Allocator, a, b *ptypes.Row, aSchema, bSchema *ser
 	return applyArithmetic(allocator, a, b, aSchema, bSchema, "AddValues",
 		func(alloc pmem.Allocator, x, y ptypes.NumericType[any]) (ptypes.NumericType[any], error) {
 			return x.Add(alloc, y)
+		},
+	)
+}
+
+func NegateValue(allocator pmem.Allocator, a *ptypes.Row, aSchema *serializers.BaseSchema) (*rmodels.ResultRowsExpression, error) {
+	return applySelfArithmetic(allocator, a, aSchema, "NegateValue",
+		func(alloc pmem.Allocator, x ptypes.NumericType[any]) (ptypes.NumericType[any], error) {
+			res := x.Neg(alloc)
+			return res, nil
 		},
 	)
 }

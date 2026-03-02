@@ -27,7 +27,7 @@ func EvaluateWhereCondition(
 	}
 	result, err := EvaluateExpressionContext(allocator, goCtx, where.ExpressionContext, row, subExec, runtimeParams)
 	if err != nil {
-		logger.Errorf("Error evaluating WHERE condition: %v", err)
+		logger.Errorf("[EvaluateWhereCondition] Error evaluating WHERE condition: %v", err)
 		return false
 	}
 
@@ -40,12 +40,12 @@ func EvaluateWhereCondition(
 		var err error
 		val, oid, err := resultVal.Row.Schema.GetField(resultVal.Row.Rows[0], 0)
 		if err != nil {
-			logger.Errorf("Error getting field from ResultRowsExpression: %v", err)
+			logger.Errorf("[EvaluateWhereCondition] Error getting field from ResultRowsExpression: %v", err)
 			return false
 		}
 		valDes, err := serializers.DeserializeGeneric(val, oid)
 		if err != nil {
-			logger.Errorf("Error deserializing field from ResultRowsExpression: %v", err)
+			logger.Errorf("[EvaluateWhereCondition] Error deserializing field from ResultRowsExpression: %v", err)
 			return false
 		}
 		if oid == ptypes.PTypeBool {

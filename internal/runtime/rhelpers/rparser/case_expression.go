@@ -9,7 +9,6 @@ import (
 
 // parseCaseExpression handles CASE WHEN THEN ELSE END expressions
 func ParseCaseExpression(allocator pmem.Allocator, ctx context.Context, caseExpr parser.ICaseExpressionContext) (rmodels.Expression, error) {
-	// logger.Debug("ParseCaseExpression")
 	if caseExpr == nil {
 		return nil, nil
 	}

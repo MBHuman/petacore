@@ -11,11 +11,6 @@ import (
 
 // parseExpression evaluates an ANTLR expression context and returns the value
 func ParseExpression(allocator pmem.Allocator, ctx context.Context, expr parser.IExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	return ParseExpressionWithContext(allocator, ctx, expr, row, subExec)
-}
-
-// ParseExpressionWithContext парсит выражение с контекстом
-func ParseExpressionWithContext(allocator pmem.Allocator, ctx context.Context, expr parser.IExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	if expr == nil {
 		return nil, nil
 	}

@@ -38,7 +38,7 @@ func EvaluateSortRows(allocator pmem.Allocator, execResult *table.ExecuteResult,
 				return idx, nil
 			}
 			logger.Debug("EvaluateSortRows: column index out of range", zap.Int("colIndex", ob.ColumnIndex), zap.Int("numFields", len(execResult.Schema.Fields)))
-			return -1, fmt.Errorf("ORDER BY position %d is not in select list", ob.ColumnIndex)
+			return -1, fmt.Errorf("[EvaluateSortRows] ORDER BY position %d is not in select list", ob.ColumnIndex)
 		}
 		if ob.ColumnName != "" {
 			lower := strings.ToLower(ob.ColumnName)
@@ -67,10 +67,10 @@ func EvaluateSortRows(allocator pmem.Allocator, execResult *table.ExecuteResult,
 					return fallback[0], nil
 				}
 				if len(fallback) > 1 {
-					return -1, fmt.Errorf("column reference \"%s\" is ambiguous", ob.ColumnName)
+					return -1, fmt.Errorf("[EvaluateSortRows] column reference \"%s\" is ambiguous", ob.ColumnName)
 				}
 				logger.Debug("EvaluateSortRows: qualified name not found", zap.String("colName", ob.ColumnName))
-				return -1, fmt.Errorf("column \"%s\" does not exist", ob.ColumnName)
+				return -1, fmt.Errorf("[EvaluateSortRows] column \"%s\" does not exist", ob.ColumnName)
 			}
 			// Unqualified: match by bare Name — reject if ambiguous.
 			var matched []int
@@ -84,11 +84,11 @@ func EvaluateSortRows(allocator pmem.Allocator, execResult *table.ExecuteResult,
 				return matched[0], nil
 			}
 			if len(matched) > 1 {
-				return -1, fmt.Errorf("column reference \"%s\" is ambiguous", ob.ColumnName)
+				return -1, fmt.Errorf("[EvaluateSortRows] column reference \"%s\" is ambiguous", ob.ColumnName)
 			}
 		}
 		logger.Debug("EvaluateSortRows: could not resolve column", zap.Any("ob", ob))
-		return -1, fmt.Errorf("column \"%s\" does not exist", ob.ColumnName)
+		return -1, fmt.Errorf("[EvaluateSortRows] column \"%s\" does not exist", ob.ColumnName)
 	}
 
 	// Pre-compute sort keys once per row (O(n*k)), then sort a combined slice
@@ -105,7 +105,7 @@ func EvaluateSortRows(allocator pmem.Allocator, execResult *table.ExecuteResult,
 	for k, ob := range orderBy {
 		idx, resolveErr := resolveIdx(ob)
 		if resolveErr != nil {
-			return resolveErr
+			return fmt.Errorf("[EvaluateSortRows] %w", resolveErr)
 		}
 		colIndices[k] = idx
 	}

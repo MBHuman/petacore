@@ -90,7 +90,6 @@ func executePlanNode(
 		return executeScan(n, plan, ctx, tx, runtimeParams)
 	case *ValuesPlanNode:
 		result, err := executeValues(n, plan, ctx, tx, runtimeParams)
-		logger.Debug("ValuePlanNode result", zap.Any("result", result))
 		return result, err
 	case *ProjectPlanNode:
 		return executeProject(n, plan, ctx, tx, runtimeParams)
