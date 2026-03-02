@@ -156,7 +156,6 @@ func executeScan(
 }
 
 // executeValues выполняет VALUES узел (SELECT без таблицы)
-// TODO тут могут быть вложенные запросы на expression с подзапросами, надо это учесть
 func executeValues(
 	node *ValuesPlanNode,
 	plan *QueryPlan,

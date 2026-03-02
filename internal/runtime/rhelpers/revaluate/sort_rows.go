@@ -134,7 +134,7 @@ func EvaluateSortRows(allocator pmem.Allocator, execResult *table.ExecuteResult,
 				continue
 			}
 			if cmp := vi.Compare(vj); cmp != 0 {
-				return cmp < 0 != (ob.Direction == "DESC")
+				return cmp < 0 != (ob.Direction == items.OrderDesc)
 			}
 		}
 		return false

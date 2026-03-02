@@ -126,7 +126,6 @@ func IsAggregateFunction(name string) bool {
 }
 
 // ExecuteFunction executes a built-in or user-defined function
-// TODO добавить поддержку функций с помощью SDK плагинов
 // TODO добавить поддержку SQL функций, определенных пользователем, должна быть поддержка CREATE FUNCTION И CREATE PROCEDURE
 func ExecuteFunction(allocator pmem.Allocator, name string, args []interface{}) (*table.ExecuteResult, error) {
 	return ExecuteFunctionWithContext(allocator, context.Background(), name, args)

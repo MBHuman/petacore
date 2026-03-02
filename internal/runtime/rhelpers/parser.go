@@ -8,8 +8,8 @@ import (
 	ptypes "petacore/sdk/types"
 )
 
-// evaluateOperator evaluates an operator expression like OPERATOR(pg_catalog.~)
-// TODO пересмотреть работу с операторами, убрать хардкодинг
+// EvaluateOperator evaluates an operator expression like OPERATOR(pg_catalog.~)
+// TODO: Review operator handling and remove hardcoding
 func EvaluateOperator(left, right rmodels.Expression, opExpr parser.IOperatorExprContext) bool {
 	if opExpr == nil {
 		return false

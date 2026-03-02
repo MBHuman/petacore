@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// ExecuteSet устанавливает переменную (пока заглушка)
-// TODO: реализовать полноценную логику установки переменных с проверками
+// ExecuteSet executes the SET statement to set session variables.
+// TODO: Implement comprehensive variable setting logic with validation
 func ExecuteSet(stmt *statements.SetStatement, store *storage.DistributedStorageVClock, sessionParams map[string]string, exCtx ExecutorContext) error {
 	// Set the session parameter
 	sessionParams[strings.ToLower(stmt.Variable)] = fmt.Sprintf("%v", stmt.Value)

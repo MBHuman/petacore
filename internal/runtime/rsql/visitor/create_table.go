@@ -2,7 +2,6 @@ package visitor
 
 import (
 	"errors"
-	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
@@ -125,8 +124,5 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 
 	stmt.PrimaryKeys = primaryKeys
 
-	if stmt == nil && l.err == nil {
-		l.err = fmt.Errorf("[EnterCreateTableStatement] CREATE TABLE: unsupported or invalid syntax")
-	}
 	l.stmt = stmt
 }

@@ -11,7 +11,6 @@ import (
 // ExecuteInsert вставляет данные
 func ExecuteInsert(stmt *statements.InsertStatement, store *storage.DistributedStorageVClock, exCtx ExecutorContext) error {
 	// Резолвим схему и имя таблицы
-	// TODO перевести на новые типы данных и убрать лишнее копирование
 	schemaName, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
 	tbl := table.NewTable(store, exCtx.Database, schemaName, tableName)
 
