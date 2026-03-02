@@ -221,8 +221,11 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 				if !ok {
 					val = []byte("0")
 				}
-				// Просто перезаписываем (в реальной системе бы парсили и увеличивали)
-				tx.Write([]byte("counter"), append(val, '1'))
+				// Create a copy to avoid data races with shared slices
+				newVal := make([]byte, len(val)+1)
+				copy(newVal, val)
+				newVal[len(val)] = '1'
+				tx.Write([]byte("counter"), newVal)
 				return nil
 			})
 		}()
@@ -232,12 +235,15 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Проверяем финальное значение
+	var finalValue []byte
 	err = store.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
 		value, ok := tx.Read([]byte("counter"))
 		if !ok {
 			return fmt.Errorf("counter not found")
 		}
-		t.Logf("Final counter value: %s", value)
+		// Copy the value to avoid data races when accessing from outside the transaction
+		finalValue = make([]byte, len(value))
+		copy(finalValue, value)
 		// Просто проверяем, что значение существует
 		if len(value) == 0 {
 			return fmt.Errorf("counter is empty")
@@ -246,6 +252,7 @@ func TestVectorClock_TransactionIsolation(t *testing.T) {
 	})
 
 	require.NoError(t, err)
+	t.Logf("Final counter value: %s", finalValue)
 
 }
 
