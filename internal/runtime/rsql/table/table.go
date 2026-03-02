@@ -8,17 +8,20 @@ import (
 	"petacore/internal/logger"
 	"petacore/internal/storage"
 	"petacore/internal/utils"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
+	"sort"
 	"strconv"
 )
 
 type ExecuteResult struct {
-	Rows    [][]interface{}
-	Columns []TableColumn
+	Rows   []*ptypes.Row
+	Schema *serializers.BaseSchema
 }
 
 type ResultRow struct {
-	Row     []interface{}
-	Columns []TableColumn
+	Row     *ptypes.Row
+	Schema  *serializers.BaseSchema
 	Context context.Context // For passing queryStartTime and other runtime context
 }
 
@@ -29,7 +32,7 @@ type SelectColumn struct {
 
 type ITable interface {
 	CreateTable(name string, columns []ColumnDef, ifNotExists bool) error
-	Insert(tableName string, values map[string]interface{}) error
+	Insert(tableName string, values []*ptypes.Row) error
 	Select(
 		tableName string,
 		columns []SelectColumn,
@@ -53,7 +56,7 @@ type TableMetadata struct {
 }
 
 type ColumnMetadata struct {
-	Type ColType
+	Type ptypes.OID
 	// IsPrimaryKey bool
 	IsNullable   bool
 	DefaultValue interface{}
@@ -78,39 +81,8 @@ func NewTable(
 }
 
 // validateValueType проверяет тип значения
-func (t *Table) validateValueType(value interface{}, expectedType ColType) error {
-	switch expectedType {
-	case ColTypeString:
-		if _, ok := value.(string); !ok {
-			return fmt.Errorf("expected string, got %T", value)
-		}
-	case ColTypeInt:
-		switch value.(type) {
-		case int, int32, int64, float64:
-			// Разрешаем числовые типы для int
-		default:
-			return fmt.Errorf("expected int, got %T", value)
-		}
-	case ColTypeBigInt:
-		switch value.(type) {
-		case int, int32, int64, float64:
-			// Разрешаем числовые типы для bigint
-		default:
-			return fmt.Errorf("expected bigint, got %T", value)
-		}
-	case ColTypeFloat:
-		switch value.(type) {
-		case float32, float64, int, int32, int64:
-			// Разрешаем числовые типы для float
-		default:
-			return fmt.Errorf("expected float, got %T", value)
-		}
-	case ColTypeBool:
-		if _, ok := value.(bool); !ok {
-			return fmt.Errorf("expected bool, got %T", value)
-		}
-	}
-	return nil
+func (t *Table) validateValueType(value []byte, expectedType ptypes.OID) error {
+	return serializers.ValidateGeneric(value, expectedType)
 }
 
 func (t *Table) getTablePrefixKey() string {
@@ -212,4 +184,35 @@ func (t *Table) GetTableMetadataInTx(tx *storage.DistributedTransactionVClock) (
 	}
 
 	return &meta, nil
+}
+
+func (t *Table) GetSerializerSchema(tx *storage.DistributedTransactionVClock) (*serializers.BaseSchema, error) {
+	meta, err := t.GetTableMetadataInTx(tx)
+	if err != nil {
+		return nil, err
+	}
+
+	type indexedCol struct {
+		name string
+		meta ColumnMetadata
+	}
+	cols := make([]indexedCol, 0, len(meta.Columns))
+	for colName, colMeta := range meta.Columns {
+		cols = append(cols, indexedCol{name: colName, meta: colMeta})
+	}
+	sort.Slice(cols, func(i, j int) bool {
+		return cols[i].meta.Idx < cols[j].meta.Idx
+	})
+
+	schemaFields := make([]serializers.FieldDef, 0, len(cols))
+	for _, col := range cols {
+		schemaFields = append(schemaFields, serializers.FieldDef{
+			Name: col.name,
+			OID:  col.meta.Type,
+		})
+	}
+
+	return &serializers.BaseSchema{
+		Fields: schemaFields,
+	}, nil
 }

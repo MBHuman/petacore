@@ -45,14 +45,14 @@ func (s *InMemoryStore) Get(ctx context.Context, key []byte) (*KVEntry, error) {
 	// Возвращаем копию, чтобы избежать race conditions
 	return &KVEntry{
 		Key:      append([]byte(nil), entry.Key...),
-		Value:    entry.Value,
+		Value:    append([]byte(nil), entry.Value...),
 		Version:  entry.Version,
 		Revision: entry.Revision,
 	}, nil
 }
 
 // Put записывает значение по ключу с версией
-func (s *InMemoryStore) Put(ctx context.Context, key []byte, value string, version int64) error {
+func (s *InMemoryStore) Put(ctx context.Context, key []byte, value []byte, version int64) error {
 	s.mu.Lock()
 
 	keyStr := string(key)
@@ -61,7 +61,7 @@ func (s *InMemoryStore) Put(ctx context.Context, key []byte, value string, versi
 	s.revision++
 	newEntry := &KVEntry{
 		Key:      append([]byte(nil), key...),
-		Value:    value,
+		Value:    append([]byte(nil), value...),
 		Version:  version,
 		Revision: s.revision,
 	}
@@ -103,7 +103,7 @@ func (s *InMemoryStore) ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEnt
 			// Возвращаем копию, чтобы избежать race conditions
 			entries = append(entries, &KVEntry{
 				Key:      append([]byte(nil), entry.Key...),
-				Value:    entry.Value,
+				Value:    append([]byte(nil), entry.Value...),
 				Version:  entry.Version,
 				Revision: entry.Revision,
 			})

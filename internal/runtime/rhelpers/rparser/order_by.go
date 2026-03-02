@@ -35,11 +35,11 @@ func ParseOrderByClause(ctx parser.IOrderByClauseContext) []items.OrderByItem {
 		}
 
 		if item.ASC() != nil {
-			orderItem.Direction = "ASC"
+			orderItem.Direction = items.OrderAsc
 		} else if item.DESC() != nil {
-			orderItem.Direction = "DESC"
+			orderItem.Direction = items.OrderDesc
 		} else {
-			orderItem.Direction = "ASC" // default
+			orderItem.Direction = items.OrderAsc
 		}
 
 		orderBy = append(orderBy, orderItem)

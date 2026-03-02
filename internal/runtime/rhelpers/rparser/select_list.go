@@ -1,7 +1,6 @@
 package rparser
 
 import (
-	"petacore/internal/logger"
 	"petacore/internal/runtime/functions"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/items"
@@ -16,7 +15,6 @@ func ParseSelectList(ctx parser.ISelectListContext) []items.SelectItem {
 	var columns []items.SelectItem
 
 	for _, item := range ctx.AllSelectItem() {
-		logger.Debugf("Parsing select item: %s", item.GetText())
 		selectItem := items.SelectItem{}
 
 		if selectAll := item.SelectAll(); selectAll != nil {

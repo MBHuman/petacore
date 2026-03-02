@@ -6,28 +6,41 @@ import (
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	ptypes "petacore/sdk/types"
 )
 
 // filterRowsByWhere filters rows based on the WHERE clause
-func EvaluateFilterRowsByWhere(goCtx context.Context, execResult *table.ExecuteResult, where *items.WhereClause, statement *statements.SelectStatement, subExec subquery.SubqueryExecutor, runtimeParams map[int]interface{}) *table.ExecuteResult {
+func EvaluateFilterRowsByWhere(
+	allocator pmem.Allocator,
+	goCtx context.Context,
+	execResult *table.ExecuteResult,
+	where *items.WhereClause,
+	statement *statements.SelectStatement,
+	subExec subquery.SubqueryExecutor,
+	runtimeParams map[int]interface{},
+) *table.ExecuteResult {
 	if where == nil {
 		return execResult
 	}
 
-	var filteredRows [][]interface{}
+	var filteredRows []*ptypes.Row
 	for _, row := range execResult.Rows {
-		matches := EvaluateWhereCondition(goCtx, where, &table.ResultRow{
-			Row:     row,
-			Columns: execResult.Columns,
-		}, statement, subExec, runtimeParams)
+		matches := EvaluateWhereCondition(
+			allocator,
+			goCtx, where, &table.ResultRow{
+				Row:    row,
+				Schema: execResult.Schema,
+			}, statement, subExec, runtimeParams,
+		)
 		if matches {
 			filteredRows = append(filteredRows, row)
 		}
 	}
 
 	filteredResult := &table.ExecuteResult{
-		Columns: execResult.Columns,
-		Rows:    filteredRows,
+		Schema: execResult.Schema,
+		Rows:   filteredRows,
 	}
 	return filteredResult
 }

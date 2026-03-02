@@ -4,11 +4,11 @@ import (
 	"context"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/sdk/pmem"
 )
 
 // parseCaseExpression handles CASE WHEN THEN ELSE END expressions
-func ParseCaseExpression(ctx context.Context, caseExpr parser.ICaseExpressionContext) (rmodels.Expression, error) {
-	// logger.Debug("ParseCaseExpression")
+func ParseCaseExpression(allocator pmem.Allocator, ctx context.Context, caseExpr parser.ICaseExpressionContext) (rmodels.Expression, error) {
 	if caseExpr == nil {
 		return nil, nil
 	}

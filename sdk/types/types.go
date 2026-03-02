@@ -1,4 +1,4 @@
-package psdk
+package ptypes
 
 type OID int32
 

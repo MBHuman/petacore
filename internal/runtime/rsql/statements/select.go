@@ -3,6 +3,7 @@ package statements
 import (
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/items"
+	ptypes "petacore/sdk/types"
 )
 
 type FromClause struct {
@@ -44,10 +45,10 @@ func (s SetOperationType) String() string {
 // SelectStatement - главный узел для любого SELECT запроса
 // Может быть либо простым (Primary) либо комбинированным (Combined)
 type SelectStatement struct {
-	Primary      *PrimarySelectStatement
-	Combined     *CombinedSelectStatement
-	Subqueries   []*SelectStatement // вложенные SELECT-запросы
-	SubqueryCache map[*SelectStatement]interface{} // кэш для скалярных подзапросов
+	Primary       *PrimarySelectStatement
+	Combined      *CombinedSelectStatement
+	Subqueries    []*SelectStatement               // вложенные SELECT-запросы
+	SubqueryCache map[*SelectStatement]*ptypes.Row // кэш для скалярных подзапросов
 }
 
 func (s *SelectStatement) Type() string { return "SELECT" }

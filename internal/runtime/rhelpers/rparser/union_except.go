@@ -3,6 +3,7 @@ package rparser
 import (
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
+	ptypes "petacore/sdk/types"
 )
 
 // parseUnionExceptStatement парсит UNION/EXCEPT операции (левоассоциативные)
@@ -63,7 +64,7 @@ func ParseUnionExceptStatement(ctx parser.IUnionExceptStatementContext) (*statem
 
 			result = &statements.SelectStatement{
 				Combined:      combined,
-				SubqueryCache: make(map[*statements.SelectStatement]interface{}),
+				SubqueryCache: make(map[*statements.SelectStatement]*ptypes.Row),
 			}
 		}
 	}

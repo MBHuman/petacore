@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"petacore/internal/core"
 	"petacore/internal/distributed"
+	"petacore/internal/utils"
+	"petacore/sdk/pmem"
 	"time"
 )
 
@@ -124,6 +126,11 @@ func (ds *DistributedStorageVClock) SetMinAcks(minAcks int) {
 
 // RunTransaction выполняет транзакцию с quorum-based чтением
 func (ds *DistributedStorageVClock) RunTransaction(txFunc func(tx *DistributedTransactionVClock) error) error {
+	return ds.RunTransactionWithAllocator(nil, txFunc)
+}
+
+// RunTransactionWithAllocator выполняет транзакцию с allocator
+func (ds *DistributedStorageVClock) RunTransactionWithAllocator(allocator pmem.Allocator, txFunc func(tx *DistributedTransactionVClock) error) error {
 	tx := NewDistributedTransactionVClock(
 		ds.mvccVClock,
 		ds.logicalClock,
@@ -133,6 +140,9 @@ func (ds *DistributedStorageVClock) RunTransaction(txFunc func(tx *DistributedTr
 		ds.minAcks,
 		ds.totalNodes,
 	)
+	if allocator != nil {
+		tx.SetAllocator(allocator)
+	}
 	defer tx.Release()
 
 	tx.Begin()
@@ -146,6 +156,11 @@ func (ds *DistributedStorageVClock) RunTransaction(txFunc func(tx *DistributedTr
 
 // BeginTransaction начинает долгоживущую транзакцию
 func (ds *DistributedStorageVClock) BeginTransaction() *DistributedTransactionVClock {
+	return ds.BeginTransactionWithAllocator(nil)
+}
+
+// BeginTransactionWithAllocator начинает долгоживущую транзакцию с allocator
+func (ds *DistributedStorageVClock) BeginTransactionWithAllocator(allocator pmem.Allocator) *DistributedTransactionVClock {
 	tx := NewDistributedTransactionVClock(
 		ds.mvccVClock,
 		ds.logicalClock,
@@ -155,6 +170,9 @@ func (ds *DistributedStorageVClock) BeginTransaction() *DistributedTransactionVC
 		ds.minAcks,
 		ds.totalNodes,
 	)
+	if allocator != nil {
+		tx.SetAllocator(allocator)
+	}
 	tx.Begin()
 	return tx
 }
@@ -183,6 +201,9 @@ type DistributedTransactionVClock struct {
 
 	// Snapshot для Snapshot Isolation
 	snapshotVClock *core.VectorClock
+
+	// Allocator для временных данных
+	allocator pmem.Allocator
 }
 
 // NewDistributedTransactionVClock создает новую транзакцию
@@ -205,7 +226,13 @@ func NewDistributedTransactionVClock(
 		totalNodes:     totalNodes,
 		localWrites:    make(map[string][]byte),
 		readSet:        make(map[string]*core.VectorClock),
+		allocator:      nil,
 	}
+}
+
+// SetAllocator устанавливает allocator для транзакции
+func (dtx *DistributedTransactionVClock) SetAllocator(allocator pmem.Allocator) {
+	dtx.allocator = allocator
 }
 
 // Begin начинает транзакцию
@@ -220,10 +247,11 @@ func (dtx *DistributedTransactionVClock) Begin() {
 // Возвращает последнюю БЕЗОПАСНУЮ версию (с подтвержденным кворумом)
 // Если запись не синхронизирована на достаточное количество узлов - возвращает старую версию
 func (dtx *DistributedTransactionVClock) Read(key []byte) ([]byte, bool) {
-	// Сначала проверяем локальные изменения
-	sKey := string(key)
+	// Сначала проверяем локальные изменения (zero-copy lookup)
+	sKey := utils.BytesToString(key)
 	if value, ok := dtx.localWrites[sKey]; ok {
-		return append([]byte(nil), value...), true
+		// Zero-copy: возвращаем прямую ссылку на данные из localWrites
+		return value, true
 	}
 
 	// Определяем snapshot для чтения
@@ -244,9 +272,9 @@ func (dtx *DistributedTransactionVClock) Read(key []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	// Добавляем в readSet для OCC
+	// Добавляем в readSet для OCC (здесь нужна копия ключа для map)
 	if vclock != nil {
-		dtx.readSet[sKey] = vclock.Clone()
+		dtx.readSet[string(key)] = vclock.Clone()
 	}
 	if len(value) == 0 {
 		return nil, false
@@ -257,7 +285,8 @@ func (dtx *DistributedTransactionVClock) Read(key []byte) ([]byte, bool) {
 // Write записывает в локальный буфер
 func (dtx *DistributedTransactionVClock) Write(key []byte, value []byte) {
 	// Read-before-write: если ключ не читался, прочитаем его версию для OCC
-	sKey := string(key)
+	// Zero-copy lookup, but will copy for storage below
+	sKey := utils.BytesToString(key)
 	if _, exists := dtx.readSet[sKey]; !exists {
 		// Проверяем локальные изменения
 		if _, ok := dtx.localWrites[sKey]; !ok {

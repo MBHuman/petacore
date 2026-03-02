@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"petacore/internal/logger"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -12,9 +16,9 @@ import (
 
 // Insert вставляет строку в таблицу
 // TODO убрать хардкодинг, сделать поддержку всех типов данных и ограничений
-func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []string) error {
+func (t *Table) Insert(allocator pmem.Allocator, tableName string, values [][]ptypes.BaseType[any], columnNames []string) error {
 	logger.Debugf("DEBUG: Insert into %s: %+v\n", tableName, values)
-	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+	return t.Storage.RunTransactionWithAllocator(allocator, func(tx *storage.DistributedTransactionVClock) error {
 		// Получаем метаданные таблицы
 		metaPrefixKey := t.getMetadataPrefixKey()
 		metaStr, found := tx.Read([]byte(metaPrefixKey))
@@ -34,76 +38,110 @@ func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []s
 
 		logger.Debug("DEBUG: Table metadata:", zap.Any("meta", meta))
 
+		// Создаем Schema на основе метаданных таблицы
+		// Сортируем колонки по индексу
+		type indexedColumn struct {
+			name string
+			meta ColumnMetadata
+		}
+		sortedCols := make([]indexedColumn, 0, len(meta.Columns))
+		for colName, colMeta := range meta.Columns {
+			sortedCols = append(sortedCols, indexedColumn{name: colName, meta: colMeta})
+		}
+		sort.Slice(sortedCols, func(i, j int) bool {
+			return sortedCols[i].meta.Idx < sortedCols[j].meta.Idx
+		})
+
+		// Создаем Schema
+		schemaFields := make([]serializers.FieldDef, 0, len(sortedCols))
+		for _, col := range sortedCols {
+			schemaFields = append(schemaFields, serializers.FieldDef{
+				Name: col.name,
+				OID:  col.meta.Type,
+			})
+		}
+		schema := serializers.NewBaseSchema(schemaFields)
+
 		for _, value := range values {
-			insertRow := make([]interface{}, len(meta.Columns))
+			// Подготавливаем данные для вставки в правильном порядке (по Idx)
+			insertRowBuffers := make([][]byte, len(meta.Columns))
+
 			// Применяем defaults и генерируем SERIAL значения
 			for colName, colMeta := range meta.Columns {
+				var fieldBuffer []byte
+
 				if idx, exists := columnsMap[colName]; exists {
-					insertRow[colMeta.Idx-1] = value[idx]
+					// Значение предоставлено пользователем
+					if value[idx] != nil {
+						fieldBuffer = value[idx].GetBuffer()
+					}
 				} else {
+					// Применяем default значения
 					if colMeta.IsSerial {
-						// // Генерируем следующий ID из sequence
+						// Генерируем следующий ID из sequence
 						seqValue := t.genSequenceKey(tx, colName)
-						insertRow[colMeta.Idx-1] = seqValue
+						// Сериализуем sequence value (int32)
+						// serialized, err := serializers.SerializeInt4(allocator, seqValue)
+						serialized, err := serializers.Int8SerializerInstance.Serialize(allocator, int64(seqValue))
+						if err != nil {
+							return fmt.Errorf("failed to serialize serial value: %w", err)
+						}
+						fieldBuffer = serialized
 					} else if colMeta.DefaultValue != nil {
 						if colMeta.DefaultValue == "CURRENT_TIMESTAMP" {
-							// Store current timestamp as int64 microseconds since epoch
-							insertRow[colMeta.Idx-1] = time.Now().UnixMicro()
+							// Store current timestamp as int64 microseconds
+							ts := time.Now()
+							serialized, err := serializers.TimestampSerializerInstance.Serialize(allocator, &ts)
+							if err != nil {
+								return fmt.Errorf("failed to serialize current timestamp: %w", err)
+							}
+							fieldBuffer = serialized
 						} else {
-							insertRow[colMeta.Idx-1] = colMeta.DefaultValue
+							// TODO: handle other default values
+							return fmt.Errorf("unsupported default value type")
 						}
 					}
 				}
+
+				insertRowBuffers[colMeta.Idx-1] = fieldBuffer
 			}
 
 			// Проверяем NOT NULL constraints
 			for colName, colMeta := range meta.Columns {
 				if !colMeta.IsNullable {
-					if val := insertRow[colMeta.Idx-1]; val == nil {
+					if insertRowBuffers[colMeta.Idx-1] == nil {
 						return fmt.Errorf("null value in column %s violates not-null constraint", colName)
 					}
 				}
 			}
 
-			// Проверяем UNIQUE constraints
-			// TODO сделать нормальный UNIQUE для быстрой проверки на стороне индекса,
-			// возможно через фильтр блума
-
-			// for colName, colMeta := range meta.Columns {
-			// 	if colMeta.IsUnique || colMeta.IsPrimaryKey {
-			// 		if value, exists := value[colName]; exists {
-			// 			prefix := t.getRowPrefixKey()
-			// 			kvMap, err := tx.Scan([]byte(prefix), core.IteratorTypeAll, -1)
-			// 			if err != nil {
-			// 				return err
-			// 			}
-			// 			for _, val := range kvMap {
-			// 				var rowData map[string]interface{}
-			// 				if err := json.Unmarshal([]byte(val), &rowData); err != nil {
-			// 					continue
-			// 				}
-			// 				if rowData[colName] == value {
-			// 					return fmt.Errorf("duplicate key value violates unique constraint \"%s\"", colName)
-			// 				}
-			// 			}
-			// 		}
-			// 	}
-			// }
-
-			// Генерируем уникальный ID для строки
-
-			primaryKeys := make([]interface{}, 0, len(meta.PrimaryKeys))
+			// Генерируем primary key для rowKey
+			primaryKeyBuffers := make([][]byte, 0, len(meta.PrimaryKeys))
 			for _, pkIdx := range meta.PrimaryKeys {
-				if insertRow[pkIdx-1] == nil {
+				if insertRowBuffers[pkIdx-1] == nil {
 					return fmt.Errorf("primary key column index %d cannot be null", pkIdx)
 				}
-				primaryKeys = append(primaryKeys, insertRow[pkIdx-1])
+				primaryKeyBuffers = append(primaryKeyBuffers, insertRowBuffers[pkIdx-1])
 			}
 
 			// Обязательно должен быть rowID
-			if len(primaryKeys) == 0 {
+			if len(primaryKeyBuffers) == 0 {
 				return fmt.Errorf("cannot determine row ID for table %s", tableName)
 			}
+
+			// Создаем ключи из буферов для getRowKey
+			// Нужно десериализовать primaryKeyBuffers в interface{} для совместимости
+			primaryKeys := make([]interface{}, 0, len(primaryKeyBuffers))
+			for i, pkIdx := range meta.PrimaryKeys {
+				colMeta := sortedCols[pkIdx-1].meta
+				buf := primaryKeyBuffers[i]
+				deserialized, err := serializers.DeserializeGeneric(buf, colMeta.Type)
+				if err != nil {
+					return fmt.Errorf("failed to deserialize primary key: %w", err)
+				}
+				primaryKeys = append(primaryKeys, deserialized.IntoGo())
+			}
+
 			// Сохраняем строку
 			rowKey := t.getRowKey(primaryKeys)
 
@@ -111,14 +149,16 @@ func (t *Table) Insert(tableName string, values [][]interface{}, columnNames []s
 				return fmt.Errorf("duplicate key value violates primary key constraint")
 			}
 
-			rowData, err := json.Marshal(insertRow)
+			// Упаковываем row в бинарный формат
+			packedRow, err := schema.Pack(allocator, insertRowBuffers)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to pack row: %w", err)
 			}
-			tx.Write(rowKey, rowData)
-			logger.Debug("DEBUG: Saved row: ",
+
+			tx.Write(rowKey, packedRow.BufferPtr)
+			logger.Debug("DEBUG: Saved row (binary): ",
 				zap.String("rowKey", string(rowKey)),
-				zap.String("rowData", string(rowData)),
+				zap.Int("rowSize", len(packedRow.BufferPtr)),
 			)
 		}
 

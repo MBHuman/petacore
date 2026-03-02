@@ -461,8 +461,8 @@ func TestDistributedStorageInitialData(t *testing.T) {
 
 	// Предварительно заполняем kvStore
 	ctx := context.Background()
-	kvStore.Put(ctx, []byte("existing1"), "value1", 1)
-	kvStore.Put(ctx, []byte("existing2"), "value2", 2)
+	kvStore.Put(ctx, []byte("existing1"), []byte("value1"), 1)
+	kvStore.Put(ctx, []byte("existing2"), []byte("value2"), 2)
 
 	ds := storage.NewDistributedStorage(kvStore, core.ReadCommitted)
 	if err := ds.Start(); err != nil {

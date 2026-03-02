@@ -3,6 +3,8 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"petacore/internal/utils"
+	"petacore/sdk/pmem"
 	"sync"
 	"sync/atomic"
 )
@@ -22,7 +24,8 @@ func NewConcurrentHashMap() *ConcurrentHashMap {
 
 // Get retrieves a skip list map for a given key
 func (chm *ConcurrentHashMap) Get(key []byte) (*ConcurrentSkipListMap[interface{}], bool) {
-	val, ok := chm.data.Load(string(key))
+	// Zero-copy conversion for lookup
+	val, ok := chm.data.Load(utils.BytesToString(key))
 	if !ok {
 		return nil, false
 	}
@@ -31,12 +34,14 @@ func (chm *ConcurrentHashMap) Get(key []byte) (*ConcurrentSkipListMap[interface{
 
 // ComputeIfAbsent gets or creates a skip list map for a given key
 func (chm *ConcurrentHashMap) ComputeIfAbsent(key []byte, mappingFunc func() *ConcurrentSkipListMap[interface{}]) *ConcurrentSkipListMap[interface{}] {
-	insertKey := make([]byte, len(key))
-	copy(insertKey, key)
-
-	if val, ok := chm.data.Load(string(insertKey)); ok {
+	// Try fast path with zero-copy lookup first
+	if val, ok := chm.data.Load(utils.BytesToString(key)); ok {
 		return val.(*ConcurrentSkipListMap[interface{}])
 	}
+
+	// Only copy key when we need to store it (slow path)
+	insertKey := make([]byte, len(key))
+	copy(insertKey, key)
 
 	newVal := mappingFunc()
 	actual, loaded := chm.data.LoadOrStore(string(insertKey), newVal)
@@ -54,7 +59,8 @@ func (chm *ConcurrentHashMap) Put(key []byte, value *ConcurrentSkipListMap[inter
 
 // Delete removes a key from the map
 func (chm *ConcurrentHashMap) Delete(key []byte) {
-	_, loaded := chm.data.LoadAndDelete(string(key))
+	// Zero-copy conversion for delete
+	_, loaded := chm.data.LoadAndDelete(utils.BytesToString(key))
 	if loaded {
 		chm.size.Add(^uint64(0))
 	}
@@ -68,14 +74,21 @@ func (chm *ConcurrentHashMap) Size() uint64 {
 
 // MVCC implements Multi-Version Concurrency Control
 type MVCC struct {
-	versions *ConcurrentHashMap
+	versions  *ConcurrentHashMap
+	allocator pmem.Allocator // allocator для временных данных
 }
 
 // NewMVCC creates a new MVCC instance
 func NewMVCC() *MVCC {
 	return &MVCC{
-		versions: NewConcurrentHashMap(),
+		versions:  NewConcurrentHashMap(),
+		allocator: nil, // будет установлен при первом использовании
 	}
+}
+
+// SetAllocator устанавливает allocator
+func (mvcc *MVCC) SetAllocator(allocator pmem.Allocator) {
+	mvcc.allocator = allocator
 }
 
 // Read retrieves the value for a key at a specific version
@@ -107,6 +120,10 @@ func (mvcc *MVCC) Write(key []byte, value string, version int64) {
 		// Очищаем head forward pointers
 		for i := 0; i < maxLevel; i++ {
 			sl.head.forward[i] = nil
+		}
+		// Устанавливаем allocator если есть
+		if mvcc.allocator != nil {
+			sl.SetAllocator(mvcc.allocator)
 		}
 		return sl
 	})

@@ -8,6 +8,7 @@ import (
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
 
 	"go.uber.org/zap"
 )
@@ -16,12 +17,14 @@ type ExecutorContext struct {
 	Database                string
 	Schema                  string
 	IsInformationSchemaInit bool
+	Allocator               pmem.Allocator
 }
 
-func ExecuteStatement(stmt statements.SQLStatement, storage *storage.DistributedStorageVClock, sessionParams map[string]string) (*table.ExecuteResult, error) {
+func ExecuteStatement(allocator pmem.Allocator, stmt statements.SQLStatement, storage *storage.DistributedStorageVClock, sessionParams map[string]string) (*table.ExecuteResult, error) {
 	exCtx := ExecutorContext{
-		Database: "testdb",
-		Schema:   "public",
+		Database:  "testdb",
+		Schema:    "public",
+		Allocator: allocator,
 	}
 
 	if val, ok := sessionParams["__information_schema"]; ok {
@@ -44,7 +47,7 @@ func ExecuteStatement(stmt statements.SQLStatement, storage *storage.Distributed
 	case *statements.SetStatement:
 		return nil, ExecuteSet(s, storage, sessionParams, exCtx)
 	case *statements.ShowStatement:
-		return ExecuteShow(s, storage, sessionParams, exCtx)
+		return ExecuteShow(allocator, s, storage, sessionParams, exCtx)
 	default:
 		return nil, fmt.Errorf("unsupported statement type: %s", stmt.Type())
 	}
@@ -65,10 +68,11 @@ func ExecuteSelectWithPlanner(stmt *statements.SelectStatement, storage *storage
 
 	// 2. Выполняем план
 	executorCtx := planner.ExecutorContext{
-		Database: exCtx.Database,
-		Schema:   exCtx.Schema,
-		Storage:  storage,
-		GoCtx:    context.Background(),
+		Database:  exCtx.Database,
+		Schema:    exCtx.Schema,
+		Storage:   storage,
+		GoCtx:     context.Background(),
+		Allocator: exCtx.Allocator,
 	}
 
 	logger.Debugf("Executing query plan: ", zap.Any("queryPlan", queryPlan))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 )
 
 // SubstringFunction implements PostgreSQL substring(text, int, int)
@@ -22,8 +23,8 @@ func (f *SubstringFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1009,
 		ProName:     "SUBSTRING",
-		ProArgTypes: []psdk.OID{psdk.PTypeText, psdk.PTypeInt4, psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText, ptypes.PTypeInt4, ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeText,
 	}
 }
 

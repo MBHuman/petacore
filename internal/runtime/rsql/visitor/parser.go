@@ -2,15 +2,15 @@ package visitor
 
 import (
 	"fmt"
-	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
+	"petacore/sdk/pmem"
 
 	"github.com/antlr4-go/antlr/v4"
 )
 
 // ParseSQL парсит SQL запрос с помощью ANTLR
-func ParseSQL(query string) (statements.SQLStatement, error) {
+func ParseSQL(allocator pmem.Allocator, query string) (statements.SQLStatement, error) {
 	input := antlr.NewInputStream(query)
 	lexer := parser.NewsqlLexer(input)
 	stream := antlr.NewCommonTokenStream(lexer, 0)
@@ -21,7 +21,7 @@ func ParseSQL(query string) (statements.SQLStatement, error) {
 	p.BuildParseTrees = true
 
 	tree := p.Query()
-	listener := &sqlListener{}
+	listener := &sqlListener{allocator: allocator}
 	antlr.ParseTreeWalkerDefault.Walk(listener, tree)
 
 	if errorListener.err != nil {
@@ -29,9 +29,7 @@ func ParseSQL(query string) (statements.SQLStatement, error) {
 	}
 
 	if listener.stmt == nil {
-		return nil, fmt.Errorf("failed to parse SQL query with err: %v", listener.err)
+		return nil, fmt.Errorf("[ParseSQL] failed to parse SQL query with err: %v", listener.err)
 	}
-
-	logger.Debugf("DEBUG: Parsed statement type: %s\n", listener.stmt.Type())
 	return listener.stmt, nil
 }

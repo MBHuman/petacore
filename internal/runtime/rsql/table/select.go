@@ -6,6 +6,9 @@ import (
 	"petacore/internal/core"
 	"petacore/internal/logger"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 	"sort"
 
 	"go.uber.org/zap"
@@ -13,6 +16,7 @@ import (
 
 // Select выполняет SELECT запрос
 func (t *Table) Select(
+	allocator pmem.Allocator,
 	tx *storage.DistributedTransactionVClock,
 	tableName string,
 	columns []SelectColumn,
@@ -53,6 +57,15 @@ func (t *Table) Select(
 		return tableColumns[i].Idx < tableColumns[j].Idx
 	})
 
+	// Build schemaFields in the same Idx order as the stored rows
+	schemaFields := make([]serializers.FieldDef, 0, len(tableColumns))
+	for _, col := range tableColumns {
+		schemaFields = append(schemaFields, serializers.FieldDef{
+			Name: col.Name,
+			OID:  col.Type,
+		})
+	}
+
 	logger.Debug("Table columns", zap.Any("columns", tableColumns))
 	logger.Debug("Select columns", zap.Any("columns", columns))
 
@@ -78,66 +91,25 @@ func (t *Table) Select(
 		}
 		idxCnt++
 	}
+	schema := serializers.NewBaseSchema(schemaFields)
 
 	// Сканируем все строки
 	prefix := t.getRowPrefixKey()
-	// TODO сюда можно захардкодить системные таблицы, чтобы много не переписывать
 	kvMap, err := tx.Scan([]byte(prefix), core.IteratorTypeAll, limit)
 	if err != nil {
 		return nil, err
 	}
 
-	results := make([][]interface{}, 0, 10)
+	results := make([]*ptypes.Row, 0) // TODO переделать на итератор
 
 	for _, value := range kvMap {
-		// TODO пересмотреть концепцию хранения строк, нужна унификация
-		var singleRow []interface{}
-		if err := json.Unmarshal([]byte(value), &singleRow); err != nil {
-			logger.Error("Failed to unmarshal", zap.Error(err))
-			continue
-		}
-		// logger.Debugf("Single row data: %+v\n", singleRow)
-
-		resultRow := make([]interface{}, 0, len(finalColumns))
-
-		for _, finalColumn := range finalColumns {
-			if tableColumn, ok := tableColumnsMap[finalColumn.Name]; ok {
-				raw := singleRow[tableColumn.Idx-1]
-
-				// Convert JSON-decoded numbers (which become float64) back to
-				// integer types for timestamp/bigint/interval/int columns so
-				// downstream code sees the original integer-like types.
-				switch finalColumn.Type {
-				case ColTypeTimestamp, ColTypeTimestampTz, ColTypeBigInt, ColTypeInterval:
-					if f, ok := raw.(float64); ok {
-						raw = int64(f)
-					}
-				case ColTypeInt:
-					if f, ok := raw.(float64); ok {
-						raw = int(int64(f))
-					}
-				}
-
-				resultRow = append(resultRow, raw)
-				continue
-			}
-			return nil, fmt.Errorf("column %s not found in table columns map", finalColumn.Name)
-		}
-
-		results = append(results, resultRow)
-	}
-
-	// Применяем LIMIT
-	// TODO убрать на уровень executor
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
+		results = append(results, ptypes.RowFactory(value))
 	}
 
 	execResult := &ExecuteResult{
-		Rows:    results,
-		Columns: finalColumns,
+		Rows:   results,
+		Schema: schema,
 	}
-	logger.Debug("Select result: ", zap.Any("result", execResult))
 
 	return execResult, nil
 }

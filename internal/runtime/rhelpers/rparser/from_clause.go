@@ -2,7 +2,6 @@ package rparser
 
 import (
 	"fmt"
-	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/statements"
 )
@@ -30,12 +29,11 @@ func ParseFromClause(ctx parser.IFromClauseContext) (*statements.FromClause, err
 				}
 
 				if subSelect := tf.SelectStatement(); subSelect != nil {
-					logger.Debugf("DEBUG: parsing FROM subquery")
 					if selectStmt, ok := subSelect.(*parser.SelectStatementContext); ok {
 						var err error
 						from.SelectStatement, err = ParseSelectStatement(selectStmt)
 						if err != nil {
-							return nil, fmt.Errorf("Error parsing subquery in FROM clause: %v", err)
+							return nil, fmt.Errorf("[ParseFromClause] error parsing subquery in FROM clause: %v", err)
 						}
 						if tf.Alias() != nil {
 							from.Alias = tf.Alias().GetText()
@@ -55,7 +53,7 @@ func ParseFromClause(ctx parser.IFromClauseContext) (*statements.FromClause, err
 			}
 			// Note: we don't support comma-separated subselects here yet
 			if subSelect := tf.SelectStatement(); subSelect != nil {
-				logger.Debugf("DEBUG: encountered subquery as additional tableFactor — treating as unnamed subquery join not yet supported")
+				return nil, fmt.Errorf("[ParseFromClause] comma-separated subqueries in FROM clause not supported")
 			}
 
 			from.Joins = append(from.Joins, join)

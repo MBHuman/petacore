@@ -3,75 +3,86 @@ package rparser
 import (
 	"context"
 	"fmt"
-	"petacore/internal/logger"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/rops"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
+	"strings"
 )
 
-// ParseConcatExpression handles string concatenation with ||
-func ParseConcatExpression(ctx context.Context, concatExpr parser.IConcatExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// logger.Debug("ParseConcatExpression")
+func ParseConcatExpression(allocator pmem.Allocator, ctx context.Context, concatExpr parser.IConcatExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	if concatExpr == nil {
 		return nil, nil
 	}
 
-	// Get all additive expressions to concatenate
 	exprs := concatExpr.AllAdditiveExpression()
 	if len(exprs) == 0 {
 		return nil, nil
 	}
 
-	// If only one expression and no CONCAT operators, return it directly
 	if len(exprs) == 1 && len(concatExpr.AllCONCAT()) == 0 {
-		return ParseAdditiveExpression(ctx, exprs[0], row, subExec)
+		return ParseAdditiveExpression(allocator, ctx, exprs[0], row, subExec)
 	}
 
-	// Multiple expressions with CONCAT, concatenate as strings
-	result := &rmodels.ResultRowsExpression{
-		Row: &table.ExecuteResult{
-			Rows:    [][]interface{}{{""}},
-			Columns: []table.TableColumn{{Type: table.ColTypeString}},
-		},
-	}
+	fields := []serializers.FieldDef{{
+		Name: "concat_result",
+		OID:  ptypes.PTypeText,
+	}}
+	resultSchema := serializers.NewBaseSchema(fields)
+
+	// накапливаем результат как string — проще и надёжнее
+	var accumulated strings.Builder
+
 	for _, e := range exprs {
-		val, err := ParseAdditiveExpression(ctx, e, row, subExec)
+		val, err := ParseAdditiveExpression(allocator, ctx, e, row, subExec)
 		if err != nil {
 			return nil, err
 		}
-		if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok {
-			err = checkConcatExpr(result, valExpr)
-			if err != nil {
-				return nil, err
-			}
-			if val != nil {
-				result.Row.Rows[0][0] = fmt.Sprintf("%v", result.Row.Rows[0][0]) + fmt.Sprintf("%v", valExpr.Row.Rows[0][0])
-			}
-		} else {
-			return nil, fmt.Errorf("concatenation supports only result row expressions")
+
+		valExpr, ok := val.(*rmodels.ResultRowsExpression)
+		if !ok {
+			return nil, fmt.Errorf("[ParseConcatExpression] concatenation supports only result row expressions")
 		}
 
-	}
-	logger.Debugf("Concatenated result: %s\n", result)
-	return result, nil
-}
+		if len(valExpr.Row.Rows) != 1 || len(valExpr.Row.Schema.Fields) != 1 {
+			return nil, fmt.Errorf("[ParseConcatExpression] expected single value for concatenation, got %d rows and %d fields",
+				len(valExpr.Row.Rows), len(valExpr.Row.Schema.Fields))
+		}
 
-func checkConcatExpr(a, b *rmodels.ResultRowsExpression) error {
-	if a == nil || b == nil {
-		return fmt.Errorf("nil operand in concatenation")
+		valField, oid, err := valExpr.Row.Schema.GetField(valExpr.Row.Rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("[ParseConcatExpression] failed to get field: %v", err)
+		}
+
+		// конвертируем любой тип в строку через каст
+		str, err := rops.CoerceToString(allocator, valField, oid)
+		if err != nil {
+			return nil, fmt.Errorf("[ParseConcatExpression] failed to coerce value to string: %v", err)
+		}
+
+		accumulated.WriteString(str)
 	}
-	if len(a.Row.Rows) == 0 || len(b.Row.Rows) == 0 {
-		return fmt.Errorf("empty rows in concatenation")
+
+	finalStr := accumulated.String()
+
+	resultBuf, err := serializers.TextSerializerInstance.Serialize(allocator, finalStr)
+	if err != nil {
+		return nil, fmt.Errorf("[ParseConcatExpression] failed to serialize result: %v", err)
 	}
-	if len(a.Row.Columns) == 0 || len(b.Row.Columns) == 0 {
-		return fmt.Errorf("empty columns in concatenation")
+
+	resultRow, err := resultSchema.Pack(allocator, [][]byte{resultBuf})
+	if err != nil {
+		return nil, fmt.Errorf("[ParseConcatExpression] failed to pack result: %v", err)
 	}
-	if len(a.Row.Rows) > 1 || len(b.Row.Rows) > 1 {
-		return fmt.Errorf("concatenation supports only single-row expressions")
-	}
-	if a.Row.Columns[0].Type != table.ColTypeString || b.Row.Columns[0].Type != table.ColTypeString {
-		return fmt.Errorf("concatenation supports only string types")
-	}
-	return nil
+
+	return &rmodels.ResultRowsExpression{
+		Row: &table.ExecuteResult{
+			Rows:   []*ptypes.Row{resultRow},
+			Schema: resultSchema,
+		},
+	}, nil
 }

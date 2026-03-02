@@ -2,18 +2,16 @@ package visitor
 
 import (
 	"errors"
-	"fmt"
 	"petacore/internal/runtime/parser"
-	"petacore/internal/runtime/rhelpers/rparser"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
+	ptypes "petacore/sdk/types"
 	"strconv"
 	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
 )
 
-// TODO убрать хардкодинг типов данных и ограничений
 func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatementContext) {
 	// Если после парсинга stmt не создан, явно записываем ошибку
 	stmt := &statements.CreateTableStatement{}
@@ -35,10 +33,10 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 		}
 		if colDef.DataType() != nil {
 			dataTypeText := strings.ToUpper(colDef.DataType().GetText())
-			col.Type = rparser.ParseDataType(dataTypeText)
+			col.Type = ptypes.ParseDataType(dataTypeText)
 			if strings.Contains(dataTypeText, "SERIAL") {
 				col.IsSerial = true
-				col.Type = table.ColTypeInt // SERIAL is integer
+				col.Type = ptypes.PTypeInt8 // SERIAL is integer
 			}
 		}
 
@@ -102,7 +100,7 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 
 	allColumnNames := ctx.AllColumnName()
 	if len(primaryKeys) > 0 && len(allColumnNames) > 0 {
-		l.err = errors.New("PRIMARY KEY already defined in column definitions")
+		l.err = errors.New("[EnterCreateTableStatement] PRIMARY KEY already defined in column definitions")
 		return // PRIMARY KEY already defined in column definitions
 	}
 
@@ -126,8 +124,5 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 
 	stmt.PrimaryKeys = primaryKeys
 
-	if stmt == nil && l.err == nil {
-		l.err = fmt.Errorf("CREATE TABLE: unsupported or invalid syntax")
-	}
 	l.stmt = stmt
 }

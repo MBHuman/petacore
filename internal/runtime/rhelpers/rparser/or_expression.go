@@ -7,16 +7,16 @@ import (
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
 )
 
 // parseOrExpression handles OR expressions
-func ParseOrExpression(orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	return ParseOrExpressionWithContext(context.Background(), orExpr, row, subExec)
+func ParseOrExpression(allocator pmem.Allocator, orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
+	return ParseOrExpressionWithContext(allocator, context.Background(), orExpr, row, subExec)
 }
 
 // ParseOrExpressionWithContext парсит OR выражение с контекстом
-func ParseOrExpressionWithContext(ctx context.Context, orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// logger.Debug("ParseOrExpression")
+func ParseOrExpressionWithContext(allocator pmem.Allocator, ctx context.Context, orExpr parser.IOrExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	if orExpr == nil {
 		return nil, nil
 	}
@@ -27,7 +27,7 @@ func ParseOrExpressionWithContext(ctx context.Context, orExpr parser.IOrExpressi
 	}
 
 	// Evaluate first AND expression
-	result, err := ParseAndExpression(ctx, andExprs[0], row, subExec)
+	result, err := ParseAndExpression(allocator, ctx, andExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func ParseOrExpressionWithContext(ctx context.Context, orExpr parser.IOrExpressi
 
 		// If multiple AND expressions connected by OR
 		for i := 1; i < len(andExprs); i++ {
-			rightVal, err := ParseAndExpression(ctx, andExprs[i], row, subExec)
+			rightVal, err := ParseAndExpression(allocator, ctx, andExprs[i], row, subExec)
 			if err != nil {
 				return nil, err
 			}

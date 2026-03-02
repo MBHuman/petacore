@@ -10,13 +10,15 @@ import (
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 	"regexp"
-	"strings"
 
 	"go.uber.org/zap"
 )
 
-func getSubqueryCache(statement *statements.SelectStatement) map[*statements.SelectStatement]interface{} {
+func getSubqueryCache(statement *statements.SelectStatement) map[*statements.SelectStatement]*ptypes.Row {
 	if statement == nil {
 		return nil
 	}
@@ -24,9 +26,13 @@ func getSubqueryCache(statement *statements.SelectStatement) map[*statements.Sel
 }
 
 // parseComparisonExpression handles comparison expressions including IN, LIKE, IS NULL
-func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// getSubqueryCache извлекает кэш подзапросов из row, если возможно
-
+func ParseComparisonExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	compExpr parser.IComparisonExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (rmodels.Expression, error) {
 	// logger.Debug("ParseComparisonExpression")
 	if compExpr == nil {
 		return nil, nil
@@ -37,7 +43,7 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 		return nil, nil
 	}
 
-	left, err := ParseConcatExpression(ctx, concatExprs[0], row, subExec)
+	left, err := ParseConcatExpression(allocator, ctx, concatExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
 	}
@@ -45,14 +51,14 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 	// Если правый операнд есть
 	var right rmodels.Expression
 	if len(concatExprs) > 1 {
-		right, err = ParseConcatExpression(ctx, concatExprs[1], row, subExec)
+		right, err = ParseConcatExpression(allocator, ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	// Если один из операндов — SubqueryExpression, извлекаем скалярное значение и используем кэш
-	var scalarLeft, scalarRight interface{}
+	var scalarLeft, scalarRight *ptypes.Row
 	if subq, ok := left.(*rmodels.SubqueryExpression); ok {
 		cache := getSubqueryCache(subq.Select)
 		if cache != nil {
@@ -63,8 +69,8 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 				if err != nil {
 					return nil, err
 				}
-				if res != nil && len(res.Rows) > 0 && len(res.Rows[0]) > 0 {
-					scalarLeft = res.Rows[0][0]
+				if res != nil && len(res.Rows) > 0 {
+					scalarLeft = res.Rows[0]
 					cache[subq.Select] = scalarLeft
 				}
 			}
@@ -73,7 +79,19 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 
 	// Подставляем скалярные значения вместо выражений
 	if scalarLeft != nil {
-		left = &rmodels.ResultRowsExpression{Row: &table.ExecuteResult{Rows: [][]interface{}{{scalarLeft}}, Columns: []table.TableColumn{{Type: table.ColTypeString}}}}
+		// Создаем ResultRowsExpression с правильной структурой
+		// Используем первое поле из scalarLeft для определения типа
+		fields := []serializers.FieldDef{{
+			Name: "?column?",
+			OID:  ptypes.PTypeText, // default to text, может быть улучшено
+		}}
+		resultSchema := serializers.NewBaseSchema(fields)
+		left = &rmodels.ResultRowsExpression{
+			Row: &table.ExecuteResult{
+				Rows:   []*ptypes.Row{scalarLeft},
+				Schema: resultSchema,
+			},
+		}
 	}
 
 	// OPERATOR: =, !=, <, >, <=, >=, LIKE, ~ etc (смотря что в грамматике)
@@ -86,25 +104,31 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 			switch l := left.(type) {
 			case *rmodels.BoolExpression:
 				return l, nil
-
 			case *rmodels.ResultRowsExpression:
 				// Проверим, что это 1x1 и bool
-				if err := checkBoolSingleCell(l); err != nil {
-					return nil, err
+				// TODO добавить проверки на 1x1 они постоянно идут, надо это учитывать
+				val, oid, err := l.Row.Schema.GetField(l.Row.Rows[0], 0)
+				if err != nil {
+					return nil, fmt.Errorf("error getting field from result row: %w", err)
 				}
-				bv, ok := l.Row.Rows[0][0].(bool)
-				if !ok {
-					return nil, fmt.Errorf("expected bool value, got %T", l.Row.Rows[0][0])
+				desVal, err := serializers.DeserializeGeneric(val, oid)
+				if err != nil {
+					return nil, fmt.Errorf("error deserializing value: %w", err)
 				}
-				return &rmodels.BoolExpression{Value: bv}, nil
-
+				if oid == ptypes.PTypeBool {
+					bv, ok := ptypes.TryIntoBool(desVal)
+					if !ok {
+						return nil, fmt.Errorf("expected bool value, got %T", desVal)
+					}
+					return &rmodels.BoolExpression{Value: bv.IntoGo()}, nil
+				}
 			default:
 				return nil, fmt.Errorf("left expression is not boolean (got %T)", left)
 			}
 		}
 
 		// Нормальный бинарный case: left OP right
-		right, err = ParseConcatExpression(ctx, concatExprs[1], row, subExec)
+		right, err = ParseConcatExpression(allocator, ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
@@ -123,8 +147,7 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 				return nil, err
 			}
 			logger.Debug("Getting value from subquery result", zap.Any("result", res))
-			// if res != nil && len(res.Rows) > 0 && len(res.Rows[0]) > 0 {
-			scalarRight = res.Rows[0][0]
+			scalarRight = res.Rows[0]
 			// 	cache[subq.Select] = scalarRight
 			// }
 			// }
@@ -132,7 +155,18 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 		}
 
 		if scalarRight != nil {
-			right = &rmodels.ResultRowsExpression{Row: &table.ExecuteResult{Rows: [][]interface{}{{scalarRight}}, Columns: []table.TableColumn{{Type: table.ColTypeString}}}}
+			// Создаем ResultRowsExpression с правильной структурой
+			fields := []serializers.FieldDef{{
+				Name: "?column?",
+				OID:  ptypes.PTypeText, // default
+			}}
+			resultSchema := serializers.NewBaseSchema(fields)
+			right = &rmodels.ResultRowsExpression{
+				Row: &table.ExecuteResult{
+					Rows:   []*ptypes.Row{scalarRight},
+					Schema: resultSchema,
+				},
+			}
 		}
 
 		lvv, okL := left.(*rmodels.ResultRowsExpression)
@@ -141,89 +175,59 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 			return nil, fmt.Errorf("comparison operands must be ResultRowsExpression, got %T and %T", left, right)
 		}
 
-		// If left expression represents a computed scalar (function result, literal,
-		// or otherwise not bound to a table column), use its scalar value directly
-		// instead of trying to map it to a column from the input row.
-		var lrr *rmodels.ResultRowsExpression
-		if lvv == nil || lvv.Row == nil || len(lvv.Row.Columns) == 0 {
-			return nil, fmt.Errorf("left operand has no result row")
+		// Simplified approach: just use the expressions directly
+		// Both should have Schema with at least one field
+		if lvv == nil || lvv.Row == nil || lvv.Row.Schema == nil || len(lvv.Row.Schema.Fields) == 0 {
+			return nil, fmt.Errorf("left operand has no result row or schema")
+		}
+		if rrr == nil || rrr.Row == nil || rrr.Row.Schema == nil || len(rrr.Row.Schema.Fields) == 0 {
+			return nil, fmt.Errorf("right operand has no result row or schema")
 		}
 
-		leftCol := lvv.Row.Columns[0]
-		// If left is not a table-bound column (no TableIdentifier or placeholder name),
-		// create a ResultRowsExpression from its scalar value.
-		if leftCol.TableIdentifier == "" || leftCol.Name == "?column?" {
-			leftVal := interface{}(nil)
-			if len(lvv.Row.Rows) > 0 && len(lvv.Row.Rows[0]) > 0 {
-				leftVal = lvv.Row.Rows[0][0]
-			}
-			lrr = &rmodels.ResultRowsExpression{
-				Row: &table.ExecuteResult{
-					Rows:    [][]interface{}{{leftVal}},
-					Columns: []table.TableColumn{{Type: leftCol.Type}},
-				},
-			}
-		} else {
-			// Try to find matching column in the input row by TableIdentifier/Name.
-			idxLeft := -1
-			for idx, col := range row.Columns {
-				if col.TableIdentifier == leftCol.TableIdentifier && col.Name == leftCol.Name {
-					idxLeft = idx
-					break
-				}
-			}
-			if idxLeft >= 0 && idxLeft < len(row.Row) {
-				lrr = &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows:    [][]interface{}{{row.Row[idxLeft]}},
-						Columns: []table.TableColumn{row.Columns[idxLeft]},
-					},
-				}
-			} else {
-				// Fallback: use computed scalar value
-				leftVal := interface{}(nil)
-				if len(lvv.Row.Rows) > 0 && len(lvv.Row.Rows[0]) > 0 {
-					leftVal = lvv.Row.Rows[0][0]
-				}
-				lrr = &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows:    [][]interface{}{{leftVal}},
-						Columns: []table.TableColumn{{Type: leftCol.Type}},
-					},
-				}
-			}
+		// Get types from schema
+		lType := lvv.Row.Schema.Fields[0].OID
+		rType := rrr.Row.Schema.Fields[0].OID
+
+		// Get values
+		if len(lvv.Row.Rows) == 0 || len(rrr.Row.Rows) == 0 {
+			return nil, fmt.Errorf("comparison operands have no data rows")
 		}
 
-		if err := checkComparisonExpr(lrr, rrr); err != nil {
-			return nil, err
-		}
-
-		lType := lrr.Row.Columns[0].Type
-		rType := rrr.Row.Columns[0].Type
-
-		// Если типы не совпадают, пробуем привести правую часть к типу левой
-		rightValue := rrr.Row.Rows[0][0]
-		if lType != rType {
-			lOps := lType.TypeOps()
-			convertedValue, err := lOps.CastTo(rightValue, lType)
-			if err == nil {
-				rightValue = convertedValue
-				// Обновляем тип правой части
-				rrr = &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows:    [][]interface{}{{rightValue}},
-						Columns: []table.TableColumn{{Type: lType}},
-					},
-				}
-			}
-		}
-
-		lOps := lType.TypeOps()
-
-		compareResult, err := lOps.Compare(lrr.Row.Rows[0][0], rightValue, lType)
+		leftBuf, lOID, err := lvv.Row.Schema.GetField(lvv.Row.Rows[0], 0)
 		if err != nil {
-			return nil, fmt.Errorf("comparison error: %w", err)
+			return nil, fmt.Errorf("failed to get left field: %w", err)
 		}
+		rightBuf, rOID, err := rrr.Row.Schema.GetField(rrr.Row.Rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get right field: %w", err)
+		}
+
+		// Deserialize values
+		leftVal, err := serializers.DeserializeGeneric(leftBuf, lOID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize left value: %w", err)
+		}
+		rightVal, err := serializers.DeserializeGeneric(rightBuf, rOID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize right value: %w", err)
+		}
+
+		// Type cast if needed: always cast right to left type
+		if lType != rType {
+			castable, ok := rightVal.(ptypes.CastableType[any])
+			if !ok {
+				return nil, fmt.Errorf("cannot compare types %d and %d: right operand (%T) does not support casting", lType, rType, rightVal)
+			}
+			converted, err := castable.CastTo(allocator, lType)
+			if err != nil {
+				return nil, fmt.Errorf("cannot cast right operand from type %d to %d: %w", rType, lType, err)
+			}
+			rightVal = converted
+			rType = lType
+		}
+
+		// Compare values
+		compareResult := leftVal.Compare(rightVal)
 		switch op {
 		case "=":
 			return &rmodels.BoolExpression{Value: compareResult == 0}, nil
@@ -238,34 +242,58 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 		case ">=":
 			return &rmodels.BoolExpression{Value: compareResult >= 0}, nil
 		case "~":
-			if lType == table.ColTypeString {
-				ls := lrr.Row.Rows[0][0].(string)
-				rs := rightValue.(string)
-				matched, _ := regexp.MatchString(rs, ls)
+			if lType == ptypes.PTypeText || lType == ptypes.PTypeVarchar {
+				ls, ok := ptypes.TryIntoText[string](leftVal)
+				if !ok {
+					return nil, fmt.Errorf("left value is not text")
+				}
+				rs, ok := ptypes.TryIntoText[string](rightVal)
+				if !ok {
+					return nil, fmt.Errorf("right value is not text")
+				}
+				matched, _ := regexp.MatchString(rs.IntoGo(), ls.IntoGo())
 				return &rmodels.BoolExpression{Value: matched}, nil
 			}
 			return nil, fmt.Errorf("regex operator ~ requires string operands")
 		case "!~":
-			if lType == table.ColTypeString {
-				ls := lrr.Row.Rows[0][0].(string)
-				rs := rightValue.(string)
-				matched, _ := regexp.MatchString(rs, ls)
+			if lType == ptypes.PTypeText || lType == ptypes.PTypeVarchar {
+				ls, ok := ptypes.TryIntoText[string](leftVal)
+				if !ok {
+					return nil, fmt.Errorf("left value is not text")
+				}
+				rs, ok := ptypes.TryIntoText[string](rightVal)
+				if !ok {
+					return nil, fmt.Errorf("right value is not text")
+				}
+				matched, _ := regexp.MatchString(rs.IntoGo(), ls.IntoGo())
 				return &rmodels.BoolExpression{Value: !matched}, nil
 			}
 			return nil, fmt.Errorf("regex operator !~ requires string operands")
 		case "~*":
-			if lType == table.ColTypeString {
-				ls := lrr.Row.Rows[0][0].(string)
-				rs := rightValue.(string)
-				matched, _ := regexp.MatchString("(?i)"+rs, ls)
+			if lType == ptypes.PTypeText || lType == ptypes.PTypeVarchar {
+				ls, ok := ptypes.TryIntoText[string](leftVal)
+				if !ok {
+					return nil, fmt.Errorf("left value is not text")
+				}
+				rs, ok := ptypes.TryIntoText[string](rightVal)
+				if !ok {
+					return nil, fmt.Errorf("right value is not text")
+				}
+				matched, _ := regexp.MatchString("(?i)"+rs.IntoGo(), ls.IntoGo())
 				return &rmodels.BoolExpression{Value: matched}, nil
 			}
 			return nil, fmt.Errorf("regex operator ~* requires string operands")
 		case "!~*":
-			if lType == table.ColTypeString {
-				ls := lrr.Row.Rows[0][0].(string)
-				rs := rightValue.(string)
-				matched, _ := regexp.MatchString("(?i)"+rs, ls)
+			if lType == ptypes.PTypeText || lType == ptypes.PTypeVarchar {
+				ls, ok := ptypes.TryIntoText[string](leftVal)
+				if !ok {
+					return nil, fmt.Errorf("left value is not text")
+				}
+				rs, ok := ptypes.TryIntoText[string](rightVal)
+				if !ok {
+					return nil, fmt.Errorf("right value is not text")
+				}
+				matched, _ := regexp.MatchString("(?i)"+rs.IntoGo(), ls.IntoGo())
 				return &rmodels.BoolExpression{Value: !matched}, nil
 			}
 			return nil, fmt.Errorf("regex operator !~* requires string operands")
@@ -280,7 +308,7 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 			return left, nil
 		}
 		opExpr := compExpr.OperatorExpr()
-		right, err := ParseConcatExpression(ctx, concatExprs[1], row, subExec)
+		right, err := ParseConcatExpression(allocator, ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
@@ -299,19 +327,27 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 			return nil, fmt.Errorf("IN operator requires ResultRowsExpression on left, got %T", left)
 		}
 
-		if err := checkComparisonExpr(leftExpr, leftExpr); err != nil {
-			return nil, err
+		if leftExpr.Row == nil || leftExpr.Row.Schema == nil || len(leftExpr.Row.Schema.Fields) == 0 {
+			return nil, fmt.Errorf("left expression has no schema")
+		}
+		if len(leftExpr.Row.Rows) == 0 {
+			return nil, fmt.Errorf("left expression has no rows")
 		}
 
-		leftType := leftExpr.Row.Columns[0].Type
-		leftValue := leftExpr.Row.Rows[0][0]
-		leftOps := leftType.TypeOps()
+		leftType := leftExpr.Row.Schema.Fields[0].OID
+		leftBuf, _, err := leftExpr.Row.Schema.GetField(leftExpr.Row.Rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get left field: %w", err)
+		}
+		leftValue, err := serializers.DeserializeGeneric(leftBuf, leftType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize left value: %w", err)
+		}
 
 		// Проверяем каждое значение из IN списка
 		found := false
 
 		if sqCtx := compExpr.SubqueryExpression(); sqCtx != nil {
-			sqCtx := compExpr.SubqueryExpression()
 			selCtx := sqCtx.SelectStatement()
 			if selCtx == nil {
 				return nil, fmt.Errorf("expected subquery in IN operator")
@@ -325,30 +361,27 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 				return nil, err
 			}
 			for _, r := range res.Rows {
-				if len(r) == 0 {
+				if res.Schema == nil || len(res.Schema.Fields) == 0 {
 					continue
 				}
-				rightValue := r[0]
-				rightType := res.Columns[0].Type
-
-				// Приводим правое значение к типу левого, если типы не совпадают
-				if leftType != rightType {
-					convertedValue, err := leftOps.CastTo(rightValue, leftType)
-					if err == nil {
-						rightValue = convertedValue
-					}
+				rightBuf, rOID, err := res.Schema.GetField(r, 0)
+				if err != nil {
+					continue
+				}
+				rightValue, err := serializers.DeserializeGeneric(rightBuf, rOID)
+				if err != nil {
+					continue
 				}
 
-				// Используем Compare для проверки равенства
-				compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
-				if err == nil && compareResult == 0 {
+				// Compare
+				if leftValue.Compare(rightValue) == 0 {
 					found = true
 					break
 				}
 			}
 		} else if compExpr.AllExpression() != nil {
 			for _, e := range compExpr.AllExpression() {
-				v, err := ParseExpression(ctx, e, row, subExec)
+				v, err := ParseExpression(allocator, ctx, e, row, subExec)
 				if err != nil {
 					return nil, err
 				}
@@ -358,20 +391,21 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 					return nil, fmt.Errorf("IN value must be ResultRowsExpression, got %T", v)
 				}
 
-				rightValue := rightExpr.Row.Rows[0][0]
-				rightType := rightExpr.Row.Columns[0].Type
-
-				// Приводим правое значение к типу левого, если типы не совпадают
-				if leftType != rightType {
-					convertedValue, err := leftOps.CastTo(rightValue, leftType)
-					if err == nil {
-						rightValue = convertedValue
-					}
+				if len(rightExpr.Row.Rows) == 0 || rightExpr.Row.Schema == nil {
+					continue
+				}
+				rightBuf, _, err := rightExpr.Row.Schema.GetField(rightExpr.Row.Rows[0], 0)
+				if err != nil {
+					continue
+				}
+				rightType := rightExpr.Row.Schema.Fields[0].OID
+				rightValue, err := serializers.DeserializeGeneric(rightBuf, rightType)
+				if err != nil {
+					continue
 				}
 
-				// Используем Compare для проверки равенства
-				compareResult, err := leftOps.Compare(leftValue, rightValue, leftType)
-				if err == nil && compareResult == 0 {
+				// Compare
+				if leftValue.Compare(rightValue) == 0 {
 					found = true
 					break
 				}
@@ -391,7 +425,7 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 		}
 		not := compExpr.NOT() != nil
 
-		right, err := ParseConcatExpression(ctx, concatExprs[1], row, subExec)
+		right, err := ParseConcatExpression(allocator, ctx, concatExprs[1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
@@ -405,7 +439,9 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 			return nil, err
 		}
 
-		match := strings.Contains(ls, strings.ReplaceAll(strings.ReplaceAll(rs, "%", ""), "_", ""))
+		// используем TypeText для корректного SQL LIKE
+		text := ptypes.TypeText{BufferPtr: []byte(ls)}
+		match := text.Like(rs)
 		if not {
 			match = !match
 		}
@@ -427,40 +463,8 @@ func ParseComparisonExpression(ctx context.Context, compExpr parser.IComparisonE
 		return &rmodels.BoolExpression{Value: isNull}, nil
 	}
 
-	logger.Debug("Comparison expression result", zap.Any("result", left))
+	// logger.Debug("Comparison expression result", zap.Any("result", left))
 	return left, nil
-}
-
-// ---- helpers ----
-
-func checkBoolSingleCell(a *rmodels.ResultRowsExpression) error {
-	if a == nil || a.Row == nil {
-		return fmt.Errorf("nil operand")
-	}
-	if len(a.Row.Columns) != 1 {
-		return fmt.Errorf("expected 1 column, got %d", len(a.Row.Columns))
-	}
-	if len(a.Row.Rows) != 1 || len(a.Row.Rows[0]) != 1 {
-		return fmt.Errorf("expected 1x1 result")
-	}
-	if a.Row.Columns[0].Type != table.ColTypeBool {
-		return fmt.Errorf("expected bool column, got %v", a.Row.Columns[0].Type)
-	}
-	return nil
-}
-
-func checkComparisonExpr(a, b *rmodels.ResultRowsExpression) error {
-	if a == nil || b == nil || a.Row == nil || b.Row == nil {
-		return fmt.Errorf("nil operand in comparison")
-	}
-	if len(a.Row.Columns) != 1 || len(b.Row.Columns) != 1 {
-		return fmt.Errorf("multiple columns in comparison not supported")
-	}
-	if len(a.Row.Rows) != 1 || len(b.Row.Rows) != 1 || len(a.Row.Rows[0]) != 1 || len(b.Row.Rows[0]) != 1 {
-		return fmt.Errorf("comparison supports only 1x1 values")
-	}
-	// Типы не обязаны совпадать - будем пытаться приводить при сравнении
-	return nil
 }
 
 func exprToScalar(e rmodels.Expression) (interface{}, error) {
@@ -468,24 +472,44 @@ func exprToScalar(e rmodels.Expression) (interface{}, error) {
 	case *rmodels.BoolExpression:
 		return v.Value, nil
 	case *rmodels.ResultRowsExpression:
-		if v.Row == nil || len(v.Row.Rows) != 1 || len(v.Row.Rows[0]) != 1 {
+		if v.Row == nil || len(v.Row.Rows) != 1 || v.Row.Schema == nil || len(v.Row.Schema.Fields) != 1 {
 			return nil, fmt.Errorf("expected 1x1 result for scalar, got %v", e.Type())
 		}
-		return v.Row.Rows[0][0], nil
+		buf, oid, err := v.Row.Schema.GetField(v.Row.Rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get field: %w", err)
+		}
+		retval, err := serializers.DeserializeGeneric(buf, oid)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize: %w", err)
+		}
+		return retval, nil
 	default:
 		return nil, fmt.Errorf("unsupported expression type for scalar: %T", e)
 	}
 }
 
 func exprToString(e rmodels.Expression) (string, error) {
-	val, err := exprToScalar(e)
-	if err != nil {
-		return "", err
+	val, ok := e.(*rmodels.ResultRowsExpression)
+	if !ok {
+		return "", fmt.Errorf("exprToString: expected ResultRowsExpression, got %T", e)
 	}
-	if val == nil {
+	if len(val.Row.Rows) == 0 || len(val.Row.Schema.Fields) == 0 {
 		return "", nil
 	}
-	return fmt.Sprintf("%v", val), nil
+
+	buf, oid, err := val.Row.Schema.GetField(val.Row.Rows[0], 0)
+	if err != nil {
+		return "", fmt.Errorf("exprToString: get field: %w", err)
+	}
+
+	switch oid {
+	case ptypes.PTypeText, ptypes.PTypeVarchar:
+		return string(buf), nil
+	default:
+		// для остальных типов — через coerceToString
+		return serializers.CoerceToString(buf, oid)
+	}
 }
 
 func exprIsNull(e rmodels.Expression) (bool, error) {
@@ -493,10 +517,15 @@ func exprIsNull(e rmodels.Expression) (bool, error) {
 	case *rmodels.BoolExpression:
 		return false, nil // bool никогда не NULL в твоей модели
 	case *rmodels.ResultRowsExpression:
-		if v.Row == nil || len(v.Row.Rows) != 1 || len(v.Row.Rows[0]) != 1 {
+		if v.Row == nil || len(v.Row.Rows) != 1 || v.Row.Schema == nil || len(v.Row.Schema.Fields) != 1 {
 			return false, fmt.Errorf("expected 1x1 result for IS NULL")
 		}
-		return v.Row.Rows[0][0] == nil, nil
+		buf, _, err := v.Row.Schema.GetField(v.Row.Rows[0], 0)
+		if err != nil {
+			return false, err
+		}
+		// Check if buf is empty (representing NULL)
+		return len(buf) == 0, nil
 	default:
 		return false, fmt.Errorf("unsupported expression type for IS NULL: %T", e)
 	}

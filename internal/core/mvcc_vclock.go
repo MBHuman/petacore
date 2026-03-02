@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"petacore/internal/utils"
+	intutils "petacore/internal/utils"
 	"sync"
 )
 
@@ -32,8 +32,11 @@ func (m *MVCCWithVClock) WriteWithVClock(key []byte, value []byte, timestamp uin
 		return NewConcurrentSkipListMap[*MVCCVersion]()
 	})
 
+	// Копируем значение для долгосрочного хранения (используем обычное выделение)
+	valueCopy := append([]byte(nil), value...)
+
 	version := &MVCCVersion{
-		Value:       append([]byte(nil), value...),
+		Value:       valueCopy,
 		VectorClock: vclock.Clone(),
 		Timestamp:   timestamp,
 	}
@@ -74,7 +77,8 @@ func (m *MVCCWithVClock) ReadWithSnapshot(key []byte, snapshotVClock *VectorCloc
 	}
 
 	if latestSafe != nil {
-		return append([]byte(nil), latestSafe.Value...), latestSafe.VectorClock, true
+		// Zero-copy: возвращаем прямую ссылку на данные в skip list
+		return latestSafe.Value, latestSafe.VectorClock, true
 	}
 
 	// Нет безопасных версий в snapshot
@@ -103,7 +107,8 @@ func (m *MVCCWithVClock) ReadLatest(key []byte) ([]byte, *VectorClock, bool) {
 		return nil, nil, false
 	}
 
-	return append([]byte(nil), latest.Value...), latest.VectorClock, true
+	// Zero-copy: возвращаем прямую ссылку на данные в skip list
+	return latest.Value, latest.VectorClock, true
 }
 
 // GetVectorClock возвращает Vector Clock для последней версии ключа
@@ -181,7 +186,7 @@ func (m *MVCCWithVClock) ScanWithSnapshot(
 	totalNodes int,
 	currentNodeID string,
 	limit int,
- ) map[string][]byte {
+) map[string][]byte {
 	iterator := m.versions.NewIterator(prefix, it)
 	if iterator == nil {
 		return make(map[string][]byte)
@@ -195,7 +200,7 @@ func (m *MVCCWithVClock) ScanWithSnapshot(
 			break
 		}
 		key := iterator.Key()
-		if !utils.HasPrefix(key, prefix) {
+		if !intutils.HasPrefix(key, prefix) {
 			break
 		}
 		// Для каждого ключа применяем логику ReadWithSnapshot
@@ -220,7 +225,9 @@ func (m *MVCCWithVClock) ScanWithSnapshot(
 		}
 
 		if latestSafe != nil {
-			result[string(key)] = append([]byte(nil), latestSafe.Value...)
+			// Zero-copy: сохраняем прямую ссылку на данные в skip list
+			// Key needs to be copied for map storage
+			result[string(key)] = latestSafe.Value
 			count++
 		}
 	}

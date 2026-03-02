@@ -20,12 +20,17 @@ type WhereClause struct {
 	ExpressionContext parser.IExpressionContext
 }
 
+type OrderDirection int
+
+const (
+	OrderAsc OrderDirection = iota
+	OrderDesc
+)
+
 type OrderByItem struct {
 	ColumnName  string
 	ColumnIndex int
-	// ExpressionContext parser.IExpressionContext
-	// TODO Перевести на enum
-	Direction string // "ASC" or "DESC"
+	Direction   OrderDirection
 }
 
 type FunctionCall struct {

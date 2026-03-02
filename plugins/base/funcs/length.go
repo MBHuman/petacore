@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 	"unicode/utf8"
 )
 
@@ -17,8 +18,8 @@ func (f *LengthFunction) GetFunction() *psdk.Function {
 	return &psdk.Function{
 		OID:         1317,
 		ProName:     "LENGTH",
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeInt4,
 	}
 }
 

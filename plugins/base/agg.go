@@ -5,7 +5,47 @@ import (
 	"errors"
 	"fmt"
 	psdk "petacore/sdk"
+	ptypes "petacore/sdk/types"
 )
+
+// toFloat64Val extracts a float64 from a value, unwrapping AnyWrapper[T] if needed.
+func toFloat64Val(v interface{}) (float64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	if w, ok := v.(interface{ IntoGo() any }); ok {
+		v = w.IntoGo()
+	}
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	}
+	return 0, false
+}
+
+// toStringVal extracts a string from a value, unwrapping AnyWrapper[T] if needed.
+func toStringVal(v interface{}) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	if w, ok := v.(interface{ IntoGo() any }); ok {
+		v = w.IntoGo()
+	}
+	if s, ok := v.(string); ok {
+		return s, true
+	}
+	return "", false
+}
 
 // CountFunction - агрегатная функция COUNT
 type CountFunction struct {
@@ -17,8 +57,8 @@ func (f *CountFunction) GetFunction() *psdk.Function {
 		OID:         2147,
 		ProName:     "COUNT",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt8},
+		ProRetType:  ptypes.PTypeInt8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -42,7 +82,7 @@ func (f *CountFunction) Execute(ctx context.Context, args ...any) (any, error) {
 			count++
 		}
 	}
-	return float64(count), nil
+	return int64(count), nil
 }
 
 // SumFunction - агрегатная функция SUM
@@ -55,8 +95,8 @@ func (f *SumFunction) GetFunction() *psdk.Function {
 		OID:         2108,
 		ProName:     "SUM",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -78,18 +118,11 @@ func (f *SumFunction) Execute(ctx context.Context, args ...any) (any, error) {
 		if val == nil {
 			continue
 		}
-		switch v := val.(type) {
-		case int:
-			sum += float64(v)
-		case int64:
-			sum += float64(v)
-		case float64:
-			sum += v
-		case float32:
-			sum += float64(v)
-		default:
-			return nil, fmt.Errorf("sum can only operate on numeric values, got %T", v)
+		f64, ok := toFloat64Val(val)
+		if !ok {
+			return nil, fmt.Errorf("sum can only operate on numeric values, got %T", val)
 		}
+		sum += f64
 	}
 	return sum, nil
 }
@@ -104,8 +137,8 @@ func (f *AvgFunction) GetFunction() *psdk.Function {
 		OID:         2101,
 		ProName:     "AVG",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -128,18 +161,11 @@ func (f *AvgFunction) Execute(ctx context.Context, args ...any) (any, error) {
 		if val == nil {
 			continue
 		}
-		switch v := val.(type) {
-		case int:
-			sum += float64(v)
-		case int64:
-			sum += float64(v)
-		case float64:
-			sum += v
-		case float32:
-			sum += float64(v)
-		default:
-			return nil, fmt.Errorf("avg can only operate on numeric values, got %T", v)
+		f64, ok := toFloat64Val(val)
+		if !ok {
+			return nil, fmt.Errorf("avg can only operate on numeric values, got %T", val)
 		}
+		sum += f64
 		count++
 	}
 
@@ -160,8 +186,8 @@ func (f *MaxFunction) GetFunction() *psdk.Function {
 		OID:         2116,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -182,50 +208,25 @@ func (f *MaxFunction) Execute(ctx context.Context, args ...any) (any, error) {
 		return nil, nil
 	}
 
-	var maxVal interface{}
+	var maxFloat float64
+	haveVal := false
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if maxVal == nil {
-			maxVal = val
+		f64, ok := toFloat64Val(val)
+		if !ok {
 			continue
 		}
-
-		switch v := val.(type) {
-		case int:
-			if mv, ok := maxVal.(int); ok && v > mv {
-				maxVal = v
-			} else if mv, ok := maxVal.(int64); ok && int64(v) > mv {
-				maxVal = v
-			} else if mv, ok := maxVal.(float64); ok && float64(v) > mv {
-				maxVal = v
-			}
-		case int64:
-			if mv, ok := maxVal.(int64); ok && v > mv {
-				maxVal = v
-			} else if mv, ok := maxVal.(int); ok && v > int64(mv) {
-				maxVal = v
-			} else if mv, ok := maxVal.(float64); ok && float64(v) > mv {
-				maxVal = v
-			}
-		case float64:
-			if mv, ok := maxVal.(float64); ok && v > mv {
-				maxVal = v
-			} else if mv, ok := maxVal.(int); ok && v > float64(mv) {
-				maxVal = v
-			} else if mv, ok := maxVal.(int64); ok && v > float64(mv) {
-				maxVal = v
-			}
-		case string:
-			if mv, ok := maxVal.(string); ok && v > mv {
-				maxVal = v
-			}
+		if !haveVal || f64 > maxFloat {
+			maxFloat = f64
+			haveVal = true
 		}
 	}
-
-	return maxVal, nil
+	if !haveVal {
+		return nil, nil
+	}
+	return maxFloat, nil
 }
 
 // MinFunction - агрегатная функция MIN
@@ -238,8 +239,8 @@ func (f *MinFunction) GetFunction() *psdk.Function {
 		OID:         2131,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeFloat8},
-		ProRetType:  psdk.PTypeFloat8,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeFloat8},
+		ProRetType:  ptypes.PTypeFloat8,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -260,50 +261,25 @@ func (f *MinFunction) Execute(ctx context.Context, args ...any) (any, error) {
 		return nil, nil
 	}
 
-	var minVal interface{}
+	var minFloat float64
+	haveVal := false
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if minVal == nil {
-			minVal = val
+		f64, ok := toFloat64Val(val)
+		if !ok {
 			continue
 		}
-
-		switch v := val.(type) {
-		case int:
-			if mv, ok := minVal.(int); ok && v < mv {
-				minVal = v
-			} else if mv, ok := minVal.(int64); ok && int64(v) < mv {
-				minVal = v
-			} else if mv, ok := minVal.(float64); ok && float64(v) < mv {
-				minVal = v
-			}
-		case int64:
-			if mv, ok := minVal.(int64); ok && v < mv {
-				minVal = v
-			} else if mv, ok := minVal.(int); ok && v < int64(mv) {
-				minVal = v
-			} else if mv, ok := minVal.(float64); ok && float64(v) < mv {
-				minVal = v
-			}
-		case float64:
-			if mv, ok := minVal.(float64); ok && v < mv {
-				minVal = v
-			} else if mv, ok := minVal.(int); ok && v < float64(mv) {
-				minVal = v
-			} else if mv, ok := minVal.(int64); ok && v < float64(mv) {
-				minVal = v
-			}
-		case string:
-			if mv, ok := minVal.(string); ok && v < mv {
-				minVal = v
-			}
+		if !haveVal || f64 < minFloat {
+			minFloat = f64
+			haveVal = true
 		}
 	}
-
-	return minVal, nil
+	if !haveVal {
+		return nil, nil
+	}
+	return minFloat, nil
 }
 
 // MaxFunctionInt - MAX для INT4
@@ -316,8 +292,8 @@ func (f *MaxFunctionInt) GetFunction() *psdk.Function {
 		OID:         2117,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -338,35 +314,26 @@ func (f *MaxFunctionInt) Execute(ctx context.Context, args ...any) (any, error) 
 		return nil, nil
 	}
 
-	var maxVal interface{}
+	var maxVal int64
+	haveVal := false
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if maxVal == nil {
-			maxVal = val
+		f64, ok := toFloat64Val(val)
+		if !ok {
 			continue
 		}
-
-		// Поддержка int, int32, int64
-		switch v := val.(type) {
-		case int:
-			if mv, ok := maxVal.(int); ok && v > mv {
-				maxVal = v
-			}
-		case int32:
-			if mv, ok := maxVal.(int32); ok && v > mv {
-				maxVal = v
-			}
-		case int64:
-			if mv, ok := maxVal.(int64); ok && v > mv {
-				maxVal = v
-			}
+		v := int64(f64)
+		if !haveVal || v > maxVal {
+			maxVal = v
+			haveVal = true
 		}
 	}
-
-	return maxVal, nil
+	if !haveVal {
+		return nil, nil
+	}
+	return int32(maxVal), nil
 }
 
 // MinFunctionInt - MIN для INT4
@@ -379,8 +346,8 @@ func (f *MinFunctionInt) GetFunction() *psdk.Function {
 		OID:         2132,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeInt4},
-		ProRetType:  psdk.PTypeInt4,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeInt4},
+		ProRetType:  ptypes.PTypeInt4,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -401,35 +368,26 @@ func (f *MinFunctionInt) Execute(ctx context.Context, args ...any) (any, error) 
 		return nil, nil
 	}
 
-	var minVal interface{}
+	var minVal int64
+	haveVal := false
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if minVal == nil {
-			minVal = val
+		f64, ok := toFloat64Val(val)
+		if !ok {
 			continue
 		}
-
-		// Поддержка int, int32, int64
-		switch v := val.(type) {
-		case int:
-			if mv, ok := minVal.(int); ok && v < mv {
-				minVal = v
-			}
-		case int32:
-			if mv, ok := minVal.(int32); ok && v < mv {
-				minVal = v
-			}
-		case int64:
-			if mv, ok := minVal.(int64); ok && v < mv {
-				minVal = v
-			}
+		v := int64(f64)
+		if !haveVal || v < minVal {
+			minVal = v
+			haveVal = true
 		}
 	}
-
-	return minVal, nil
+	if !haveVal {
+		return nil, nil
+	}
+	return int32(minVal), nil
 }
 
 // MaxFunctionText - MAX для TEXT
@@ -442,8 +400,8 @@ func (f *MaxFunctionText) GetFunction() *psdk.Function {
 		OID:         2129,
 		ProName:     "MAX",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -464,18 +422,19 @@ func (f *MaxFunctionText) Execute(ctx context.Context, args ...any) (any, error)
 		return nil, nil
 	}
 
-	var maxVal string
+	var maxStr string
 	first := true
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if v, ok := val.(string); ok {
-			if first || v > maxVal {
-				maxVal = v
-				first = false
-			}
+		v, ok := toStringVal(val)
+		if !ok {
+			continue
+		}
+		if first || v > maxStr {
+			maxStr = v
+			first = false
 		}
 	}
 
@@ -483,7 +442,7 @@ func (f *MaxFunctionText) Execute(ctx context.Context, args ...any) (any, error)
 		return nil, nil
 	}
 
-	return maxVal, nil
+	return maxStr, nil
 }
 
 // MinFunctionText - MIN для TEXT
@@ -496,8 +455,8 @@ func (f *MinFunctionText) GetFunction() *psdk.Function {
 		OID:         2145,
 		ProName:     "MIN",
 		IsAggregate: true,
-		ProArgTypes: []psdk.OID{psdk.PTypeText},
-		ProRetType:  psdk.PTypeText,
+		ProArgTypes: []ptypes.OID{ptypes.PTypeText},
+		ProRetType:  ptypes.PTypeText,
 		Meta: psdk.FunctionMeta{
 			ProVariadic: 1,
 		},
@@ -518,18 +477,19 @@ func (f *MinFunctionText) Execute(ctx context.Context, args ...any) (any, error)
 		return nil, nil
 	}
 
-	var minVal string
+	var minStr string
 	first := true
 	for _, val := range values {
 		if val == nil {
 			continue
 		}
-
-		if v, ok := val.(string); ok {
-			if first || v < minVal {
-				minVal = v
-				first = false
-			}
+		v, ok := toStringVal(val)
+		if !ok {
+			continue
+		}
+		if first || v < minStr {
+			minStr = v
+			first = false
 		}
 	}
 
@@ -537,5 +497,5 @@ func (f *MinFunctionText) Execute(ctx context.Context, args ...any) (any, error)
 		return nil, nil
 	}
 
-	return minVal, nil
+	return minStr, nil
 }

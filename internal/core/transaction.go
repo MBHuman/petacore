@@ -2,6 +2,8 @@ package core
 
 import (
 	"errors"
+	"petacore/internal/utils"
+	"petacore/sdk/pmem"
 	"sync"
 )
 
@@ -33,6 +35,7 @@ type Transaction struct {
 	isolationLevel  IsolationLevel
 	snapshotVersion *uint64
 	localWrites     map[string]string
+	allocator       pmem.Allocator // allocator для временных данных
 }
 
 func NewTransaction(mvcc *MVCC, logicalClock *LClock, isolationLevel IsolationLevel) *Transaction {
@@ -41,11 +44,20 @@ func NewTransaction(mvcc *MVCC, logicalClock *LClock, isolationLevel IsolationLe
 	tx.logicalClock = logicalClock
 	tx.isolationLevel = isolationLevel
 	tx.snapshotVersion = nil
+	tx.allocator = nil
 	// Очищаем localWrites, но сохраняем capacity
 	for k := range tx.localWrites {
 		delete(tx.localWrites, k)
 	}
 	return tx
+}
+
+// SetAllocator устанавливает allocator для транзакции
+func (tx *Transaction) SetAllocator(allocator pmem.Allocator) {
+	tx.allocator = allocator
+	if tx.mvcc != nil {
+		tx.mvcc.SetAllocator(allocator)
+	}
 }
 
 func (tx *Transaction) Begin() {
@@ -58,8 +70,8 @@ func (tx *Transaction) Begin() {
 }
 
 func (tx *Transaction) Read(key []byte) (string, bool) {
-	// Сначала проверяем локальные записи
-	if value, ok := tx.localWrites[string(key)]; ok {
+	// Сначала проверяем локальные записи (zero-copy lookup)
+	if value, ok := tx.localWrites[utils.BytesToString(key)]; ok {
 		return value, true
 	}
 
@@ -80,6 +92,7 @@ func (tx *Transaction) Write(key []byte, value string) {
 	if tx.localWrites == nil {
 		tx.localWrites = make(map[string]string)
 	}
+	// Copy key for storage since map will keep it
 	tx.localWrites[string(key)] = value
 }
 
@@ -103,6 +116,7 @@ func (tx *Transaction) Release() {
 	tx.mvcc = nil
 	tx.logicalClock = nil
 	tx.snapshotVersion = nil
+	tx.allocator = nil
 	// Не очищаем localWrites здесь - сделаем при следующем Get из пула
 	transactionPool.Put(tx)
 }

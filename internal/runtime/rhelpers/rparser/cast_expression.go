@@ -5,69 +5,60 @@ import (
 	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
+	"petacore/internal/runtime/rhelpers/rops"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	ptypes "petacore/sdk/types"
 	"strings"
 )
 
-// parseCastExpression handles type casting with ::<type>, COLLATE, AT TIME ZONE
-func ParseCastExpression(ctx context.Context, castExpr parser.ICastExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
-	// logger.Debug("ParseCastExpression")
+func ParseCastExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	castExpr parser.ICastExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (rmodels.Expression, error) {
 	if castExpr == nil {
 		return nil, nil
 	}
 
-	// Get the primary expression
 	primExpr := castExpr.PrimaryExpression()
 	if primExpr == nil {
 		return nil, nil
 	}
 
-	// Parse the primary expression
-	value, err := ParsePrimaryExpression(ctx, primExpr, row, subExec)
+	value, err := ParsePrimaryExpression(allocator, ctx, primExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
-	// Apply postfixes
-	postfixes := castExpr.AllPostfix()
-	for _, postfix := range postfixes {
-		if postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil && postfix.STRING_LITERAL() != nil {
-			// AT TIME ZONE
-			if val, ok := value.(*rmodels.ResultRowsExpression); ok {
-				value = ApplyTimeZone(val, postfix.STRING_LITERAL().GetText())
-			} else {
-				return nil, fmt.Errorf("AT TIME ZONE can only be applied to timestamp expressions")
+	for _, postfix := range castExpr.AllPostfix() {
+		switch {
+		case postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil:
+			val, ok := value.(*rmodels.ResultRowsExpression)
+			if !ok {
+				return nil, fmt.Errorf("[ParseCastExpression] AT TIME ZONE: expected result expression")
 			}
-		} else if postfix.COLLATE() != nil && postfix.QualifiedName() != nil {
-			// COLLATE - for now, ignore
-			// value = applyCollate(value, postfix.QualifiedName().GetText())
-		} else {
-			castingTypes := postfix.AllTypeName()
-			for _, castingOp := range castingTypes {
+			value = ApplyTimeZone(val, postfix.STRING_LITERAL().GetText())
+
+		case postfix.COLLATE() != nil:
+			// игнорируем COLLATE
+
+		default:
+			for _, castingOp := range postfix.AllTypeName() {
 				typeName := strings.ToLower(castingOp.QualifiedName().GetText())
-				colType := table.ColTypeFromString(typeName)
-				if val, ok := value.(*rmodels.ResultRowsExpression); ok {
-					tableIdent := ""
-					if row != nil && len(row.Columns) > 0 {
-						tableIdent = row.Columns[0].TableIdentifier
-					}
-					value, err = CastValue(val, tableIdent, colType)
-				} else if val, ok := value.(*rmodels.BoolExpression); ok {
-					tableIdent := ""
-					if row != nil && len(row.Columns) > 0 {
-						tableIdent = row.Columns[0].TableIdentifier
-					}
-					newVal := &rmodels.ResultRowsExpression{
-						Row: &table.ExecuteResult{
-							Rows:    [][]interface{}{{val.Value}},
-							Columns: []table.TableColumn{{TableIdentifier: tableIdent, Type: table.ColTypeBool}},
-						},
-					}
-					value, err = CastValue(newVal, row.Columns[0].TableIdentifier, colType)
+				targetOID := ptypes.ColTypeFromString(typeName)
+
+				val, ok := value.(*rmodels.ResultRowsExpression)
+				if !ok {
+					return nil, fmt.Errorf("[ParseCastExpression] cast: expected result expression, got %T", value)
 				}
+
+				value, err = rops.CastValue(allocator, val, targetOID)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("[ParseCastExpression] cast to %s: %w", typeName, err)
 				}
 			}
 		}
@@ -76,59 +67,7 @@ func ParseCastExpression(ctx context.Context, castExpr parser.ICastExpressionCon
 	return value, nil
 }
 
-// applyTimeZone applies time zone to a timestamp
-// TODO реализовать корректную работу с часовыми поясами
 func ApplyTimeZone(value *rmodels.ResultRowsExpression, tzStr string) rmodels.Expression {
-	// For simplicity, just return the value, ignore timezone
+	// TODO: реализовать корректную работу с часовыми поясами
 	return value
-}
-
-// castValue performs type casting to the specified type
-// TODO перевести cast в отдельный модуль + пересмотреть работу с типами
-func CastValue(expression *rmodels.ResultRowsExpression, tableIdentifier string, colType table.ColType) (rmodels.Expression, error) {
-	err := checkCastExpr(expression, colType)
-	if err != nil {
-		return nil, err
-	}
-
-	rows := expression.Row.Rows
-	val := rows[0][0]
-
-	typeOps := expression.Row.Columns[0].Type.TypeOps()
-	castedVal, err := typeOps.CastTo(val, colType)
-	if err != nil {
-		return nil, err
-	}
-
-	// Сохраняем имя колонки из исходного выражения
-	colName := "?column?"
-	if len(expression.Row.Columns) > 0 {
-		colName = expression.Row.Columns[0].Name
-	}
-
-	return &rmodels.ResultRowsExpression{
-		Row: &table.ExecuteResult{
-			Rows:    [][]interface{}{{castedVal}},
-			Columns: []table.TableColumn{{TableIdentifier: tableIdentifier, Name: colName, Type: colType}},
-		},
-	}, nil
-}
-
-func checkCastExpr(a *rmodels.ResultRowsExpression, colType table.ColType) error {
-	if a == nil {
-		return fmt.Errorf("nil operand in cast")
-	}
-	if len(a.Row.Rows) == 0 {
-		return fmt.Errorf("empty rows in cast")
-	}
-	if len(a.Row.Columns) == 0 {
-		return fmt.Errorf("empty columns in cast")
-	}
-	if len(a.Row.Columns) > 1 {
-		return fmt.Errorf("cast supports only single-column expressions")
-	}
-	if len(a.Row.Rows) > 1 {
-		return fmt.Errorf("cast supports only single-row expressions")
-	}
-	return nil
 }

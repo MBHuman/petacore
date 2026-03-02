@@ -8,7 +8,8 @@ import (
 	"github.com/jackc/pgx"
 )
 
-func NewPgConnection(t testing.TB) *pgx.ConnPool {
+// NewPgConnectionNoSetup creates a connection without table setup (for parallel tests)
+func NewPgConnectionNoSetup(t testing.TB) *pgx.ConnPool {
 	t.Helper()
 
 	conn, err := pgx.NewConnPool(
@@ -25,10 +26,17 @@ func NewPgConnection(t testing.TB) *pgx.ConnPool {
 	if err != nil {
 		t.Fatalf("Failed to connect to database: %v", err)
 	}
+	return conn
+}
+
+func NewPgConnection(t testing.TB) *pgx.ConnPool {
+	t.Helper()
+
+	conn := NewPgConnectionNoSetup(t)
 
 	// Create table
 
-	_, err = conn.Exec(`CREATE TABLE IF NOT EXISTS test_table (
+	_, err := conn.Exec(`CREATE TABLE IF NOT EXISTS test_table (
 		id SERIAL PRIMARY KEY,
 		value TEXT
 	);`)

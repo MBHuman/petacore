@@ -13,6 +13,9 @@ import (
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 	"strings"
 	"time"
 
@@ -25,6 +28,7 @@ type ExecutorContext struct {
 	Schema           string
 	Storage          *storage.DistributedStorageVClock
 	SubqueryExecutor subquery.SubqueryExecutor
+	Allocator        pmem.Allocator
 	// QueryStartTime   int64 // timestamp in microseconds for NOW() function
 	GoCtx context.Context
 }
@@ -45,7 +49,7 @@ func ExecutePlan(plan *QueryPlan, ctx ExecutorContext) (*table.ExecuteResult, er
 	ctx.GoCtx = context.WithValue(ctx.GoCtx, "queryStartTime", time.Now().UnixMicro())
 
 	// Выполняем в транзакции
-	err = ctx.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+	err = ctx.Storage.RunTransactionWithAllocator(ctx.Allocator, func(tx *storage.DistributedTransactionVClock) error {
 		// Attach subquery executor to the plan so expressions can execute subqueries
 		plan.SubqueryExecutor = func(stmt *statements.SelectStatement) (*table.ExecuteResult, error) {
 			subPlan, err := CreateQueryPlan(stmt, PlannerContext{Database: ctx.Database, Schema: ctx.Schema})
@@ -86,7 +90,6 @@ func executePlanNode(
 		return executeScan(n, plan, ctx, tx, runtimeParams)
 	case *ValuesPlanNode:
 		result, err := executeValues(n, plan, ctx, tx, runtimeParams)
-		logger.Debug("ValuePlanNode result", zap.Any("result", result))
 		return result, err
 	case *ProjectPlanNode:
 		return executeProject(n, plan, ctx, tx, runtimeParams)
@@ -130,7 +133,7 @@ func executeScan(
 
 	// Читаем все строки и все колонки
 	selectColumns := []table.SelectColumn{{IsAll: true}}
-	result, err := tbl.Select(tx, node.TableName, selectColumns, nil, 0)
+	result, err := tbl.Select(ctx.Allocator, tx, node.TableName, selectColumns, nil, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -140,17 +143,19 @@ func executeScan(
 	if tableIdentifier == "" {
 		tableIdentifier = node.TableName
 	}
-	for i := range result.Columns {
-		result.Columns[i].TableIdentifier = tableIdentifier
-		result.Columns[i].OriginalTableName = node.TableName
+	// Store table identifier in TableAlias — keeps Name bare for display
+	if tableIdentifier != "" {
+		for i := range result.Schema.Fields {
+			result.Schema.Fields[i].TableAlias = tableIdentifier
+		}
+		result.Schema.RebuildIndex()
 	}
 
-	logger.Debug("scan result", zap.Int("rows", len(result.Rows)), zap.Int("cols", len(result.Columns)))
+	logger.Debug("scan result", zap.Int("rows", len(result.Rows)), zap.Int("cols", len(result.Schema.Fields)))
 	return result, nil
 }
 
 // executeValues выполняет VALUES узел (SELECT без таблицы)
-// TODO тут могут быть вложенные запросы на expression с подзапросами, надо это учесть
 func executeValues(
 	node *ValuesPlanNode,
 	plan *QueryPlan,
@@ -158,10 +163,10 @@ func executeValues(
 	tx *storage.DistributedTransactionVClock,
 	runtimeParams map[int]interface{},
 ) (*table.ExecuteResult, error) {
-	resultColumns := make([]table.TableColumn, 0, len(node.Columns))
-	row := make([]interface{}, 0, len(node.Columns))
+	resultColumns := make([]serializers.FieldDef, 0, len(node.Columns))
+	rowValues := make([][]byte, 0, len(node.Columns))
 
-	for i, col := range node.Columns {
+	for _, col := range node.Columns {
 		var value *table.ExecuteResult
 
 		if col.Function != nil {
@@ -176,17 +181,26 @@ func executeValues(
 				if argExpr.Expression() == nil {
 					return nil, fmt.Errorf("invalid function argument")
 				}
-				val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, argExpr.Expression(), nil, ctx.SubqueryExecutor, runtimeParams)
+				val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, argExpr.Expression(), nil, ctx.SubqueryExecutor, runtimeParams)
 				if err != nil {
 					return nil, fmt.Errorf("error evaluating function arg: %w", err)
 				}
-				if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-					args = append(args, valExpr.Row.Rows[0][0])
+				if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Schema.Fields) > 0 {
+					buf, oid, err := valExpr.Row.Schema.GetField(valExpr.Row.Rows[0], 0)
+					if err != nil {
+						return nil, fmt.Errorf("failed to get field: %w", err)
+					}
+					desVal, err := serializers.DeserializeGeneric(buf, oid)
+					if err != nil {
+						return nil, fmt.Errorf("failed to deserialize: %w", err)
+					}
+					args = append(args, desVal)
 				} else {
 					return nil, fmt.Errorf("invalid function arg")
 				}
 			}
 			v, err := functions.ExecuteFunctionWithContext(
+				ctx.Allocator,
 				ctx.GoCtx,
 				col.Function.Name,
 				args,
@@ -196,17 +210,30 @@ func executeValues(
 			}
 			value = v
 		} else if col.ExpressionContext != nil {
-			v, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, col.ExpressionContext, nil, ctx.SubqueryExecutor, runtimeParams)
+			v, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, col.ExpressionContext, nil, ctx.SubqueryExecutor, runtimeParams)
 			if err != nil {
 				return nil, err
 			}
-			if execRes, ok := v.(*rmodels.ResultRowsExpression); ok && len(execRes.Row.Rows) > 0 && len(execRes.Row.Rows[0]) > 0 {
+			if execRes, ok := v.(*rmodels.ResultRowsExpression); ok && len(execRes.Row.Rows) > 0 && len(execRes.Row.Schema.Fields) > 0 {
 				value = execRes.Row
 			} else if boolExpr, ok := v.(*rmodels.BoolExpression); ok {
 				// Convert BoolExpression to ExecuteResult
+				fields := []serializers.FieldDef{{
+					Name: "?column?",
+					OID:  ptypes.PTypeBool,
+				}}
+				schema := serializers.NewBaseSchema(fields)
+				buf, err := serializers.BoolSerializerInstance.Serialize(ctx.Allocator, boolExpr.Value)
+				if err != nil {
+					return nil, fmt.Errorf("failed to serialize bool: %w", err)
+				}
+				row, err := schema.Pack(ctx.Allocator, [][]byte{buf})
+				if err != nil {
+					return nil, fmt.Errorf("failed to pack bool: %w", err)
+				}
 				value = &table.ExecuteResult{
-					Rows:    [][]interface{}{{boolExpr.Value}},
-					Columns: []table.TableColumn{{Idx: 0, Name: "?column?", Type: table.ColTypeBool}},
+					Rows:   []*ptypes.Row{row},
+					Schema: schema,
 				}
 			} else {
 				return nil, fmt.Errorf("expected ExecuteResult from expression, got %T", v)
@@ -216,18 +243,28 @@ func executeValues(
 		}
 
 		if col.Alias != "" {
-			value.Columns[0].Name = col.Alias
+			value.Schema.Fields[0].Name = col.Alias
 		}
 
-		row = append(row, value.Rows[0][0])
-		resultColumns = append(resultColumns, value.Columns[0])
+		buf, _, err := value.Schema.GetField(value.Rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get field: %w", err)
+		}
 
-		logger.Debugf("Values node - processed column %d/%d", i+1, len(node.Columns))
+		rowValues = append(rowValues, buf)
+		resultColumns = append(resultColumns, value.Schema.Fields[0])
+	}
+
+	// Создаем схему и упаковываем результат
+	resultSchema := serializers.NewBaseSchema(resultColumns)
+	packedRow, err := resultSchema.Pack(ctx.Allocator, rowValues)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack result row: %w", err)
 	}
 
 	return &table.ExecuteResult{
-		Rows:    [][]interface{}{row},
-		Columns: resultColumns,
+		Rows:   []*ptypes.Row{packedRow},
+		Schema: resultSchema,
 	}, nil
 }
 
@@ -245,7 +282,7 @@ func executeProject(
 		return nil, err
 	}
 
-	// Если все колонки - SELECT *, возвращаем как есть
+	// SELECT * — strip table prefix and return
 	allSelectAll := true
 	for _, col := range node.Columns {
 		if !col.IsSelectAll {
@@ -254,134 +291,181 @@ func executeProject(
 		}
 	}
 	if allSelectAll {
+		for i := range inputResult.Schema.Fields {
+			inputResult.Schema.Fields[i].TableAlias = "" // clear qualifier for output
+		}
 		return inputResult, nil
 	}
 
-	// Обрабатываем каждую колонку
-	newColumns := make([]table.TableColumn, 0, len(node.Columns))
-	newRows := make([][]interface{}, 0, len(inputResult.Rows))
-	logger.Debug("Executing Project: ", zap.Any("columns", inputResult.Columns))
-	// Определяем колонки результата
+	// Build a flat list of column specs so we can handle all column kinds uniformly.
+	type colKind int
+	const (
+		colKindSimple     colKind = iota // plain column reference
+		colKindSelectAll                 // SELECT *  (expanded inline)
+		colKindFunction                  // function call
+		colKindExpression                // arbitrary expression
+	)
+	type colSpec struct {
+		kind   colKind
+		field  serializers.FieldDef
+		colIdx int              // for colKindSimple / colKindSelectAll
+		col    items.SelectItem // original column (for func/expr)
+	}
+
+	specs := make([]colSpec, 0, len(node.Columns))
 	for _, col := range node.Columns {
 		if col.IsSelectAll {
-			// Добавляем все колонки с qualified именами
-			for _, inputCol := range inputResult.Columns {
-				// Создаем копию колонки
-				newCol := table.TableColumn{
-					Idx:               inputCol.Idx,
-					Name:              inputCol.Name,
-					Type:              inputCol.Type,
-					TableIdentifier:   inputCol.TableIdentifier,
-					OriginalTableName: inputCol.OriginalTableName,
-				}
-				// Если у колонки есть TableIdentifier, добавляем его к имени для вывода
-				if inputCol.TableIdentifier != "" && !strings.Contains(inputCol.Name, ".") {
-					newCol.Name = inputCol.TableIdentifier + "." + inputCol.Name
-				}
-				newColumns = append(newColumns, newCol)
+			for i, field := range inputResult.Schema.Fields {
+				f := field
+				f.TableAlias = "" // clear qualifier for output
+				specs = append(specs, colSpec{kind: colKindSelectAll, field: f, colIdx: i})
 			}
 		} else if col.ColumnName != "" && col.Function == nil && col.ExpressionContext == nil {
-			// Простая колонка по имени
-			colIdx, err := findColumnIndex(inputResult.Columns, col.ColumnName, col.TableAlias)
+			colIdx, err := findColumnIndexByFieldName(inputResult.Schema.Fields, col.ColumnName, col.TableAlias)
 			if err != nil {
 				return nil, err
 			}
-
-			inputCol := inputResult.Columns[colIdx]
-
-			// Создаем копию колонки
-			newCol := table.TableColumn{
-				Idx:               inputCol.Idx,
-				Type:              inputCol.Type,
-				TableIdentifier:   inputCol.TableIdentifier,
-				OriginalTableName: inputCol.OriginalTableName,
-			}
-
-			// Определяем имя колонки для вывода
+			field := inputResult.Schema.Fields[colIdx]
 			if col.Alias != "" {
-				// Если задан явный алиас в SELECT (например, SELECT id AS user_id)
-				newCol.Name = col.Alias
-				newCol.TableIdentifier = "" // Убираем TableIdentifier для явного алиаса
-			} else if col.TableAlias != "" && inputCol.TableIdentifier != "" {
-				// Если колонка выбрана с qualified именем (например, SELECT o.id)
-				// Выводим с qualified именем
-				newCol.Name = inputCol.TableIdentifier + "." + inputCol.Name
-			} else {
-				// Простое имя без алиаса таблицы (например, SELECT id без JOIN)
-				newCol.Name = col.ColumnName
+				field.Name = col.Alias
 			}
-
-			newColumns = append(newColumns, newCol)
+			field.TableAlias = "" // clear qualifier for output
+			specs = append(specs, colSpec{kind: colKindSimple, field: field, colIdx: colIdx, col: col})
+		} else if col.Function != nil {
+			name := col.Function.Name
+			if col.Alias != "" {
+				name = col.Alias
+			}
+			oid := ptypes.PTypeText
+			if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
+				oid = fn.GetFunction().ProRetType
+			}
+			specs = append(specs, colSpec{kind: colKindFunction, field: serializers.FieldDef{Name: name, OID: oid}, col: col})
+		} else if col.ExpressionContext != nil {
+			name := "?column?"
+			if col.Alias != "" {
+				name = col.Alias
+			}
+			specs = append(specs, colSpec{kind: colKindExpression, field: serializers.FieldDef{Name: name, OID: ptypes.PTypeText}, col: col})
+		} else {
+			return nil, fmt.Errorf("unsupported column kind in projection")
 		}
-		// } else {
-		// 	// Выражение или функция - создаем новую колонку
-		// 	colName := col.Alias
-		// 	if colName == "" {
-		// 		if col.Function != nil {
-		// 			colName = col.Function.Name
-		// 		} else {
-		// 			colName = "?column?"
-		// 		}
-		// 	}
-		// 	inputCol := inputResult.Columns[0] // TODO: тут может быть несколько колонок из выражения, надо это учесть
-		// 	var colType table.ColType = inputCol.Type
-		// 	if col.Function != nil {
-		// 		if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
-		// 			colType = fn.GetFunction().ProRetType.ToColType()
-		// 		}
-		// 	}
-		// 	newColumns = append(newColumns, table.TableColumn{
-		// 		Name: colName,
-		// 		Type: colType,
-		// 	})
-		// }
 	}
 
-	// Обрабатываем каждую строку
-	for _, row := range inputResult.Rows {
-		newRow := make([]interface{}, 0, len(node.Columns))
+	// Build schema from specs (OIDs for func/expr cols may be refined on first row)
+	newFields := make([]serializers.FieldDef, len(specs))
+	for i, sp := range specs {
+		newFields[i] = sp.field
+	}
+	resultSchema := serializers.NewBaseSchema(newFields)
 
-		for _, col := range node.Columns {
-			if col.IsSelectAll {
-				// Добавляем все значения
-				newRow = append(newRow, row...)
-			} else if col.ColumnName != "" && col.Function == nil && col.ExpressionContext == nil {
-				// Простая колонка
-				colIdx, err := findColumnIndex(inputResult.Columns, col.ColumnName, col.TableAlias)
+	resultRows := make([]*ptypes.Row, 0, len(inputResult.Rows))
+	newRowValues := make([][]byte, 0, len(specs))
+
+	for rowNum, inputRow := range inputResult.Rows {
+		newRowValues = newRowValues[:0]
+		currentRow := &table.ResultRow{Row: inputRow, Schema: inputResult.Schema}
+
+		for si, sp := range specs {
+			switch sp.kind {
+			case colKindSimple, colKindSelectAll:
+				buf, _, err := inputResult.Schema.GetField(inputRow, sp.colIdx)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("failed to get field %d: %w", sp.colIdx, err)
 				}
-				newRow = append(newRow, row[colIdx])
-			} else {
-				// Выражение или функция
-				val, err := evaluateColumnExpression(&col, inputResult, row, ctx)
-				if err != nil {
-					return nil, err
-				}
-				var colType table.ColType = val.Columns[0].Type
-				if col.Function != nil {
-					if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
-						colType = fn.GetFunction().ProRetType.ToColType()
+				newRowValues = append(newRowValues, buf)
+
+			case colKindFunction:
+				col := sp.col
+				args := make([]interface{}, 0, len(col.Function.Args))
+				for _, argExpr := range col.Function.Args {
+					if argExpr.STAR() != nil {
+						args = append(args, 1)
+						continue
+					}
+					if argExpr.Expression() == nil {
+						return nil, fmt.Errorf("invalid function argument")
+					}
+					val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, argExpr.Expression(), currentRow, ctx.SubqueryExecutor, runtimeParams)
+					if err != nil {
+						return nil, fmt.Errorf("error evaluating function arg: %w", err)
+					}
+					if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 {
+						buf, oid, err := valExpr.Row.Schema.GetField(valExpr.Row.Rows[0], 0)
+						if err != nil {
+							return nil, fmt.Errorf("failed to get function arg field: %w", err)
+						}
+						desVal, err := serializers.DeserializeGeneric(buf, oid)
+						if err != nil {
+							return nil, fmt.Errorf("failed to deserialize function arg: %w", err)
+						}
+						args = append(args, desVal)
+					} else {
+						args = append(args, nil)
 					}
 				}
-				newColumns = append(newColumns, table.TableColumn{
-					Name: col.Alias,
-					Type: colType,
-				})
-				value := val.Rows[0][0]
+				v, err := functions.ExecuteFunctionWithContext(ctx.Allocator, ctx.GoCtx, col.Function.Name, args)
+				if err != nil {
+					return nil, err
+				}
+				if len(v.Rows) > 0 && v.Schema != nil && len(v.Schema.Fields) > 0 {
+					buf, oid, err := v.Schema.GetField(v.Rows[0], 0)
+					if err == nil {
+						if rowNum == 0 {
+							resultSchema.Fields[si].OID = oid
+						}
+						newRowValues = append(newRowValues, buf)
+						continue
+					}
+				}
+				newRowValues = append(newRowValues, nil)
 
-				newRow = append(newRow, value)
+			case colKindExpression:
+				col := sp.col
+				val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, col.ExpressionContext, currentRow, ctx.SubqueryExecutor, runtimeParams)
+				if err != nil {
+					return nil, err
+				}
+				switch v := val.(type) {
+				case *rmodels.ResultRowsExpression:
+					if len(v.Row.Rows) > 0 && v.Row.Schema != nil && len(v.Row.Schema.Fields) > 0 {
+						buf, oid, err := v.Row.Schema.GetField(v.Row.Rows[0], 0)
+						if err == nil {
+							if rowNum == 0 {
+								resultSchema.Fields[si].OID = oid
+							}
+							newRowValues = append(newRowValues, buf)
+							continue
+						}
+					}
+					newRowValues = append(newRowValues, nil)
+				case *rmodels.BoolExpression:
+					buf, err := serializers.BoolSerializerInstance.Serialize(ctx.Allocator, v.Value)
+					if err != nil {
+						return nil, fmt.Errorf("failed to serialize bool expression: %w", err)
+					}
+					if rowNum == 0 {
+						resultSchema.Fields[si].OID = ptypes.PTypeBool
+					}
+					newRowValues = append(newRowValues, buf)
+				default:
+					newRowValues = append(newRowValues, nil)
+				}
 			}
 		}
 
-		newRows = append(newRows, newRow)
+		newRow, err := resultSchema.Pack(ctx.Allocator, newRowValues)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack row: %w", err)
+		}
+		resultRows = append(resultRows, newRow)
 	}
 
-	logger.Debug("Project result", zap.Any("rows", newRows), zap.Any("cols", newColumns))
+	logger.Debug("Project result", zap.Int("rows", len(resultRows)), zap.Int("cols", len(newFields)))
 
 	return &table.ExecuteResult{
-		Rows:    newRows,
-		Columns: newColumns,
+		Rows:   resultRows,
+		Schema: resultSchema,
 	}, nil
 }
 
@@ -403,7 +487,7 @@ func executeFilter(
 	if plan != nil && plan.Statement != nil {
 		statement = plan.Statement
 	}
-	return revaluate.EvaluateFilterRowsByWhere(ctx.GoCtx, inputResult, node.Condition, statement, ctx.SubqueryExecutor, runtimeParams), nil
+	return revaluate.EvaluateFilterRowsByWhere(ctx.Allocator, ctx.GoCtx, inputResult, node.Condition, statement, ctx.SubqueryExecutor, runtimeParams), nil
 }
 
 // executeJoin выполняет соединение таблиц
@@ -424,25 +508,28 @@ func executeJoin(
 		return nil, fmt.Errorf("error executing right side of join: %w", err)
 	}
 
-	// Объединяем колонки
-	combinedColumns := append(leftResult.Columns, rightResult.Columns...)
+	// Объединяем схемы
+	combinedFields := make([]serializers.FieldDef, 0, len(leftResult.Schema.Fields)+len(rightResult.Schema.Fields))
+	combinedFields = append(combinedFields, leftResult.Schema.Fields...)
+	combinedFields = append(combinedFields, rightResult.Schema.Fields...)
+	combinedSchema := serializers.NewBaseSchema(combinedFields)
 
 	// Выполняем join в зависимости от типа
-	var resultRows [][]interface{}
+	var resultRows []*ptypes.Row
 	switch strings.ToUpper(node.JoinType) {
 	case "INNER", "":
-		resultRows = performInnerJoin(leftResult, rightResult, node.Condition, ctx)
+		resultRows = performInnerJoin(leftResult, rightResult, node.Condition, ctx, combinedSchema, runtimeParams)
 	case "LEFT":
-		resultRows = performLeftJoin(leftResult, rightResult, node.Condition, ctx)
+		resultRows = performLeftJoin(leftResult, rightResult, node.Condition, ctx, combinedSchema, runtimeParams)
 	case "CROSS":
-		resultRows = performCrossJoin(leftResult, rightResult)
+		resultRows = performCrossJoin(leftResult, rightResult, ctx, combinedSchema)
 	default:
 		return nil, fmt.Errorf("unsupported join type: %s", node.JoinType)
 	}
 
 	return &table.ExecuteResult{
-		Rows:    resultRows,
-		Columns: combinedColumns,
+		Rows:   resultRows,
+		Schema: combinedSchema,
 	}, nil
 }
 
@@ -477,7 +564,10 @@ func executeSort(
 		return nil, err
 	}
 
-	revaluate.EvaluateSortRows(inputResult, node.OrderBy)
+	err = revaluate.EvaluateSortRows(ctx.Allocator, inputResult, node.OrderBy)
+	if err != nil {
+		return nil, err
+	}
 	return inputResult, nil
 }
 
@@ -586,17 +676,50 @@ func executeSubquery(
 		return nil, err
 	}
 
-	// Применяем алиас к колонкам
+	// Store alias in TableAlias — keeps Name bare
 	if node.Alias != "" {
-		for i := range result.Columns {
-			result.Columns[i].TableIdentifier = node.Alias
+		for i := range result.Schema.Fields {
+			result.Schema.Fields[i].TableAlias = node.Alias
 		}
+		result.Schema.RebuildIndex()
 	}
 
 	return result, nil
 }
 
 // Вспомогательные функции
+
+// findColumnIndexByFieldName ищет индекс колонки в схеме по имени
+func findColumnIndexByFieldName(fields []serializers.FieldDef, name string, tableAlias string) (int, error) {
+	nameLower := strings.ToLower(name)
+	aliasLower := strings.ToLower(tableAlias)
+
+	if tableAlias != "" {
+		// Qualified lookup: match alias + bare name
+		for i, field := range fields {
+			if strings.ToLower(field.Name) == nameLower && strings.ToLower(field.TableAlias) == aliasLower {
+				return i, nil
+			}
+		}
+		return -1, fmt.Errorf("column \"%s.%s\" does not exist", tableAlias, name)
+	}
+
+	// Unqualified: match by bare Name, ensure uniqueness
+	var matchedIndices []int
+	for i, field := range fields {
+		if strings.ToLower(field.Name) == nameLower {
+			matchedIndices = append(matchedIndices, i)
+		}
+	}
+
+	if len(matchedIndices) == 0 {
+		return -1, fmt.Errorf("column \"%s\" does not exist", name)
+	}
+	if len(matchedIndices) > 1 {
+		return -1, fmt.Errorf("column reference \"%s\" is ambiguous", name)
+	}
+	return matchedIndices[0], nil
+}
 
 func findColumnIndex(columns []table.TableColumn, name string, tableAlias string) (int, error) {
 	if tableAlias != "" {
@@ -635,96 +758,14 @@ func findColumnIndex(columns []table.TableColumn, name string, tableAlias string
 	return matchedIndices[0], nil
 }
 
-func evaluateColumnExpression(col *items.SelectItem, inputResult *table.ExecuteResult, row []interface{}, ctx ExecutorContext) (*table.ExecuteResult, error) {
-	if col.Function != nil {
-		// Проверяем, что это не агрегатная функция
-		// Агрегатные функции должны обрабатываться в AggregatePlanNode
-		if col.Function.IsAggregate {
-			return nil, fmt.Errorf("aggregate function %s cannot be used in non-aggregate context", col.Function.Name)
-		}
-
-		// Вычисляем аргументы функции
-		args := make([]interface{}, 0, len(col.Function.Args))
-		for _, argExpr := range col.Function.Args {
-			if argExpr.STAR() != nil {
-				args = append(args, 1)
-				continue
-			}
-
-			if argExpr.Expression() == nil {
-				return nil, fmt.Errorf("invalid function argument")
-			}
-
-			// Создаем временный ResultRow для вычисления выражения
-			tempRow := &table.ResultRow{
-				Row:     row,
-				Columns: inputResult.Columns,
-			}
-
-			val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, argExpr.Expression(), tempRow, ctx.SubqueryExecutor, nil)
-			if err != nil {
-				return nil, fmt.Errorf("error evaluating function arg: %w", err)
-			}
-			if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-				args = append(args, valExpr.Row.Rows[0][0])
-			} else {
-				return nil, fmt.Errorf("invalid function arg")
-			}
-		}
-
-		// Вызываем обычную (неагрегатную) функцию
-		result, err := functions.ExecuteFunctionWithContext(
-			ctx.GoCtx,
-			col.Function.Name,
-			args,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
-			return &table.ExecuteResult{
-				Rows:    result.Rows,
-				Columns: result.Columns,
-			}, nil
-		}
-		return nil, nil
-	} else if col.ExpressionContext != nil {
-		// Вычисляем выражение
-		tempRow := &table.ResultRow{
-			Row:     row,
-			Columns: inputResult.Columns,
-		}
-
-		val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, col.ExpressionContext, tempRow, ctx.SubqueryExecutor, nil)
-		if err != nil {
-			return nil, err
-		}
-		if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-			return &table.ExecuteResult{
-				Rows:    valExpr.Row.Rows,
-				Columns: valExpr.Row.Columns,
-			}, nil
-		}
-		if boolExpr, ok := val.(*rmodels.BoolExpression); ok {
-			return &table.ExecuteResult{
-				Rows:    [][]interface{}{{boolExpr.Value}},
-				Columns: []table.TableColumn{{Idx: 0, Name: "?column?", Type: table.ColTypeBool}},
-			}, nil
-		}
-		return nil, fmt.Errorf("invalid expression result")
-	}
-
-	return nil, fmt.Errorf("unsupported column expression")
-}
-
-func performInnerJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext) [][]interface{} {
+func performInnerJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext, combinedSchema *serializers.BaseSchema, runtimeParams map[int]interface{}) []*ptypes.Row {
 	// Если нет условия, выполняем CROSS JOIN
 	if condition == nil {
-		return performCrossJoin(left, right)
+		return performCrossJoin(left, right, ctx, combinedSchema)
 	}
 
 	// Иначе используем nested loop join
-	return performNestedLoopJoin(left, right, condition, ctx)
+	return performNestedLoopJoin(left, right, condition, ctx, combinedSchema, runtimeParams)
 }
 
 // findColumnInSet ищет колонку по имени или qualified имени в наборе колонок
@@ -746,35 +787,34 @@ func findColumnInSet(name string, cols []table.TableColumn) int {
 }
 
 // performNestedLoopJoin выполняет nested loop join (fallback для сложных условий)
-func performNestedLoopJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext) [][]interface{} {
-	var result [][]interface{}
-
-	// Объединяем колонки для вычисления условия
-	combinedColumns := append(left.Columns, right.Columns...)
+func performNestedLoopJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext, combinedSchema *serializers.BaseSchema, runtimeParams map[int]interface{}) []*ptypes.Row {
+	var result []*ptypes.Row
+	scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
 
 	errorCount := 0
 	for rowIdx, leftRow := range left.Rows {
 		for rightIdx, rightRow := range right.Rows {
-			combinedRow := append(append([]interface{}{}, leftRow...), rightRow...)
+			// Объединяем строки
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
+			if err != nil {
+				logger.Debugf("Error combining rows: %v", err)
+				continue
+			}
 
 			// Проверяем условие
 			if condition != nil {
 				tempRow := &table.ResultRow{
-					Row:     combinedRow,
-					Columns: combinedColumns,
+					Row:    combinedRow,
+					Schema: combinedSchema,
 				}
 
-				// if rowIdx == 0 && rightIdx == 0 {
-
-				val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, condition, tempRow, ctx.SubqueryExecutor, nil)
+				val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, condition, tempRow, ctx.SubqueryExecutor, runtimeParams)
 				if err != nil {
 					logger.Debugf("Error evaluating JOIN condition for row %d (left) and row %d (right): %v", rowIdx, rightIdx, err)
 					// Если ошибка при вычислении условия, пропускаем строку
 					if errorCount < 3 {
 						logger.Debug("JOIN condition error",
-							zap.Error(err),
-							zap.Any("leftRow", leftRow),
-							zap.Any("rightRow", rightRow))
+							zap.Error(err))
 						errorCount++
 					}
 					continue
@@ -799,124 +839,96 @@ func evaluateConditionResult(val rmodels.Expression) bool {
 		return boolExpr.Value
 	} else if resultExpr, ok := val.(*rmodels.ResultRowsExpression); ok {
 		// Извлекаем значение из ResultRowsExpression
-		if len(resultExpr.Row.Rows) > 0 && len(resultExpr.Row.Rows[0]) > 0 {
-			rowVal := resultExpr.Row.Rows[0][0]
-			if boolVal, ok := rowVal.(bool); ok {
-				return boolVal
+		if len(resultExpr.Row.Rows) > 0 {
+			// Пытаемся извлечь первое поле первой строки
+			firstRow := resultExpr.Row.Rows[0]
+			if resultExpr.Row.Schema != nil && len(resultExpr.Row.Schema.Fields) > 0 {
+				buf, oid, err := resultExpr.Row.Schema.GetField(firstRow, 0)
+				if err == nil {
+					// Десериализуем значение
+					val, err := serializers.DeserializeGeneric(buf, oid)
+					if err == nil {
+						boolVal, ok := ptypes.TryIntoBool(val)
+						if ok {
+							return boolVal.IntoGo()
+						}
+					}
+				}
 			}
 		}
 	}
 	return false
 }
 
-// sortByColumn сортирует строки по указанной колонке
-func sortByColumn(result *table.ExecuteResult, colIdx int) [][]interface{} {
-	sorted := make([][]interface{}, len(result.Rows))
-	copy(sorted, result.Rows)
+// combineRows объединяет две бинарные строки в одну
+func combineRows(leftRow, rightRow *ptypes.Row, leftSchema, rightSchema, combinedSchema *serializers.BaseSchema, allocator pmem.Allocator, scratch [][]byte) (*ptypes.Row, error) {
+	// scratch передаётся снаружи и переиспользуется
+	nL := len(leftSchema.Fields)
+	nR := len(rightSchema.Fields)
+	scratch = scratch[:nL+nR]
 
-	// Простая сортировка пузырьком (можно заменить на более эффективную)
-	for i := 0; i < len(sorted)-1; i++ {
-		for j := 0; j < len(sorted)-i-1; j++ {
-			if compareValues(sorted[j][colIdx], sorted[j+1][colIdx]) > 0 {
-				sorted[j], sorted[j+1] = sorted[j+1], sorted[j]
-			}
+	for i := range leftSchema.Fields {
+		buf, _, err := leftSchema.GetField(leftRow, i)
+		if err != nil {
+			return nil, err
 		}
+		scratch[i] = buf
 	}
-
-	return sorted
+	for i := range rightSchema.Fields {
+		buf, _, err := rightSchema.GetField(rightRow, i)
+		if err != nil {
+			return nil, err
+		}
+		scratch[nL+i] = buf
+	}
+	return combinedSchema.Pack(allocator, scratch)
 }
 
-// compareValues сравнивает два значения, возвращает -1, 0, 1
-func compareValues(a, b interface{}) int {
-	if a == nil && b == nil {
-		return 0
-	}
-	if a == nil {
-		return -1
-	}
-	if b == nil {
-		return 1
+// createNullRow создает строку со всеми NULL значениями для заданной схемы
+func createNullRow(schema *serializers.BaseSchema, allocator pmem.Allocator) (*ptypes.Row, error) {
+	nullValues := make([][]byte, len(schema.Fields))
+	for i := range schema.Fields {
+		// NULL представлен как nil в байтовом массиве
+		nullValues[i] = nil
 	}
 
-	switch av := a.(type) {
-	case int:
-		if bv, ok := b.(int); ok {
-			if av < bv {
-				return -1
-			} else if av > bv {
-				return 1
-			}
-			return 0
-		}
-	case float64:
-		if bv, ok := b.(float64); ok {
-			if av < bv {
-				return -1
-			} else if av > bv {
-				return 1
-			}
-			return 0
-		}
-	case string:
-		if bv, ok := b.(string); ok {
-			if av < bv {
-				return -1
-			} else if av > bv {
-				return 1
-			}
-			return 0
-		}
-	case bool:
-		if bv, ok := b.(bool); ok {
-			if !av && bv {
-				return -1
-			} else if av && !bv {
-				return 1
-			}
-			return 0
-		}
+	row, err := schema.Pack(allocator, nullValues)
+	if err != nil {
+		return nil, fmt.Errorf("error packing null row: %w", err)
 	}
 
-	// Если типы не совпадают или неизвестны, считаем их равными
-	return 0
+	return row, nil
 }
 
-func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext) [][]interface{} {
-	var result [][]interface{}
-
-	// Объединяем колонки для вычисления условия
-	combinedColumns := append(left.Columns, right.Columns...)
+func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext, combinedSchema *serializers.BaseSchema, runtimeParams map[int]interface{}) []*ptypes.Row {
+	var result []*ptypes.Row
 
 	for _, leftRow := range left.Rows {
 		hasMatch := false
 
+		scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
+
 		for _, rightRow := range right.Rows {
-			combinedRow := append(append([]interface{}{}, leftRow...), rightRow...)
+			// Объединяем строки
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
+			if err != nil {
+				logger.Debugf("Error combining rows: %v", err)
+				continue
+			}
 
 			// Проверяем условие, если оно задано
 			matches := true
 			if condition != nil {
 				tempRow := &table.ResultRow{
-					Row:     combinedRow,
-					Columns: combinedColumns,
+					Row:    combinedRow,
+					Schema: combinedSchema,
 				}
 
-				val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, condition, tempRow, ctx.SubqueryExecutor, nil)
+				val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, condition, tempRow, ctx.SubqueryExecutor, runtimeParams)
 				if err != nil {
 					matches = false
 				} else {
-					matches = false
-					if boolExpr, ok := val.(*rmodels.BoolExpression); ok {
-						matches = boolExpr.Value
-					} else if resultExpr, ok := val.(*rmodels.ResultRowsExpression); ok {
-						// Извлекаем значение из ResultRowsExpression
-						if len(resultExpr.Row.Rows) > 0 && len(resultExpr.Row.Rows[0]) > 0 {
-							rowVal := resultExpr.Row.Rows[0][0]
-							if boolVal, ok := rowVal.(bool); ok {
-								matches = boolVal
-							}
-						}
-					}
+					matches = evaluateConditionResult(val)
 				}
 			}
 
@@ -928,22 +940,33 @@ func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpress
 
 		// Если не было совпадений, добавляем левую строку с NULL значениями для правой части
 		if !hasMatch {
-			nullRow := make([]interface{}, len(right.Columns))
-			for i := range nullRow {
-				nullRow[i] = nil
+			// Создаем пустую правую строку (NULL значения)
+			nullRightRow, err := createNullRow(right.Schema, ctx.Allocator)
+			if err != nil {
+				logger.Debugf("Error creating null row: %v", err)
+				continue
 			}
-			combinedRow := append(append([]interface{}{}, leftRow...), nullRow...)
+			combinedRow, err := combineRows(leftRow, nullRightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
+			if err != nil {
+				logger.Debugf("Error combining with null row: %v", err)
+				continue
+			}
 			result = append(result, combinedRow)
 		}
 	}
 	return result
 }
 
-func performCrossJoin(left, right *table.ExecuteResult) [][]interface{} {
-	var result [][]interface{}
+func performCrossJoin(left, right *table.ExecuteResult, ctx ExecutorContext, combinedSchema *serializers.BaseSchema) []*ptypes.Row {
+	var result []*ptypes.Row
+	scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
 	for _, leftRow := range left.Rows {
 		for _, rightRow := range right.Rows {
-			combinedRow := append(append([]interface{}{}, leftRow...), rightRow...)
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
+			if err != nil {
+				logger.Debugf("Error combining rows in CROSS JOIN: %v", err)
+				continue
+			}
 			result = append(result, combinedRow)
 		}
 	}
@@ -992,8 +1015,8 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 		groups = make(map[string][]*table.ResultRow)
 		for _, row := range inputResult.Rows {
 			resultRow := &table.ResultRow{
-				Row:     row,
-				Columns: inputResult.Columns,
+				Row:    row,
+				Schema: inputResult.Schema,
 			}
 			groupKey, err := computeGroupKey(groupBy, resultRow, ctx)
 			if err != nil {
@@ -1006,35 +1029,35 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 		groupRows := make([]*table.ResultRow, len(inputResult.Rows))
 		for i, row := range inputResult.Rows {
 			groupRows[i] = &table.ResultRow{
-				Row:     row,
-				Columns: inputResult.Columns,
+				Row:    row,
+				Schema: inputResult.Schema,
 			}
 		}
 		groups = map[string][]*table.ResultRow{"": groupRows}
 	}
 
 	// Now process each group
-	newColumns := make([]table.TableColumn, 0, len(aggregates))
-	newRows := make([][]interface{}, 0, len(groups))
+	newFields := make([]serializers.FieldDef, 0, len(aggregates))
+	newRows := make([]*ptypes.Row, 0, len(groups))
 
-	// Define columns
-	for colIdx, col := range aggregates {
+	// Define columns (fields)
+	for _, col := range aggregates {
 		var colName string
-		var colType table.ColType
+		var colOID ptypes.OID
 
 		if col.IsSelectAll {
 			return nil, fmt.Errorf("SELECT * not allowed with GROUP BY or aggregates")
 		}
 
 		if col.ExpressionContext != nil {
-			colType = table.ColTypeString
+			colOID = ptypes.PTypeText // default
 			if col.Alias != "" {
 				colName = col.Alias
 			} else {
 				colName = "?column?"
 			}
 		} else if col.Function != nil {
-			colType = table.ColTypeString
+			colOID = ptypes.PTypeText // default, will be updated by aggregate function
 			if col.Alias != "" {
 				colName = col.Alias
 			} else {
@@ -1054,11 +1077,12 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 					return nil, fmt.Errorf("column %s must appear in GROUP BY clause", col.ColumnName)
 				}
 			}
-			// Get actual type from input columns
-			colType = table.ColTypeString // default
-			for _, inputCol := range inputResult.Columns {
-				if inputCol.Name == col.ColumnName || (col.TableAlias != "" && inputCol.Name == col.TableAlias+"."+col.ColumnName) {
-					colType = inputCol.Type
+			// Get actual type from input schema fields
+			colOID = ptypes.PTypeText // default
+			for _, inputField := range inputResult.Schema.Fields {
+				if strings.EqualFold(inputField.Name, col.ColumnName) &&
+					(col.TableAlias == "" || strings.EqualFold(inputField.TableAlias, col.TableAlias)) {
+					colOID = inputField.OID
 					break
 				}
 			}
@@ -1069,19 +1093,20 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 			}
 		}
 
-		newColumns = append(newColumns, table.TableColumn{
-			Idx:  colIdx,
+		newFields = append(newFields, serializers.FieldDef{
 			Name: colName,
-			Type: colType,
+			OID:  colOID,
 		})
 	}
 
+	newSchema := serializers.NewBaseSchema(newFields)
+
 	// Process each group
 	for _, groupRows := range groups {
-		newRow := make([]interface{}, 0, len(aggregates))
+		newRowValues := make([][]byte, 0, len(aggregates))
 
 		for idx, col := range aggregates {
-			var colValue interface{}
+			var colValueBuf []byte
 
 			if col.ExpressionContext != nil {
 				// For now, assume no expressions in aggregates
@@ -1103,24 +1128,57 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 							if argExpr.Expression() == nil {
 								return nil, fmt.Errorf("invalid aggregate argument")
 							}
-							val, err := revaluate.EvaluateExpressionContext(ctx.GoCtx, argExpr.Expression(), groupRow, ctx.SubqueryExecutor, nil)
+							runtimeParams := make(map[int]interface{})
+							val, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, argExpr.Expression(), groupRow, ctx.SubqueryExecutor, runtimeParams)
 							if err != nil {
 								return nil, fmt.Errorf("error evaluating aggregate arg: %w", err)
 							}
-							if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-								groupValues = append(groupValues, valExpr.Row.Rows[0][0])
+							if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 {
+								// Extract first field from first row
+								firstRow := valExpr.Row.Rows[0]
+								if valExpr.Row.Schema != nil && len(valExpr.Row.Schema.Fields) > 0 {
+									buf, oid, err := valExpr.Row.Schema.GetField(firstRow, 0)
+									if err == nil {
+										deserVal, err := serializers.DeserializeGeneric(buf, oid)
+										if err == nil {
+											groupValues = append(groupValues, deserVal)
+										} else {
+											groupValues = append(groupValues, nil)
+										}
+									} else {
+										groupValues = append(groupValues, nil)
+									}
+								} else {
+									groupValues = append(groupValues, nil)
+								}
 							} else {
 								groupValues = append(groupValues, nil)
 							}
 						}
 						args = append(args, groupValues)
 					}
-					v, err := functions.ExecuteAggregateFunction(col.Function.Name, args)
+					v, err := functions.ExecuteAggregateFunction(ctx.Allocator, col.Function.Name, args)
 					if err != nil {
 						return nil, fmt.Errorf("error executing aggregate function %s: %w", col.Function.Name, err)
 					}
-					colValue = v.Rows[0][0]
-					newColumns[idx].Type = v.Columns[0].Type
+					// Extract result value and serialize
+					if len(v.Rows) > 0 {
+						firstRow := v.Rows[0]
+						if v.Schema != nil && len(v.Schema.Fields) > 0 {
+							buf, oid, err := v.Schema.GetField(firstRow, 0)
+							if err == nil {
+								colValueBuf = buf
+								// Update field OID based on actual result
+								newFields[idx].OID = oid
+							} else {
+								colValueBuf = nil
+							}
+						} else {
+							colValueBuf = nil
+						}
+					} else {
+						colValueBuf = nil
+					}
 				} else {
 					// Non-aggregate function, evaluate on first row or something? For now error
 					return nil, fmt.Errorf("non-aggregate functions not supported in GROUP BY")
@@ -1129,19 +1187,16 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 				// Non-aggregate column, take from first row in group
 				if len(groupRows) > 0 {
 					resultRow := groupRows[0]
-					searchName := col.ColumnName
-					if col.TableAlias != "" {
-						searchName = col.TableAlias + "." + col.ColumnName
-					}
 					found := false
-					for i, origCol := range inputResult.Columns {
-						if origCol.Name == searchName || origCol.Name == col.ColumnName {
-							colValue = resultRow.Row[i]
-							found = true
-							break
-						}
-						if col.TableAlias == "" && strings.HasSuffix(origCol.Name, "."+col.ColumnName) {
-							colValue = resultRow.Row[i]
+					for i, origField := range inputResult.Schema.Fields {
+						if strings.EqualFold(origField.Name, col.ColumnName) &&
+							(col.TableAlias == "" || strings.EqualFold(origField.TableAlias, col.TableAlias)) {
+							buf, _, err := resultRow.Schema.GetField(resultRow.Row, i)
+							if err == nil {
+								colValueBuf = buf
+							} else {
+								colValueBuf = nil
+							}
 							found = true
 							break
 						}
@@ -1152,15 +1207,20 @@ func processGroupByAndAggregates(groupBy []items.SelectItem, aggregates []items.
 				}
 			}
 
-			newRow = append(newRow, colValue)
+			newRowValues = append(newRowValues, colValueBuf)
 		}
 
+		// Pack the row
+		newRow, err := newSchema.Pack(ctx.Allocator, newRowValues)
+		if err != nil {
+			return nil, fmt.Errorf("error packing aggregated row: %w", err)
+		}
 		newRows = append(newRows, newRow)
 	}
 
 	return &table.ExecuteResult{
-		Columns: newColumns,
-		Rows:    newRows,
+		Schema: newSchema,
+		Rows:   newRows,
 	}, nil
 }
 
@@ -1168,37 +1228,45 @@ func computeGroupKey(groupBy []items.SelectItem, row *table.ResultRow, ctx Execu
 	keyParts := make([]string, 0, len(groupBy))
 	for _, gb := range groupBy {
 		var val interface{}
-		var err error
 		if gb.ExpressionContext != nil {
-			val, err = revaluate.EvaluateExpressionContext(ctx.GoCtx, gb.ExpressionContext, row, ctx.SubqueryExecutor, nil)
+			runtimeParams := make(map[int]interface{})
+			valExpr, err := revaluate.EvaluateExpressionContext(ctx.Allocator, ctx.GoCtx, gb.ExpressionContext, row, ctx.SubqueryExecutor, runtimeParams)
 			if err != nil {
 				return "", err
 			}
-			if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok && len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-				val = valExpr.Row.Rows[0][0]
+			if resultExpr, ok := valExpr.(*rmodels.ResultRowsExpression); ok && len(resultExpr.Row.Rows) > 0 {
+				// Extract first field from first row
+				firstRow := resultExpr.Row.Rows[0]
+				if resultExpr.Row.Schema != nil && len(resultExpr.Row.Schema.Fields) > 0 {
+					buf, oid, err := resultExpr.Row.Schema.GetField(firstRow, 0)
+					if err == nil {
+						val, _ = serializers.DeserializeGeneric(buf, oid)
+					} else {
+						val = nil
+					}
+				} else {
+					val = nil
+				}
 			} else {
 				val = nil
 			}
 		} else if gb.ColumnName != "" {
-			// Find column value
-			searchName := gb.ColumnName
-			if gb.TableAlias != "" {
-				searchName = gb.TableAlias + "." + gb.ColumnName
-			}
 			found := false
-			for i, col := range row.Columns {
-				if col.Name == searchName || col.Name == gb.ColumnName {
-					val = row.Row[i]
-					found = true
-					break
-				} else if gb.TableAlias == "" && strings.HasSuffix(col.Name, "."+gb.ColumnName) {
-					val = row.Row[i]
+			for i, field := range row.Schema.Fields {
+				if strings.EqualFold(field.Name, gb.ColumnName) &&
+					(gb.TableAlias == "" || strings.EqualFold(field.TableAlias, gb.TableAlias)) {
+					buf, oid, err := row.Schema.GetField(row.Row, i)
+					if err == nil {
+						val, _ = serializers.DeserializeGeneric(buf, oid)
+					} else {
+						val = nil
+					}
 					found = true
 					break
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("group by column %s not found", searchName)
+				return "", fmt.Errorf("group by column %s not found", gb.ColumnName)
 			}
 		} else {
 			return "", fmt.Errorf("invalid group by item")
