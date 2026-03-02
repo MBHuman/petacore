@@ -2,7 +2,7 @@ package distributed
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"time"
@@ -14,12 +14,6 @@ import (
 type ETCDStore struct {
 	client *clientv3.Client
 	prefix string // Префикс для всех ключей (для namespace isolation)
-}
-
-// etcdValue структура для хранения значения с версией в ETCD
-type etcdValue struct {
-	Value   string `json:"value"`
-	Version int64  `json:"version"`
 }
 
 // NewETCDStore создает новое подключение к ETCD
@@ -59,34 +53,34 @@ func (e *ETCDStore) Get(ctx context.Context, key []byte) (*KVEntry, error) {
 	}
 
 	kv := resp.Kvs[0]
-	var val etcdValue
-	if err := json.Unmarshal(kv.Value, &val); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal value: %w", err)
+	// Читаем raw bytes - это vclock формат: [4-byte metaLen][avro(meta)][value bytes]
+	valueBytes := []byte(kv.Value)
+
+	// Извлекаем version из метаданных vclock
+	version := int64(0)
+	if len(valueBytes) >= 4 {
+		metaLen := binary.BigEndian.Uint32(valueBytes[:4])
+		if int(metaLen) <= len(valueBytes)-4 {
+			// В vclock формате version это timestamp, но мы уже не используем это поле
+			// Можно оставить 0 или попытаться извлечь из avro метаданных
+			version = 0
+		}
 	}
 
 	return &KVEntry{
 		Key:      key,
-		Value:    val.Value,
-		Version:  val.Version,
+		Value:    valueBytes,
+		Version:  version,
 		Revision: kv.ModRevision,
 	}, nil
 }
 
 // Put записывает значение по ключу с версией
-func (e *ETCDStore) Put(ctx context.Context, key []byte, value string, version int64) error {
+func (e *ETCDStore) Put(ctx context.Context, key []byte, value []byte, version int64) error {
 	fullKey := e.makeKey(key)
 
-	val := etcdValue{
-		Value:   value,
-		Version: version,
-	}
-
-	data, err := json.Marshal(val)
-	if err != nil {
-		return fmt.Errorf("failed to marshal value: %w", err)
-	}
-
-	_, err = e.client.Put(ctx, string(fullKey), string(data))
+	// Записываем raw bytes напрямую (vclock формат уже включает все метаданные)
+	_, err := e.client.Put(ctx, string(fullKey), string(value))
 	if err != nil {
 		return fmt.Errorf("etcd put error: %w", err)
 	}
@@ -122,10 +116,8 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *Wa
 
 		// Отправить существующие ключи как PUT события
 		for _, kv := range resp.Kvs {
-			var val etcdValue
-			if err := json.Unmarshal(kv.Value, &val); err != nil {
-				continue
-			}
+			// Читаем raw bytes - это vclock формат
+			valueBytes := []byte(kv.Value)
 
 			key := kv.Key
 			if e.prefix != "" && strings.HasPrefix(string(key), e.prefix+"/") {
@@ -136,8 +128,8 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *Wa
 				Type: EventTypePut,
 				Entry: &KVEntry{
 					Key:      key,
-					Value:    val.Value,
-					Version:  val.Version,
+					Value:    valueBytes,
+					Version:  0, // Version включен в vclock метаданные
 					Revision: kv.ModRevision,
 				},
 			}
@@ -178,26 +170,22 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *Wa
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					event.Type = EventTypePut
-					var val etcdValue
-					if err := json.Unmarshal(ev.Kv.Value, &val); err != nil {
-						continue
-					}
+					// Читаем raw bytes - vclock формат
+					valueBytes := []byte(ev.Kv.Value)
 					event.Entry = &KVEntry{
 						Key:      key,
-						Value:    val.Value,
-						Version:  val.Version,
+						Value:    valueBytes,
+						Version:  0, // Version включен в vclock метаданные
 						Revision: ev.Kv.ModRevision,
 					}
 
 					if ev.PrevKv != nil {
-						var prevVal etcdValue
-						if err := json.Unmarshal(ev.PrevKv.Value, &prevVal); err == nil {
-							event.PrevEntry = &KVEntry{
-								Key:      key,
-								Value:    prevVal.Value,
-								Version:  prevVal.Version,
-								Revision: ev.PrevKv.ModRevision,
-							}
+						prevValueBytes := []byte(ev.PrevKv.Value)
+						event.PrevEntry = &KVEntry{
+							Key:      key,
+							Value:    prevValueBytes,
+							Version:  0,
+							Revision: ev.PrevKv.ModRevision,
 						}
 					}
 
@@ -208,14 +196,12 @@ func (e *ETCDStore) SyncIterator(ctx context.Context, prefix []byte) (<-chan *Wa
 					}
 
 					if ev.PrevKv != nil {
-						var prevVal etcdValue
-						if err := json.Unmarshal(ev.PrevKv.Value, &prevVal); err == nil {
-							event.PrevEntry = &KVEntry{
-								Key:      key,
-								Value:    prevVal.Value,
-								Version:  prevVal.Version,
-								Revision: ev.PrevKv.ModRevision,
-							}
+						prevValueBytes := []byte(ev.PrevKv.Value)
+						event.PrevEntry = &KVEntry{
+							Key:      key,
+							Value:    prevValueBytes,
+							Version:  0,
+							Revision: ev.PrevKv.ModRevision,
 						}
 					}
 				}
@@ -249,10 +235,8 @@ func (e *ETCDStore) ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEntry, 
 
 	var entries []*KVEntry
 	for _, kv := range resp.Kvs {
-		var val etcdValue
-		if err := json.Unmarshal(kv.Value, &val); err != nil {
-			continue // skip invalid
-		}
+		// Читаем raw bytes - vclock формат
+		valueBytes := []byte(kv.Value)
 
 		key := kv.Key
 		if e.prefix != "" && strings.HasPrefix(string(key), e.prefix+"/") {
@@ -261,8 +245,8 @@ func (e *ETCDStore) ScanPrefix(ctx context.Context, prefix []byte) ([]*KVEntry, 
 
 		entries = append(entries, &KVEntry{
 			Key:      key,
-			Value:    val.Value,
-			Version:  val.Version,
+			Value:    valueBytes,
+			Version:  0, // Version включен в vclock метаданные
 			Revision: kv.ModRevision,
 		})
 	}

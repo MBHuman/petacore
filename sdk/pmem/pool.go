@@ -24,8 +24,12 @@ type PoolAllocator struct {
 func NewPool(blockSizes []int, blocksPerClass int) *PoolAllocator {
 	classes := make([]slabClass, len(blockSizes))
 	for i, size := range blockSizes {
+		slab, err := NewMmapSlab(size, blocksPerClass)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create slab for block size %d: %v", size, err))
+		}
 		classes[i] = slabClass{
-			slab:      NewSlab(size, blocksPerClass),
+			slab:      slab,
 			blockSize: size,
 		}
 	}

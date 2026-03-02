@@ -108,7 +108,7 @@ func (s *SynchronizerVClock) ScanPrefix(ctx context.Context, prefix []byte) (map
 	}
 	result := make(map[string]string)
 	for _, entry := range entries {
-		result[string(entry.Key)] = entry.Value
+		result[string(entry.Key)] = string(entry.Value)
 	}
 	return result, nil
 }
@@ -296,7 +296,7 @@ func (s *SynchronizerVClock) WriteThroughVClock(ctx context.Context, key []byte,
 	copy(final[4+len(metaBytes):], value)
 
 	// Записываем в ETCD (синхронно, CP гарантия)
-	if err := s.kvStore.Put(ctx, key, string(final), int64(timestamp)); err != nil {
+	if err := s.kvStore.Put(ctx, key, final, int64(timestamp)); err != nil {
 		return fmt.Errorf("failed to write to ETCD: %w", err)
 	}
 

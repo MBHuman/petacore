@@ -2,6 +2,7 @@ package serializers
 
 import (
 	"fmt"
+	"petacore/internal/utils"
 	"petacore/sdk/pmem"
 	ptypes "petacore/sdk/types"
 	"strconv"
@@ -28,7 +29,8 @@ type Validator[T any] interface {
 func CoerceToString(buf []byte, oid ptypes.OID) (string, error) {
 	switch oid {
 	case ptypes.PTypeText, ptypes.PTypeVarchar:
-		return string(buf), nil
+		// Zero-copy conversion
+		return utils.BytesToString(buf), nil
 
 	case ptypes.PTypeInt2:
 		v, err := Int2SerializerInstance.Deserialize(buf)

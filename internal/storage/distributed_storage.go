@@ -121,8 +121,8 @@ func (dtx *DistributedTransaction) Commit() error {
 	defer cancel()
 
 	for key, value := range localWrites {
-		// WriteThrough записывает в ETCD и локальный MVCC
-		if err := dtx.synchronizer.WriteThrough(ctx, []byte(key), value); err != nil {
+		// WriteThrough записывает в ETCD и локальный MVCC (конвертируем string в []byte)
+		if err := dtx.synchronizer.WriteThrough(ctx, []byte(key), []byte(value)); err != nil {
 			return fmt.Errorf("failed to write key %s: %w", key, err)
 		}
 	}

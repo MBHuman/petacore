@@ -8,6 +8,7 @@ import (
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/internal/utils"
 	"petacore/sdk/pmem"
 	"petacore/sdk/serializers"
 	ptypes "petacore/sdk/types"
@@ -93,7 +94,8 @@ func ParseConcatExpression(allocator pmem.Allocator, ctx context.Context, concat
 func coerceToString(allocator pmem.Allocator, buf []byte, oid ptypes.OID) (string, error) {
 	switch oid {
 	case ptypes.PTypeText, ptypes.PTypeVarchar:
-		return string(buf), nil
+		// Zero-copy conversion через utils.BytesToString
+		return utils.BytesToString(buf), nil
 
 	case ptypes.PTypeInt2:
 		v, err := serializers.Int2SerializerInstance.Deserialize(buf)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math/rand"
 	"petacore/internal/logger"
+	"petacore/sdk/pmem"
 	"sync"
 
 	"go.uber.org/zap"
@@ -29,11 +30,12 @@ type skipListNode[V any] = SkipListNode[V]
 
 // ConcurrentSkipListMap is a thread-safe skip list map
 type ConcurrentSkipListMap[V any] struct {
-	head     *SkipListNode[V]
-	level    int
-	mu       sync.RWMutex
-	rng      *rand.Rand
-	rngMutex sync.Mutex
+	head      *SkipListNode[V]
+	level     int
+	mu        sync.RWMutex
+	rng       *rand.Rand
+	rngMutex  sync.Mutex
+	allocator pmem.Allocator // allocator для временных данных (копий ключей)
 }
 
 // NewConcurrentSkipListMap creates a new concurrent skip list map
@@ -43,10 +45,16 @@ func NewConcurrentSkipListMap[V any]() *ConcurrentSkipListMap[V] {
 		forward: make([]*SkipListNode[V], maxLevel),
 	}
 	return &ConcurrentSkipListMap[V]{
-		head:  head,
-		level: 1,
-		rng:   rand.New(rand.NewSource(42)),
+		head:      head,
+		level:     1,
+		rng:       rand.New(rand.NewSource(42)),
+		allocator: nil, // будет установлен при первом использовании
 	}
+}
+
+// SetAllocator устанавливает allocator для временных данных
+func (sl *ConcurrentSkipListMap[V]) SetAllocator(allocator pmem.Allocator) {
+	sl.allocator = allocator
 }
 
 // randomLevel generates a random level for a new node
@@ -65,6 +73,8 @@ func (sl *ConcurrentSkipListMap[V]) randomLevel() int {
 func (sl *ConcurrentSkipListMap[V]) Put(key []byte, value V) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+
+	// Копируем ключ (для долгоживущих узлов используем обычное выделение)
 	insertKey := make([]byte, len(key))
 	copy(insertKey, key)
 
@@ -261,6 +271,7 @@ func (sl *ConcurrentSkipListMap[V]) ComputeIfAbsent(key []byte, mappingFunc func
 	// Create and insert once
 	v := mappingFunc()
 
+	// Копируем ключ (для долгоживущих узлов используем обычное выделение)
 	k := make([]byte, len(key))
 	copy(k, key)
 

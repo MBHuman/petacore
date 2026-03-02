@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"petacore/internal/utils"
 	"petacore/sdk/pmem"
 	"regexp"
 	"strconv"
@@ -29,8 +30,10 @@ func NewTypeText(val string) TypeText {
 func (t TypeText) GetType() OID      { return PTypeText }
 func (t TypeText) GetBuffer() []byte { return t.BufferPtr }
 
+// IntoGo returns the text as a Go string using zero-copy conversion.
+// The returned string shares memory with the underlying buffer.
 func (t TypeText) IntoGo() string {
-	return string(t.BufferPtr)
+	return utils.BytesToString(t.BufferPtr)
 }
 
 func (t TypeText) Compare(other BaseType[string]) int {
@@ -297,6 +300,15 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 		}
 		copy(buf, t.BufferPtr)
 		return AnyWrapper[[]byte]{TypeBytea{BufferPtr: buf}}, nil
+
+	case PTypeChar:
+		// CHAR (BPCHAR) - fixed-length string, same handling as VARCHAR
+		buf, err := allocator.Alloc(len(t.BufferPtr))
+		if err != nil {
+			return nil, fmt.Errorf("text cast to char: %w", err)
+		}
+		copy(buf, t.BufferPtr)
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		buf, err := allocator.Alloc(len(t.BufferPtr))

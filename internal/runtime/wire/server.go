@@ -1,7 +1,7 @@
-// TODO пересмотреть wire сервер, разбить на файлы, слишком много строк кода
 package wire
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/jackc/pgproto3/v2"
 	"go.uber.org/zap"
 
 	"petacore/internal/logger"
@@ -28,14 +28,16 @@ import (
 	ptypes "petacore/sdk/types"
 )
 
-// Session stores prepared statements, portals and session params
+// ─────────────────────────────────────────────
+// Session
+// ─────────────────────────────────────────────
+
 type Session struct {
 	preparedStatements map[string]*PreparedStatement
 	portals            map[string]*PreparedStatement
 	params             map[string]string
 }
 
-// NewSession creates a new session with initialized maps
 func NewSession() *Session {
 	return &Session{
 		preparedStatements: make(map[string]*PreparedStatement),
@@ -44,34 +46,53 @@ func NewSession() *Session {
 	}
 }
 
-// WireServer представляет PostgreSQL wire protocol сервер
-type WireServer struct {
-	storage  *storage.DistributedStorageVClock
-	listener net.Listener
-	port     string
+// ─────────────────────────────────────────────
+// PreparedStatement
+// ─────────────────────────────────────────────
+
+type FieldDescription struct {
+	Name        string
+	DataTypeOID uint32
 }
 
-// NewWireServer создает новый wire сервер
+type PreparedStatement struct {
+	Query             string
+	Stmt              statements.SQLStatement
+	Params            []interface{}
+	Columns           []FieldDescription
+	ParamOIDs         []uint32
+	ResultFormatCodes []int16
+}
+
+// ─────────────────────────────────────────────
+// WireServer
+// ─────────────────────────────────────────────
+
+type WireServer struct {
+	storage   *storage.DistributedStorageVClock
+	listener  net.Listener
+	port      string
+	allocPool *pmem.ArenaPool
+}
+
 func NewWireServer(storage *storage.DistributedStorageVClock, port string) *WireServer {
 	return &WireServer{
-		storage: storage,
-		port:    port,
+		storage:   storage,
+		port:      port,
+		allocPool: pmem.NewArenaPool(26 * 1024 * 1024),
 	}
 }
 
-// Start запускает сервер
 func (ws *WireServer) Start() error {
 	listener, err := net.Listen("tcp", ":"+ws.port)
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %s: %w", ws.port, err)
 	}
 	ws.listener = listener
-
 	go ws.acceptConnections()
 	return nil
 }
 
-// Stop останавливает сервер
 func (ws *WireServer) Stop() error {
 	if ws.listener != nil {
 		return ws.listener.Close()
@@ -83,7 +104,6 @@ func (ws *WireServer) acceptConnections() {
 	for {
 		conn, err := ws.listener.Accept()
 		if err != nil {
-			// Listener closed
 			return
 		}
 		logger.Info("Accepted connection")
@@ -91,402 +111,903 @@ func (ws *WireServer) acceptConnections() {
 	}
 }
 
+// ─────────────────────────────────────────────
+// Connection handler
+// ─────────────────────────────────────────────
+
 func (ws *WireServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	logger.Info("Accepted connection")
+	conn.SetDeadline(time.Now().Add(5 * time.Minute))
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetWriteBuffer(4 * 1024 * 1024) // 4MB вместо дефолтных ~128KB
+		tc.SetReadBuffer(1 * 1024 * 1024)
+		tc.SetNoDelay(false)
+	}
+
+	// Single large write buffer — all protocol writes go here.
+	// We Flush() only at explicit synchronisation points, so the OS sees
+	// one writev() per logical message group instead of one per field.
+	w := bufio.NewWriterSize(conn, 256*1024)
+	r := bufio.NewReaderSize(conn, 65536)
 
 	session := NewSession()
 
-	// Set timeout
-	conn.SetDeadline(time.Now().Add(5 * time.Minute))
-
-	// Create backend for message handling
-	backend := pgproto3.NewBackend(pgproto3.NewChunkReader(conn), conn)
-
-	// Read first message - could be SSL request or startup
-	msg, err := backend.ReceiveStartupMessage()
+	// ── Startup / SSL negotiation ─────────────────────────────────────
+	startupLen, err := readInt32(r)
 	if err != nil {
-		logger.Errorf("Error reading first message: %v", err)
+		logger.Errorf("read startup length: %v", err)
+		return
+	}
+	if startupLen < 4 {
+		logger.Errorf("startup length too small: %d", startupLen)
+		return
+	}
+	startupBody := make([]byte, startupLen-4)
+	if _, err := io.ReadFull(r, startupBody); err != nil {
+		logger.Errorf("read startup body: %v", err)
 		return
 	}
 
-	switch m := msg.(type) {
-	case *pgproto3.SSLRequest:
-		// We don't support SSL, send 'N'
-		logger.Info("SSL request received, sending 'N'")
-		conn.Write([]byte{'N'})
-		// Now read startup message
-		startupMessage, err := backend.ReceiveStartupMessage()
+	protoVersion := binary.BigEndian.Uint32(startupBody[:4])
+
+	if protoVersion == 80877103 { // SSLRequest
+		w.WriteByte('N') // no SSL
+		w.Flush()
+		// Re-read real startup
+		startupLen, err = readInt32(r)
 		if err != nil {
-			logger.Errorf("Error reading startup message after SSL: %v", err)
+			logger.Errorf("read startup after SSL: %v", err)
 			return
 		}
-		if sm, ok := startupMessage.(*pgproto3.StartupMessage); ok {
-			ws.handleStartup(backend, sm, session)
-		} else {
-			logger.Errorf("Unexpected message after SSL: %T", startupMessage)
+		startupBody = make([]byte, startupLen-4)
+		if _, err := io.ReadFull(r, startupBody); err != nil {
+			logger.Errorf("read startup body after SSL: %v", err)
 			return
 		}
-	case *pgproto3.StartupMessage:
-		ws.handleStartup(backend, m, session)
-	default:
-		logger.Errorf("Unexpected first message: %T", m)
-		return
 	}
 
-	// Main message loop
+	ws.sendStartup(w)
+	w.Flush()
+
+	// ── Main message loop ─────────────────────────────────────────────
 	for {
-		msg, err := backend.Receive()
+		msgType, err := r.ReadByte()
 		if err != nil {
-			if err == io.EOF {
-				logger.Info("Connection closed by client")
+			if err != io.EOF {
+				logger.Errorf("read message type: %v", err)
+			}
+			return
+		}
+		msgLen, err := readInt32(r)
+		if err != nil {
+			logger.Errorf("read message length: %v", err)
+			return
+		}
+		bodyLen := int(msgLen) - 4
+		var body []byte
+		if bodyLen > 0 {
+			body = make([]byte, bodyLen)
+			if _, err := io.ReadFull(r, body); err != nil {
+				logger.Errorf("read message body: %v", err)
 				return
 			}
-			// Any other error (including unexpected EOF) means connection is broken
-			logger.Errorf("Connection error: %v", err)
-			return
 		}
 
-		switch msg := msg.(type) {
-		case *pgproto3.Query:
-			logger.Debugf("Query: %s", msg.String)
-			ws.handleQuery(backend, msg.String, session)
-		case *pgproto3.Parse:
-			ws.handleParse(backend, msg, session)
-		case *pgproto3.Bind:
-			ws.handleBind(backend, msg, session)
-		case *pgproto3.Describe:
-			ws.handleDescribe(backend, msg, session)
-		case *pgproto3.Execute:
-			ws.handleExecute(backend, msg, session)
-		case *pgproto3.Sync:
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		case *pgproto3.Flush:
-			// Flush any pending output - in this implementation, Send() is synchronous
-			logger.Info("Flush received")
-		case *pgproto3.Terminate:
-			logger.Info("Terminate received")
+		switch msgType {
+		case 'Q': // Simple query
+			query := cstring(body)
+			logger.Debugf("Query: %s", query)
+			ws.handleQuery(w, query, session)
+			w.Flush()
+
+		case 'P': // Parse
+			ws.handleParse(w, body, session)
+			w.Flush()
+
+		case 'B': // Bind
+			ws.handleBind(w, body, session)
+			w.Flush()
+
+		case 'D': // Describe
+			ws.handleDescribe(w, body, session)
+			w.Flush()
+
+		case 'E': // Execute
+			ws.handleExecute(w, body, session)
+			w.Flush()
+
+		case 'S': // Sync
+			writeReadyForQuery(w)
+			w.Flush()
+
+		case 'H': // Flush
+			w.Flush()
+
+		case 'X': // Terminate
 			return
+
 		default:
-			logger.Errorf("Unsupported message type: %T", msg)
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "0A000",
-				Message:  "unsupported message type",
-			})
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+			logger.Errorf("unsupported message type: %c", msgType)
+			writeError(w, "0A000", "unsupported message type")
+			writeReadyForQuery(w)
+			w.Flush()
 		}
 	}
 }
 
-func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *pgproto3.StartupMessage, session *Session) {
-	// Send AuthenticationOk
-	backend.Send(&pgproto3.AuthenticationOk{})
+// ─────────────────────────────────────────────
+// Startup
+// ─────────────────────────────────────────────
 
-	// Send ParameterStatus
-	backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "13.0.0"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "server_encoding", Value: "UTF8"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "TimeZone", Value: "UTC"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "integer_datetimes", Value: "on"})
-	backend.Send(&pgproto3.ParameterStatus{Name: "application_name", Value: ""})
+func (ws *WireServer) sendStartup(w *bufio.Writer) {
+	// 1. AuthenticationOk — ВСЕГДА первым
+	writeMsg(w, 'R', func(b *msgBuf) {
+		b.int32(0)
+	})
 
-	// Send BackendKeyData (dummy)
-	backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: 1})
+	// 2. ParameterStatus — после аутентификации
+	writeParameterStatus(w, "server_version", "13.0.0")
+	writeParameterStatus(w, "client_encoding", "UTF8")
+	writeParameterStatus(w, "server_encoding", "UTF8")
+	writeParameterStatus(w, "standard_conforming_strings", "on")
+	writeParameterStatus(w, "TimeZone", "UTC")
+	writeParameterStatus(w, "integer_datetimes", "on")
+	writeParameterStatus(w, "application_name", "")
 
-	// Send ReadyForQuery
-	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-	logger.Info("Startup complete")
+	// 3. BackendKeyData
+	writeMsg(w, 'K', func(b *msgBuf) {
+		b.int32(1)
+		b.int32(1)
+	})
+
+	// 4. ReadyForQuery — последним
+	writeReadyForQuery(w)
 }
 
-func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse, session *Session) {
-	logger.Debugf("Parse name: '%s', query: '%s'", msg.Name, msg.Query)
-	// Создаем allocator для этого запроса
-	allocator := pmem.NewArena(1024 * 1024) // 1MB arena
-	defer allocator.Close()
+// ─────────────────────────────────────────────
+// Parse
+// ─────────────────────────────────────────────
+
+func (ws *WireServer) handleParse(w *bufio.Writer, body []byte, session *Session) {
+	name, rest := readCString(body)
+	query, rest := readCString(rest)
+	_ = rest // paramOIDs from client — we infer our own
+
+	logger.Debugf("Parse name=%q query=%q", name, query)
+
+	allocator := ws.allocPool.Get()
+	defer ws.allocPool.Put(allocator)
 
 	var stmt statements.SQLStatement
-	if strings.TrimSpace(msg.Query) == "" {
-		logger.Debug("Empty query in Parse, creating EmptyStatement")
+	if strings.TrimSpace(query) == "" {
 		stmt = &statements.EmptyStatement{}
 	} else {
 		var err error
-		stmt, err = visitor.ParseSQL(allocator, msg.Query)
+		stmt, err = visitor.ParseSQL(allocator, query)
 		if err != nil {
-			logger.Errorf("Parse error: %v", err)
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "42601",
-				Message:  err.Error(),
-			})
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+			writeError(w, "42601", err.Error())
+			writeReadyForQuery(w)
 			return
 		}
 	}
 
-	// Count parameters in query and determine their types
-	paramCount := countParams(msg.Query)
-	paramOIDs := ws.inferParameterTypes(stmt, paramCount)
-
-	logger.Debug("paramsOIDs:", zap.Any("paramsOIDs", paramOIDs))
-
-	session.preparedStatements[msg.Name] = &PreparedStatement{
-		Query:     msg.Query,
-		Stmt:      stmt,
-		ParamOIDs: paramOIDs,
-	}
-	// Build placeholder FieldDescriptions for SELECT prepared statements when possible.
-	// If the SELECT contains a '*' (IsSelectAll) we cannot know column count yet, so leave Columns nil.
-	inferredCols := ws.getFieldDescriptions(stmt)
-	if sel, ok := stmt.(*statements.SelectStatement); ok {
-		hasSelectAll := false
-		if sel.Primary != nil {
-			for _, c := range sel.Primary.Columns {
-				if c.IsSelectAll {
-					hasSelectAll = true
-					break
-				}
-			}
-		}
-
-		if hasSelectAll {
-			// Defer RowDescription until Execute when we know actual columns
-			session.preparedStatements[msg.Name].Columns = nil
-		} else if sel.Primary != nil && len(inferredCols) == len(sel.Primary.Columns) && len(inferredCols) > 0 {
-			// We were able to infer exact column descriptions (e.g., SELECT expressions without table)
-			session.preparedStatements[msg.Name].Columns = inferredCols
-		} else if sel.Primary != nil {
-			// Create placeholder descriptions from AST (names only, default to TEXT)
-			var fields []pgproto3.FieldDescription
-			for i, col := range sel.Primary.Columns {
-				var name string
-				if col.Alias != "" {
-					name = col.Alias
-				} else if col.Function != nil {
-					name = col.Function.Name
-				} else if col.ColumnName != "" {
-					name = col.ColumnName
-				} else {
-					name = fmt.Sprintf("column%d", i+1)
-				}
-				oid := uint32(25)
-				if col.Function != nil {
-					if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
-						oid = uint32(fn.GetFunction().ProRetType)
-					}
-				}
-				fields = append(fields, pgproto3.FieldDescription{
-					Name:                 []byte(name),
-					TableOID:             0,
-					TableAttributeNumber: 0,
-					DataTypeOID:          oid,
-					DataTypeSize:         -1,
-					TypeModifier:         -1,
-					Format:               0,
-				})
-			}
-			session.preparedStatements[msg.Name].Columns = fields
-		} else {
-			session.preparedStatements[msg.Name].Columns = nil
-		}
-	} else {
-		session.preparedStatements[msg.Name].Columns = inferredCols
-	}
-	logger.Infof("Prepared statement '%s' created", msg.Name)
-	backend.Send(&pgproto3.ParseComplete{})
-}
-
-// inferParameterTypes attempts to determine parameter types from statement context
-func (ws *WireServer) inferParameterTypes(stmt statements.SQLStatement, paramCount int) []uint32 {
+	paramCount := countParams(query)
 	paramOIDs := make([]uint32, paramCount)
-
-	// Default to INT4 for all parameters as most common use case
-	// This allows numeric IDs to work without type conversion
 	for i := range paramOIDs {
 		paramOIDs[i] = 23 // INT4
 	}
 
-	return paramOIDs
+	cols := ws.getFieldDescriptions(stmt)
+	session.preparedStatements[name] = &PreparedStatement{
+		Query:     query,
+		Stmt:      stmt,
+		ParamOIDs: paramOIDs,
+		Columns:   cols,
+	}
+
+	// ParseComplete: '1' + int32(4)
+	writeMsg(w, '1', func(b *msgBuf) {})
 }
 
-func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, session *Session) {
-	// Handle keep-alive queries and empty queries
-	trimmedQuery := strings.TrimSpace(query)
-	if trimmedQuery == "" || trimmedQuery == ";" || strings.ToLower(trimmedQuery) == "select 1" || strings.ToLower(trimmedQuery) == "keep alive" {
-		// Send empty result for keep-alive queries
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		return
-	}
+// ─────────────────────────────────────────────
+// Bind
+// ─────────────────────────────────────────────
 
-	// Создаем allocator для этого запроса
-	allocator := pmem.NewArena(26 * 1024 * 1024) // 26MB arena
+func (ws *WireServer) handleBind(w *bufio.Writer, body []byte, session *Session) {
+	portal, rest := readCString(body)
+	stmtName, rest := readCString(rest)
 
-	// Parse and execute query
-	stmt, err := visitor.ParseSQL(allocator, query)
-	if err != nil {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "42601",
-			Message:  err.Error(),
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		return
-	}
+	logger.Infof("Bind stmt=%q portal=%q", stmtName, portal)
 
-	logger.Debugf("Parsed statement: ", zap.Any("stmt", stmt))
-
-	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
-	if err != nil {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "XX000",
-			Message:  err.Error(),
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		return
-	}
-
-	// Send result based on statement type
-	switch stmt.(type) {
-	case *statements.CreateTableStatement:
-		// DDL - send CommandComplete
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("CREATE TABLE")})
-	case *statements.InsertStatement:
-		// DML - send CommandComplete
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("INSERT")})
-	case *statements.DropTableStatement:
-		// DDL - send CommandComplete
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("DROP TABLE")})
-	case *statements.TruncateTableStatement:
-		// DDL - send CommandComplete
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("TRUNCATE TABLE")})
-	case *statements.SelectStatement:
-		ws.sendSelectResult(backend, result, true)
-	case *statements.SetStatement:
-		// SET - send CommandComplete
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
-		// case *statements.ShowStatement:
-		// 	ws.sendDescribeResult(backend, result)
-	}
-
-	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-}
-
-func (ws *WireServer) handleDescribe(backend *pgproto3.Backend, msg *pgproto3.Describe, session *Session) {
-	switch msg.ObjectType {
-	case 'S':
-		// Describe prepared statement
-		ps, ok := session.preparedStatements[msg.Name]
-		if !ok {
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "26000",
-				Message:  "prepared statement does not exist",
-			})
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-			return
-		}
-		// Send ParameterDescription (empty for now)
-		backend.Send(&pgproto3.ParameterDescription{ParameterOIDs: ps.ParamOIDs})
-		// Do not execute the statement during Describe to infer columns - this
-		// may observe a different projection/state than will be produced on
-		// Execute and introduce mismatches. Only send RowDescription when we
-		// already have `ps.Columns` cached (set earlier by an explicit Prepare
-		// flow). This keeps Describe idempotent and avoids side-effects.
-		logger.Debugf("Describe prepared statement '%s': ps.Columns=%d (not sending RowDescription on Describe)", msg.Name, len(ps.Columns))
-	case 'P':
-		// Describe portal
-		ps, ok := session.portals[msg.Name]
-		if !ok {
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "26000",
-				Message:  "portal does not exist",
-			})
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-			return
-		}
-		// Do not execute the statement during Describe to infer columns for the
-		// same reasons as for prepared statements above. Only send a
-		// RowDescription when portal already carries column metadata.
-		logger.Debugf("Describe portal '%s': ps.Columns=%d (not sending RowDescription on Describe)", msg.Name, len(ps.Columns))
-	}
-}
-
-func (ws *WireServer) handleBind(backend *pgproto3.Backend, msg *pgproto3.Bind, session *Session) {
-	logger.Infof("Bind prepared: '%s', portal: '%s'", msg.PreparedStatement, msg.DestinationPortal)
-	ps, ok := session.preparedStatements[msg.PreparedStatement]
+	ps, ok := session.preparedStatements[stmtName]
 	if !ok {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "26000",
-			Message:  "prepared statement does not exist",
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		writeError(w, "26000", "prepared statement does not exist")
+		writeReadyForQuery(w)
 		return
 	}
 
-	// Check parameter count
-	expectedParams := len(ps.ParamOIDs)
-	providedParams := len(msg.Parameters)
-	if providedParams != expectedParams {
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "08P01",
-			Message:  fmt.Sprintf("Prepared statement \"%s\" requires %d parameters, but %d were provided", msg.PreparedStatement, expectedParams, providedParams),
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	// Number of parameter format codes
+	numFmtCodes := int(readInt16(rest))
+	rest = rest[2:]
+	paramFmtCodes := make([]int16, numFmtCodes)
+	for i := 0; i < numFmtCodes; i++ {
+		paramFmtCodes[i] = readInt16(rest)
+		rest = rest[2:]
+	}
+
+	// Number of parameters
+	numParams := int(readInt16(rest))
+	rest = rest[2:]
+
+	if numParams != len(ps.ParamOIDs) {
+		writeError(w, "08P01", fmt.Sprintf("expected %d parameters, got %d", len(ps.ParamOIDs), numParams))
+		writeReadyForQuery(w)
 		return
 	}
 
-	// Parse parameters from binary/text format
-	params := make([]interface{}, len(msg.Parameters))
-	for i, paramBytes := range msg.Parameters {
-		if paramBytes == nil {
+	params := make([]interface{}, numParams)
+	for i := 0; i < numParams; i++ {
+		paramLen := int(int32(binary.BigEndian.Uint32(rest)))
+		rest = rest[4:]
+		if paramLen == -1 {
 			params[i] = nil
-		} else {
-			// Determine format for this parameter
-			format := int16(0) // default text
-			if len(msg.ParameterFormatCodes) == 1 {
-				// Single format applies to all parameters
-				format = msg.ParameterFormatCodes[0]
-			} else if i < len(msg.ParameterFormatCodes) {
-				// Per-parameter format
-				format = msg.ParameterFormatCodes[i]
-			}
+			continue
+		}
+		paramBytes := rest[:paramLen]
+		rest = rest[paramLen:]
 
-			if format == 0 {
-				// Text format - just convert to string
-				params[i] = string(paramBytes)
-			} else {
-				// Binary format - decode based on OID
-				// For simplicity, decode as int32 if length is 4 bytes
-				if len(paramBytes) == 4 {
-					// INT4 binary format
-					val := int32(paramBytes[0])<<24 | int32(paramBytes[1])<<16 | int32(paramBytes[2])<<8 | int32(paramBytes[3])
-					params[i] = fmt.Sprintf("%d", val)
+		paramFmt := int16(0)
+		if len(paramFmtCodes) == 1 {
+			paramFmt = paramFmtCodes[0]
+		} else if i < len(paramFmtCodes) {
+			paramFmt = paramFmtCodes[i]
+		}
+
+		if paramFmt == 0 {
+			// Text format
+			params[i] = string(paramBytes)
+		} else {
+			// Binary format - decode based on OID and length
+			paramOID := ps.ParamOIDs[i]
+			switch paramOID {
+			case uint32(ptypes.PTypeBool): // BOOL
+				if len(paramBytes) == 1 {
+					params[i] = paramBytes[0] != 0
 				} else {
-					// Unknown binary format, treat as string
 					params[i] = string(paramBytes)
 				}
+			case uint32(ptypes.PTypeInt8), uint32(ptypes.PTypeInt2), uint32(ptypes.PTypeInt4): // INT8, INT2, INT4
+				switch len(paramBytes) {
+				case 2:
+					v := int16(binary.BigEndian.Uint16(paramBytes))
+					params[i] = strconv.FormatInt(int64(v), 10)
+				case 4:
+					v := int32(binary.BigEndian.Uint32(paramBytes))
+					params[i] = strconv.FormatInt(int64(v), 10)
+				case 8:
+					v := int64(binary.BigEndian.Uint64(paramBytes))
+					params[i] = strconv.FormatInt(v, 10)
+				default:
+					params[i] = string(paramBytes)
+				}
+			case uint32(ptypes.PTypeFloat4), uint32(ptypes.PTypeFloat8): // FLOAT4, FLOAT8
+				switch len(paramBytes) {
+				case 4:
+					bits := binary.BigEndian.Uint32(paramBytes)
+					params[i] = fmt.Sprintf("%g", math.Float32frombits(bits))
+				case 8:
+					bits := binary.BigEndian.Uint64(paramBytes)
+					params[i] = fmt.Sprintf("%g", math.Float64frombits(bits))
+				default:
+					params[i] = string(paramBytes)
+				}
+			default:
+				// For other types, keep as string
+				params[i] = string(paramBytes)
 			}
 		}
 	}
 
-	// Copy the prepared statement to the portal with result format codes and parameters
-	portalPS := &PreparedStatement{
+	// Result format codes
+	numResFmt := int(readInt16(rest))
+	rest = rest[2:]
+	resFmtCodes := make([]int16, numResFmt)
+	for i := 0; i < numResFmt; i++ {
+		resFmtCodes[i] = readInt16(rest)
+		rest = rest[2:]
+	}
+
+	session.portals[portal] = &PreparedStatement{
 		Query:             ps.Query,
 		Stmt:              ps.Stmt,
 		Params:            params,
 		Columns:           ps.Columns,
 		ParamOIDs:         ps.ParamOIDs,
-		ResultFormatCodes: msg.ResultFormatCodes,
+		ResultFormatCodes: resFmtCodes,
 	}
-	session.portals[msg.DestinationPortal] = portalPS
-	backend.Send(&pgproto3.BindComplete{})
+
+	// BindComplete: '2' + int32(4)
+	writeMsg(w, '2', func(b *msgBuf) {})
+}
+
+// ─────────────────────────────────────────────
+// Describe
+// ─────────────────────────────────────────────
+
+func (ws *WireServer) handleDescribe(w *bufio.Writer, body []byte, session *Session) {
+	objType := body[0]
+	name := cstring(body[1:])
+
+	switch objType {
+	case 'S':
+		ps, ok := session.preparedStatements[name]
+		if !ok {
+			writeError(w, "26000", "prepared statement does not exist")
+			writeReadyForQuery(w)
+			return
+		}
+		writeParameterDescription(w, ps.ParamOIDs)
+		// Don't send RowDescription here — defer to Execute
+		logger.Debugf("Describe stmt=%q cols=%d", name, len(ps.Columns))
+
+	case 'P':
+		_, ok := session.portals[name]
+		if !ok {
+			writeError(w, "26000", "portal does not exist")
+			writeReadyForQuery(w)
+			return
+		}
+		logger.Debugf("Describe portal=%q", name)
+	}
+}
+
+// ─────────────────────────────────────────────
+// Execute
+// ─────────────────────────────────────────────
+
+func (ws *WireServer) handleExecute(w *bufio.Writer, body []byte, session *Session) {
+	portal := cstring(body)
+	logger.Debugf("Execute portal=%q", portal)
+
+	allocator := ws.allocPool.Get()
+
+	ps, ok := session.portals[portal]
+	if !ok {
+		ws.allocPool.Put(allocator)
+		writeError(w, "26000", "portal does not exist")
+		writeReadyForQuery(w)
+		return
+	}
+
+	stmt := ps.Stmt
+	if len(ps.Params) > 0 {
+		substituted := substituteParams(ps.Query, ps.Params)
+		logger.Debugf("Substituted query: %s", substituted)
+		var err error
+		stmt, err = visitor.ParseSQL(allocator, substituted)
+		if err != nil {
+			ws.allocPool.Put(allocator)
+			writeError(w, "42601", err.Error())
+			writeReadyForQuery(w)
+			return
+		}
+	}
+
+	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
+	if err != nil {
+		ws.allocPool.Put(allocator)
+		writeError(w, "XX000", err.Error())
+		writeReadyForQuery(w)
+		return
+	}
+
+	switch ps.Stmt.(type) {
+	case *statements.EmptyStatement:
+		writeEmptyQueryResponse(w)
+	case *statements.CreateTableStatement:
+		writeCommandComplete(w, "CREATE TABLE")
+	case *statements.InsertStatement:
+		writeCommandComplete(w, "INSERT")
+	case *statements.DropTableStatement:
+		writeCommandComplete(w, "DROP TABLE")
+	case *statements.TruncateTableStatement:
+		writeCommandComplete(w, "TRUNCATE TABLE")
+	case *statements.SetStatement:
+		writeCommandComplete(w, "SET")
+	case *statements.SelectStatement:
+		ws.sendSelectResult(w, result, ps.Columns, ps.ResultFormatCodes)
+	}
+
+	ws.allocPool.Put(allocator)
+}
+
+// ─────────────────────────────────────────────
+// Simple Query
+// ─────────────────────────────────────────────
+
+func (ws *WireServer) handleQuery(w *bufio.Writer, query string, session *Session) {
+	q := strings.TrimSpace(query)
+	if q == "" || q == ";" || strings.EqualFold(q, "select 1") || strings.EqualFold(q, "keep alive") {
+		writeCommandComplete(w, "SELECT 1")
+		writeReadyForQuery(w)
+		return
+	}
+
+	allocator := ws.allocPool.Get()
+
+	stmt, err := visitor.ParseSQL(allocator, query)
+	if err != nil {
+		ws.allocPool.Put(allocator)
+		writeError(w, "42601", err.Error())
+		writeReadyForQuery(w)
+		return
+	}
+
+	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
+	if err != nil {
+		ws.allocPool.Put(allocator)
+		writeError(w, "XX000", err.Error())
+		writeReadyForQuery(w)
+		return
+	}
+
+	switch stmt.(type) {
+	case *statements.CreateTableStatement:
+		writeCommandComplete(w, "CREATE TABLE")
+		ws.allocPool.Put(allocator)
+	case *statements.InsertStatement:
+		writeCommandComplete(w, "INSERT")
+		ws.allocPool.Put(allocator)
+	case *statements.DropTableStatement:
+		writeCommandComplete(w, "DROP TABLE")
+		ws.allocPool.Put(allocator)
+	case *statements.TruncateTableStatement:
+		writeCommandComplete(w, "TRUNCATE TABLE")
+		ws.allocPool.Put(allocator)
+	case *statements.SetStatement:
+		writeCommandComplete(w, "SET")
+		ws.allocPool.Put(allocator)
+	case *statements.SelectStatement:
+		cols := ws.getFieldDescriptions(stmt)
+		ws.sendSelectResult(w, result, cols, nil)
+		ws.allocPool.Put(allocator)
+	}
+
+	writeReadyForQuery(w)
+}
+
+// ─────────────────────────────────────────────
+// SELECT result serialisation
+// ─────────────────────────────────────────────
+
+const flushThreshold = 512 * 1024 // 512KB
+
+func (ws *WireServer) sendSelectResult(
+	w *bufio.Writer,
+	result *table.ExecuteResult,
+	portalCols []FieldDescription,
+	formatCodes []int16,
+) {
+	// Determine column metadata
+	var colNames []string
+	var colOIDs []ptypes.OID
+
+	if result.Schema != nil && len(result.Schema.Fields) > 0 {
+		for _, f := range result.Schema.Fields {
+			colNames = append(colNames, f.Name)
+			colOIDs = append(colOIDs, f.OID)
+		}
+	} else if len(portalCols) > 0 {
+		for _, c := range portalCols {
+			colNames = append(colNames, c.Name)
+			colOIDs = append(colOIDs, ptypes.OID(c.DataTypeOID))
+		}
+	}
+
+	nCols := len(colNames)
+
+	// RowDescription
+	writeMsg(w, 'T', func(b *msgBuf) {
+		b.int16(int16(nCols))
+		for i := 0; i < nCols; i++ {
+			b.cstring(colNames[i])
+			b.int32(0)                   // tableOID
+			b.int16(0)                   // attNum
+			b.uint32(uint32(colOIDs[i])) // dataTypeOID
+			b.int16(-1)                  // dataTypeSize
+			b.int32(-1)                  // typeModifier
+			b.int16(0)                   // format (text)
+		}
+	})
+
+	bp := rowsBufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+
+	for _, row := range result.Rows {
+		buf = appendDataRow(buf, result, row, formatCodes)
+
+		// Флашим кусками — не ждём пока накопится гигабайт
+		if len(buf) >= flushThreshold {
+			w.Write(buf)
+			w.Flush()     // явный flush каждые 512KB
+			buf = buf[:0] // сбрасываем без реаллокации
+		}
+	}
+
+	if len(buf) > 0 {
+		w.Write(buf)
+	}
+
+	*bp = buf
+	rowsBufPool.Put(bp)
+
+	writeCommandComplete(w, fmt.Sprintf("SELECT %d", len(result.Rows)))
+}
+
+var rowsBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 256*1024) // 256KB начальный размер
+		return &b
+	},
+}
+
+func appendDataRow(dst []byte, result *table.ExecuteResult, row *ptypes.Row, formatCodes []int16) []byte {
+	nCols := len(result.Schema.Fields)
+
+	// Запоминаем позицию начала сообщения
+	start := len(dst)
+
+	// Заголовок: 'D' + placeholder length (заполним потом) + nCols
+	dst = append(dst, 'D', 0, 0, 0, 0) // тип + длина
+	dst = binary.BigEndian.AppendUint16(dst, uint16(nCols))
+
+	for i := 0; i < nCols; i++ {
+		var value interface{}
+		if i < len(result.Schema.Fields) {
+			buf, oid, err := result.Schema.GetField(row, i)
+			if err == nil && buf != nil {
+				if bt, err := serializers.DeserializeGeneric(buf, oid); err == nil && bt != nil {
+					value = bt.IntoGo()
+				}
+			}
+		}
+
+		if value == nil {
+			dst = binary.BigEndian.AppendUint32(dst, uint32(math.MaxUint32)) // -1 = NULL
+			continue
+		}
+
+		fmtCode := int16(0)
+		if len(formatCodes) == 1 {
+			fmtCode = formatCodes[0]
+		} else if i < len(formatCodes) {
+			fmtCode = formatCodes[i]
+		}
+
+		colOID := result.Schema.Fields[i].OID
+		encoded := encodeValue(value, colOID, fmtCode)
+
+		dst = binary.BigEndian.AppendUint32(dst, uint32(len(encoded)))
+		dst = append(dst, encoded...)
+	}
+
+	// Записываем итоговую длину сообщения (без байта типа)
+	msgLen := len(dst) - start - 1 // -1 за тип 'D'
+	binary.BigEndian.PutUint32(dst[start+1:], uint32(msgLen))
+
+	return dst
+}
+
+// encodeValue serialises a Go value into PostgreSQL wire bytes (text or binary).
+func encodeValue(value interface{}, colOID ptypes.OID, format int16) []byte {
+	if format == 1 {
+		return encodeBinary(value, colOID)
+	}
+	return encodeText(value, colOID)
+}
+
+func encodeText(value interface{}, colOID ptypes.OID) []byte {
+	switch colOID {
+	case ptypes.PTypeTimestamp, ptypes.PTypeTimestampz:
+		switch ts := value.(type) {
+		case int64:
+			t := time.UnixMicro(ts)
+			if colOID == ptypes.PTypeTimestampz {
+				return []byte(t.Format("2006-01-02 15:04:05.999999-07"))
+			}
+			return []byte(t.UTC().Format("2006-01-02 15:04:05.999999"))
+		case *time.Time:
+			if ts != nil {
+				if colOID == ptypes.PTypeTimestampz {
+					return []byte(ts.Format("2006-01-02 15:04:05.999999-07"))
+				}
+				return []byte(ts.UTC().Format("2006-01-02 15:04:05.999999"))
+			}
+		}
+	}
+
+	switch v := value.(type) {
+	case bool:
+		if v {
+			return []byte("t")
+		}
+		return []byte("f")
+	case int:
+		return strconv.AppendInt(nil, int64(v), 10)
+	case int32:
+		return strconv.AppendInt(nil, int64(v), 10)
+	case int64:
+		return strconv.AppendInt(nil, v, 10)
+	case float32:
+		return strconv.AppendFloat(nil, float64(v), 'f', -1, 32)
+	case float64:
+		return strconv.AppendFloat(nil, v, 'f', -1, 64)
+	case string:
+		return []byte(v)
+	case []string:
+		return []byte(formatArrayAsText(v))
+	case []int32:
+		return []byte(formatArrayAsText(v))
+	case []int64:
+		return []byte(formatArrayAsText(v))
+	case []float64:
+		return []byte(formatArrayAsText(v))
+	case []bool:
+		return []byte(formatArrayAsText(v))
+	default:
+		return []byte(fmt.Sprintf("%v", v))
+	}
+}
+
+func encodeBinary(value interface{}, colOID ptypes.OID) []byte {
+	switch colOID {
+	case ptypes.PTypeBool:
+		if b, ok := value.(bool); ok {
+			if b {
+				return []byte{1}
+			}
+			return []byte{0}
+		}
+	case ptypes.PTypeInt2, ptypes.PTypeInt4:
+		v := toInt64(value)
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(int32(v)))
+		return buf
+	case ptypes.PTypeInt8:
+		v := toInt64(value)
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, uint64(v))
+		return buf
+	case ptypes.PTypeFloat8:
+		var f float64
+		switch vv := value.(type) {
+		case float32:
+			f = float64(vv)
+		case float64:
+			f = vv
+		case string:
+			f, _ = strconv.ParseFloat(vv, 64)
+		}
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, math.Float64bits(f))
+		return buf
+	case ptypes.PTypeTimestamp, ptypes.PTypeTimestampz:
+		var v64 int64
+		switch vv := value.(type) {
+		case int64:
+			v64 = vv
+		case int:
+			v64 = int64(vv)
+		case string:
+			v64, _ = strconv.ParseInt(vv, 10, 64)
+		}
+		t := time.UnixMicro(v64)
+		return []byte(fmt.Sprintf("%v", t))
+	}
+	// Fallback: text
+	return encodeText(value, colOID)
+}
+
+func toInt64(v interface{}) int64 {
+	switch vv := v.(type) {
+	case int:
+		return int64(vv)
+	case int32:
+		return int64(vv)
+	case int64:
+		return vv
+	case string:
+		n, _ := strconv.ParseInt(vv, 10, 64)
+		return n
+	}
+	return 0
+}
+
+// ─────────────────────────────────────────────
+// Field descriptions (for Describe/Parse)
+// ─────────────────────────────────────────────
+
+func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []FieldDescription {
+	sel, ok := stmt.(*statements.SelectStatement)
+	if !ok || sel.Primary == nil {
+		return nil
+	}
+
+	primary := sel.Primary
+	var fields []FieldDescription
+
+	colResolver := func(colName, alias, fnName string, isSelectAll bool) FieldDescription {
+		name := alias
+		if name == "" {
+			if fnName != "" {
+				name = fnName
+			} else if colName != "" {
+				name = colName
+			} else {
+				name = "?column?"
+			}
+		}
+		oid := uint32(25) // TEXT
+		if fnName != "" {
+			if fn, ok := functions.GetRegisteredFunction(fnName); ok {
+				oid = uint32(fn.GetFunction().ProRetType)
+			}
+		}
+		return FieldDescription{Name: name, DataTypeOID: oid}
+	}
+
+	if primary.From == nil {
+		for _, col := range primary.Columns {
+			fnName := ""
+			if col.Function != nil {
+				fnName = col.Function.Name
+			}
+			fields = append(fields, colResolver(col.ColumnName, col.Alias, fnName, col.IsSelectAll))
+		}
+		return fields
+	}
+
+	tableName := primary.From.TableName
+	if system.IsSystemTable(tableName) {
+		for _, col := range primary.Columns {
+			oid := uint32(25)
+			name := col.ColumnName
+			if col.ColumnName == "ssl" {
+				oid = 16
+			}
+			fields = append(fields, FieldDescription{Name: name, DataTypeOID: oid})
+		}
+		return fields
+	}
+
+	// Normal table — schema not known statically
+	return nil
+}
+
+// ─────────────────────────────────────────────
+// Low-level protocol writers (zero extra alloc)
+// ─────────────────────────────────────────────
+
+// msgBuf accumulates a message body and writes it atomically.
+type msgBuf struct {
+	w    *bufio.Writer
+	typ  byte
+	data []byte
+}
+
+var writeBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 8192)
+		return &b
+	},
+}
+
+// Собирает тип + длина + тело в один []byte → один w.Write()
+func writeMsg(w *bufio.Writer, typ byte, fn func(b *msgBuf)) {
+	bp := writeBufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+
+	// Резервируем место под заголовок (5 байт: тип + int32)
+	buf = append(buf, typ, 0, 0, 0, 0)
+
+	mb := &msgBuf{data: buf[5:]} // тело пишем после заголовка
+	fn(mb)
+
+	// Объединяем заголовок + тело
+	full := append(buf[:5], mb.data...)
+	// Записываем длину (len тела + 4 для самого int32)
+	binary.BigEndian.PutUint32(full[1:5], uint32(len(mb.data)+4))
+
+	w.Write(full)
+
+	*bp = full[:0]
+	writeBufPool.Put(bp)
+}
+
+func (b *msgBuf) raw(p []byte)     { b.data = append(b.data, p...) }
+func (b *msgBuf) cstring(s string) { b.data = append(append(b.data, s...), 0) }
+func (b *msgBuf) int16(v int16)    { b.data = binary.BigEndian.AppendUint16(b.data, uint16(v)) }
+func (b *msgBuf) int32(v int32)    { b.data = binary.BigEndian.AppendUint32(b.data, uint32(v)) }
+func (b *msgBuf) uint32(v uint32)  { b.data = binary.BigEndian.AppendUint32(b.data, v) }
+
+func writeReadyForQuery(w *bufio.Writer) {
+	// 'Z' + int32(5) + 'I'
+	w.Write([]byte{'Z', 0, 0, 0, 5, 'I'})
+}
+
+func writeCommandComplete(w *bufio.Writer, tag string) {
+	writeMsg(w, 'C', func(b *msgBuf) {
+		b.cstring(tag)
+	})
+}
+
+func writeEmptyQueryResponse(w *bufio.Writer) {
+	w.Write([]byte{'I', 0, 0, 0, 4})
+}
+
+func writeError(w *bufio.Writer, code, msg string) {
+	writeMsg(w, 'E', func(b *msgBuf) {
+		b.data = append(b.data, 'S')
+		b.cstring("ERROR")
+		b.data = append(b.data, 'C')
+		b.cstring(code)
+		b.data = append(b.data, 'M')
+		b.cstring(msg)
+		b.data = append(b.data, 0) // terminator
+	})
+}
+
+func writeParameterStatus(w *bufio.Writer, name, value string) {
+	writeMsg(w, 'S', func(b *msgBuf) {
+		b.cstring(name)
+		b.cstring(value)
+	})
+}
+
+func writeParameterDescription(w *bufio.Writer, oids []uint32) {
+	writeMsg(w, 't', func(b *msgBuf) {
+		b.int16(int16(len(oids)))
+		for _, oid := range oids {
+			b.uint32(oid)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────
+
+func readInt32(r *bufio.Reader) (int32, error) {
+	var buf [4]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		return 0, err
+	}
+	return int32(binary.BigEndian.Uint32(buf[:])), nil
+}
+
+func readInt16(b []byte) int16 {
+	return int16(binary.BigEndian.Uint16(b[:2]))
+}
+
+// cstring reads a null-terminated C string from a byte slice.
+func cstring(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return string(b)
+}
+
+// readCString returns (string, remaining bytes).
+func readCString(b []byte) (string, []byte) {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i]), b[i+1:]
+		}
+	}
+	return string(b), nil
 }
 
 var paramRe = regexp.MustCompile(`\$(\d+)`)
@@ -495,11 +1016,7 @@ func countParams(query string) int {
 	m := paramRe.FindAllStringSubmatch(query, -1)
 	max := 0
 	for _, mm := range m {
-		// mm[1] = digits
-		n, err := strconv.Atoi(mm[1])
-		if err != nil {
-			continue
-		}
+		n, _ := strconv.Atoi(mm[1])
 		if n > max {
 			max = n
 		}
@@ -507,699 +1024,86 @@ func countParams(query string) int {
 	return max
 }
 
-// TODO пересмотреть, сейчас несколько стратегий на FROM в select
-func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgproto3.FieldDescription {
-	switch s := stmt.(type) {
-	case *statements.SelectStatement:
-		var fields []pgproto3.FieldDescription
-
-		// With new structure, SelectStatement has Primary or Combined
-		// For now, only handle Primary SELECT for field descriptions
-		if s.Primary == nil {
-			// Combined statement or no primary - return empty for now
-			return fields
-		}
-
-		primary := s.Primary
-		if primary.From == nil {
-			// When there's no FROM (SELECT expressions without table), infer column types
-			for _, col := range primary.Columns {
-				var name string
-				var oid uint32 = 25 // default TEXT
-				if col.Alias != "" {
-					name = col.Alias
-				} else if col.Function != nil {
-					name = col.Function.Name
-					// Try to infer type from registered functions
-					if fn, ok := functions.GetRegisteredFunction(col.Function.Name); ok {
-						oid = uint32(fn.GetFunction().ProRetType)
-					} else {
-						// Fallback: if aggregate or known, keep TEXT
-						oid = 25
-					}
-				} else if col.ColumnName != "" {
-					name = col.ColumnName
-				} else {
-					name = "?column?"
-				}
-				fields = append(fields, pgproto3.FieldDescription{
-					Name:                 []byte(name),
-					TableOID:             0,
-					TableAttributeNumber: 0,
-					DataTypeOID:          oid,
-					DataTypeSize:         -1,
-					TypeModifier:         -1,
-					Format:               0,
-				})
+func substituteParams(query string, params []interface{}) string {
+	result := query
+	for i, param := range params {
+		placeholder := fmt.Sprintf("$%d", i+1)
+		var replacement string
+		if param == nil {
+			replacement = "NULL"
+		} else if b, ok := param.(bool); ok {
+			// Handle bool specially
+			if b {
+				replacement = "true"
+			} else {
+				replacement = "false"
 			}
-			return fields
-		}
-
-		tableName := primary.From.TableName
-
-		if tableName == "" {
-			// System functions
-			for _, col := range primary.Columns {
-				var name string
-				if col.Alias != "" {
-					name = col.Alias
-				} else if col.Function != nil {
-					name = col.Function.Name
-				} else {
-					name = col.ColumnName
-				}
-				fields = append(fields, pgproto3.FieldDescription{
-					Name:                 []byte(name),
-					TableOID:             0,
-					TableAttributeNumber: 0,
-					DataTypeOID:          25, // TEXT
-					DataTypeSize:         -1,
-					TypeModifier:         -1,
-					Format:               0,
-				})
-			}
-		} else if system.IsSystemTable(tableName) {
-			// For system tables, determine columns from stmt.Columns
-			for _, col := range primary.Columns {
-				var name string
-				var oid uint32 = 25 // Default TEXT
-				if col.ColumnName == "*" {
-					// For SELECT *, assume ssl column for pg_stat_ssl
-					if tableName == "pg_stat_ssl" {
-						name = "ssl"
-						oid = 16 // BOOL
-					} else {
-						name = "column1"
-					}
-				} else {
-					name = col.ColumnName
-					// Set OID based on column name if known
-					if name == "ssl" {
-						oid = 16 // BOOL
-					}
-				}
-				fields = append(fields, pgproto3.FieldDescription{
-					Name:                 []byte(name),
-					TableOID:             0,
-					TableAttributeNumber: 0,
-					DataTypeOID:          oid,
-					DataTypeSize:         -1,
-					TypeModifier:         -1,
-					Format:               0,
-				})
+		} else if s, ok := param.(string); ok {
+			if _, err := strconv.Atoi(s); err == nil {
+				replacement = s
+			} else {
+				replacement = fmt.Sprintf("'%v'", s)
 			}
 		} else {
-			// For normal tables, need to get from metadata
-			// Simplified
-			fields = []pgproto3.FieldDescription{}
+			replacement = fmt.Sprintf("%v", param)
 		}
-		return fields
-	default:
-		return []pgproto3.FieldDescription{}
+		result = strings.ReplaceAll(result, placeholder, replacement)
 	}
+	return result
 }
 
-func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Execute, session *Session) {
-	logger.Debugf("Execute portal: '%s'", msg.Portal)
+// ─────────────────────────────────────────────
+// Array formatting
+// ─────────────────────────────────────────────
 
-	// Создаем allocator для этой операции
-	allocator := pmem.NewArena(26 * 1024 * 1024) // 26MB arena
-	defer allocator.Close()
-
-	ps, ok := session.portals[msg.Portal]
-	if !ok {
-		logger.Errorf("Portal %s does not exist", msg.Portal)
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "26000",
-			Message:  "portal does not exist",
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		return
-	}
-	logger.Debugf("Executing prepared statement: %s", ps.Query)
-	logger.Debugf("Statement AST: %+v", ps.Stmt)
-	logger.Debugf("Parameters: %+v", ps.Params)
-
-	// If there are parameters, we need to re-parse with substituted values
-	var stmt statements.SQLStatement
-	if len(ps.Params) > 0 {
-		// Substitute parameters in query
-		substitutedQuery := ps.Query
-		for i, param := range ps.Params {
-			placeholder := fmt.Sprintf("$%d", i+1)
-			var replacement string
-			if param == nil {
-				replacement = "NULL"
-			} else {
-				// Check if it's a string parameter - only quote strings
-				paramStr, isString := param.(string)
-				if isString {
-					// Try to parse as number first
-					if _, err := strconv.Atoi(paramStr); err == nil {
-						// It's a numeric string, don't quote
-						replacement = paramStr
-					} else {
-						// It's a text string, quote it
-						replacement = fmt.Sprintf("'%v'", param)
-					}
-				} else {
-					// It's already a non-string type (int, float, etc), don't quote
-					replacement = fmt.Sprintf("%v", param)
-				}
-			}
-			substitutedQuery = strings.ReplaceAll(substitutedQuery, placeholder, replacement)
-		}
-		logger.Debugf("Substituted query: %s", substitutedQuery)
-
-		// Re-parse with substituted values
-		var err error
-		stmt, err = visitor.ParseSQL(allocator, substitutedQuery)
-		if err != nil {
-			logger.Errorf("Parse error after substitution: %v", err)
-			backend.Send(&pgproto3.ErrorResponse{
-				Severity: "ERROR",
-				Code:     "42601",
-				Message:  err.Error(),
-			})
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-			return
-		}
-	} else {
-		stmt = ps.Stmt
-	}
-
-	// Execute the statement
-	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
-	if err != nil {
-		logger.Errorf("Execute error: %v", err)
-		backend.Send(&pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "XX000",
-			Message:  err.Error(),
-		})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		return
-	}
-
-	logger.Debugf("Execute result: %+v", result)
-
-	// Send result based on statement type (similar to handleQuery)
-	switch ps.Stmt.(type) {
-	case *statements.EmptyStatement:
-		backend.Send(&pgproto3.EmptyQueryResponse{})
-	case *statements.CreateTableStatement:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("CREATE TABLE")})
-	case *statements.InsertStatement:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("INSERT")})
-	case *statements.DropTableStatement:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("DROP TABLE")})
-	case *statements.SelectStatement:
-		// For portals, if a RowDescription was already provided during Describe, send that
-		formatCodes := ps.ResultFormatCodes
-		if len(ps.Columns) > 0 {
-			// Send RowDescription based on prepared/portal columns, applying requested format codes
-			rowDesc := &pgproto3.RowDescription{}
-			for i, fd := range ps.Columns {
-				// Determine OID: prefer actual executed result column type when available
-				var oid uint32 = uint32(fd.DataTypeOID)
-				if result.Schema != nil && i < len(result.Schema.Fields) {
-					oid = uint32(result.Schema.Fields[i].OID)
-				}
-				// Force text format for data rows for now
-				format := int16(0)
-
-				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-					Name:                 fd.Name,
-					TableOID:             fd.TableOID,
-					TableAttributeNumber: fd.TableAttributeNumber,
-					DataTypeOID:          oid,
-					DataTypeSize:         fd.DataTypeSize,
-					TypeModifier:         fd.TypeModifier,
-					Format:               format,
-				})
-			}
-			logger.Debugf("Execute (portal) - sending RowDescription: ps.Columns=%d, result.Schema.Fields=%d", len(ps.Columns), func() int {
-				if result.Schema != nil {
-					return len(result.Schema.Fields)
-				}
-				return 0
-			}())
-			backend.Send(rowDesc)
-			// Send only data rows; do not resend RowDescription. Use portal's column count as expected.
-			ws.sendSelectResultWithFormats(backend, result, false, formatCodes, len(ps.Columns))
-		} else {
-			// No prior description; let sendSelectResultWithFormats send RowDescription
-			colCount := 0
-			if result.Schema != nil {
-				colCount = len(result.Schema.Fields)
-			}
-			logger.Debugf("Execute - no prior description, will send RowDescription from result.Schema: result.Schema.Fields=%d", colCount)
-			ws.sendSelectResultWithFormats(backend, result, true, formatCodes, colCount)
-		}
-	case *statements.SetStatement:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
-		// case *statements.ShowStatement:
-		// 	ws.sendDescribeResult(backend, result)
-	}
-}
-
-func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16, expectedCols int) {
-	schemaFieldCount := 0
-	if result.Schema != nil {
-		schemaFieldCount = len(result.Schema.Fields)
-	}
-	logger.Debugf("sendSelectResultWithFormats: sendRowDesc=%v, result.Schema.Fields=%d, expectedCols=%d, rows=%d, formatCodes=%v", sendRowDesc, schemaFieldCount, expectedCols, len(result.Rows), formatCodes)
-
-	if len(result.Rows) == 0 {
-		// No data
-		if sendRowDesc && result.Schema != nil {
-			rowDesc := &pgproto3.RowDescription{}
-			for _, field := range result.Schema.Fields {
-				oid := field.OID
-				format := int16(0)
-				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-					Name:                 []byte(field.Name),
-					TableOID:             0,
-					TableAttributeNumber: 0,
-					DataTypeOID:          uint32(oid),
-					DataTypeSize:         -1,
-					TypeModifier:         -1,
-					Format:               format,
-				})
-			}
-			logger.Debug("Sending RowDescription", zap.Int("fields", len(rowDesc.Fields)), zap.Any("fieldsDesc", rowDesc.Fields))
-			backend.Send(rowDesc)
-		}
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", 0))})
-		return
-	}
-
-	// RowDescription
-	if sendRowDesc && result.Schema != nil {
-		rowDesc := &pgproto3.RowDescription{}
-		logger.Debug("sendSelectResultWithFormats: columns", zap.Any("result.Schema.Fields", result.Schema.Fields))
-		for _, field := range result.Schema.Fields {
-			oid := field.OID
-			format := int16(0)
-			rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-				Name:                 []byte(field.Name),
-				TableOID:             0,
-				TableAttributeNumber: 0,
-				DataTypeOID:          uint32(oid),
-				DataTypeSize:         -1,
-				TypeModifier:         -1,
-				Format:               format,
-			})
-		}
-		logger.Debug("Sending RowDescription", zap.Int("fields", len(rowDesc.Fields)), zap.Any("fieldsDesc", rowDesc.Fields))
-		backend.Send(rowDesc)
-	}
-
-	// Data rows
-	for rIdx, row := range result.Rows {
-		if rIdx < 5 && result.Schema != nil {
-			logger.Debugf("DataRow %d: columns=%d", rIdx, len(result.Schema.Fields))
-		}
-		logger.Debug("DEBUG: Sending row:", zap.Any("row", row))
-
-		// Determine how many columns we must emit for this DataRow. If we
-		// just sent a RowDescription in this call, use the result.Schema.Fields
-		// length; otherwise use the expectedCols provided by the caller
-		// (which should match the RowDescription already sent earlier).
-		colCount := expectedCols
-		if sendRowDesc && result.Schema != nil {
-			colCount = len(result.Schema.Fields)
-		}
-
-		dataRow := &pgproto3.DataRow{}
-		for i := 0; i < colCount; i++ {
-			// Extract field from binary row
-			var value interface{}
-			if result.Schema != nil && i < len(result.Schema.Fields) {
-				buf, oid, err := result.Schema.GetField(row, i)
-				if err != nil {
-					value = nil
-				} else if buf == nil {
-					value = nil
-				} else {
-					// Deserialize the value and extract native Go type
-					if bt, err := serializers.DeserializeGeneric(buf, oid); err == nil && bt != nil {
-						value = bt.IntoGo()
-					} else {
-						value = nil
-					}
-				}
-			} else {
-				value = nil
-			}
-
-			// Determine format for this column
-			format := int16(0)
-			if len(formatCodes) == 1 {
-				format = formatCodes[0]
-			} else if i < len(formatCodes) {
-				format = formatCodes[i]
-			}
-
-			if rIdx < 3 {
-				// Log per-column format info for first few rows to help debug
-				colOID := ptypes.PTypeText
-				if result.Schema != nil && i < len(result.Schema.Fields) {
-					colOID = result.Schema.Fields[i].OID
-				}
-				logger.Debugf("Row %d col %d: format=%d, colOID=%d, valueType=%T", rIdx, i, format, colOID, value)
-			}
-
-			if value == nil {
-				dataRow.Values = append(dataRow.Values, nil)
-				continue
-			}
-
-			if format == 1 {
-				// Binary format encoding based on column OID. If the
-				// result doesn't have type information for this index,
-				// default to string behavior.
-				colOID := ptypes.PTypeText
-				if result.Schema != nil && i < len(result.Schema.Fields) {
-					colOID = result.Schema.Fields[i].OID
-				}
-				switch colOID {
-				case ptypes.PTypeBool:
-					if b, ok := value.(bool); ok {
-						if b {
-							dataRow.Values = append(dataRow.Values, []byte{1})
-						} else {
-							dataRow.Values = append(dataRow.Values, []byte{0})
-						}
-					} else {
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
-					}
-				case ptypes.PTypeInt2, ptypes.PTypeInt4:
-					var v32 int32
-					appended := false
-					switch vv := value.(type) {
-					case int:
-						v32 = int32(vv)
-					case int32:
-						v32 = vv
-					case int64:
-						v32 = int32(vv)
-					case string:
-						if parsed, err := strconv.ParseInt(vv, 10, 32); err == nil {
-							v32 = int32(parsed)
-						} else {
-							dataRow.Values = append(dataRow.Values, []byte(vv))
-							appended = true
-						}
-					default:
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
-						appended = true
-					}
-					if appended {
-						break
-					}
-					buf := make([]byte, 4)
-					binary.BigEndian.PutUint32(buf, uint32(v32))
-					dataRow.Values = append(dataRow.Values, buf)
-				case ptypes.PTypeInt8:
-					var v64 int64
-					appended := false
-					switch vv := value.(type) {
-					case int:
-						v64 = int64(vv)
-					case int32:
-						v64 = int64(vv)
-					case int64:
-						v64 = vv
-					case string:
-						if parsed, err := strconv.ParseInt(vv, 10, 64); err == nil {
-							v64 = parsed
-						} else {
-							dataRow.Values = append(dataRow.Values, []byte(vv))
-							appended = true
-						}
-					default:
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
-						appended = true
-					}
-					if appended {
-						break
-					}
-					buf8 := make([]byte, 8)
-					binary.BigEndian.PutUint64(buf8, uint64(v64))
-					dataRow.Values = append(dataRow.Values, buf8)
-				case ptypes.PTypeTimestamp, ptypes.PTypeTimestampz:
-					logger.Debug("Handling timestamp column in binary format", zap.Any("value", value), zap.Any("valueType", fmt.Sprintf("%T", value)))
-					// Return timestamps as int64 microseconds since epoch in binary format
-					var v64 int64
-					switch vv := value.(type) {
-					case int64:
-						v64 = vv
-					case int:
-						v64 = int64(vv)
-					case string:
-						if parsed, err := strconv.ParseInt(vv, 10, 64); err == nil {
-							v64 = parsed
-						} else {
-							dataRow.Values = append(dataRow.Values, []byte(vv))
-							continue
-						}
-					default:
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
-						continue
-					}
-					timestampValue := time.UnixMicro(v64)
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", timestampValue)))
-				case ptypes.PTypeFloat8:
-					var f64 float64
-					appended := false
-					switch vv := value.(type) {
-					case float32:
-						f64 = float64(vv)
-					case float64:
-						f64 = vv
-					case string:
-						if parsed, err := strconv.ParseFloat(vv, 64); err == nil {
-							f64 = parsed
-						} else {
-							dataRow.Values = append(dataRow.Values, []byte(vv))
-							appended = true
-						}
-					default:
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
-						appended = true
-					}
-					if appended {
-						break
-					}
-					buff := make([]byte, 8)
-					binary.BigEndian.PutUint64(buff, math.Float64bits(f64))
-					dataRow.Values = append(dataRow.Values, buff)
-				case ptypes.PTypeText, ptypes.PTypeVarchar:
-					switch vv := value.(type) {
-					case string:
-						dataRow.Values = append(dataRow.Values, []byte(vv))
-					default:
-						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
-					}
-				// Array types (binary format) - using text representation
-				case 1007, 1016: // _int4[], _int8[] and other array types
-					// For arrays in binary format, we'll use text representation for simplicity
-					dataRow.Values = append(dataRow.Values, []byte(formatArrayAsText(value)))
-				default:
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
-				}
-			} else {
-				// Text format
-				// Check if we have column type info to format timestamps specially
-				colOID := ptypes.PTypeText
-				if result.Schema != nil && i < len(result.Schema.Fields) {
-					colOID = result.Schema.Fields[i].OID
-				}
-
-				// Special handling for timestamp types
-				if colOID == ptypes.PTypeTimestamp || colOID == ptypes.PTypeTimestampz {
-					var formatted string
-					handled := false
-					switch ts := value.(type) {
-					case int64:
-						t := time.UnixMicro(ts)
-						if colOID == ptypes.PTypeTimestampz {
-							formatted = t.Format("2006-01-02 15:04:05.999999-07")
-						} else {
-							formatted = t.UTC().Format("2006-01-02 15:04:05.999999")
-						}
-						handled = true
-					case *time.Time:
-						if ts != nil {
-							if colOID == ptypes.PTypeTimestampz {
-								formatted = ts.Format("2006-01-02 15:04:05.999999-07")
-							} else {
-								formatted = ts.UTC().Format("2006-01-02 15:04:05.999999")
-							}
-							handled = true
-						}
-					}
-					if handled {
-						dataRow.Values = append(dataRow.Values, []byte(formatted))
-						continue
-					}
-				}
-
-				switch v := value.(type) {
-				case bool:
-					if v {
-						dataRow.Values = append(dataRow.Values, []byte("t"))
-					} else {
-						dataRow.Values = append(dataRow.Values, []byte("f"))
-					}
-				case int, int8, int16, int32, int64:
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-				case uint, uint8, uint16, uint32, uint64:
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-				case float32:
-					dataRow.Values = append(dataRow.Values, []byte(strconv.FormatFloat(float64(v), 'f', -1, 32)))
-				case float64:
-					dataRow.Values = append(dataRow.Values, []byte(strconv.FormatFloat(v, 'f', -1, 64)))
-				case string:
-					dataRow.Values = append(dataRow.Values, []byte(v))
-				case []string, []int, []int32, []int64, []float32, []float64, []bool:
-					// Array types - format as PostgreSQL array text: {val1,val2,val3}
-					dataRow.Values = append(dataRow.Values, []byte(formatArrayAsText(v)))
-				default:
-					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", v)))
-				}
-			}
-		}
-
-		// Sanity log: actual values count must match the RowDescription/colCount
-		logger.Debugf("Sending DataRow: values=%d, colCount=%d, sourceRowLen=%d", len(dataRow.Values), colCount, row.FieldCount())
-		backend.Send(dataRow)
-	}
-
-	backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", len(result.Rows)))})
-}
-
-// sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
-func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool) {
-	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0}, len(result.Schema.Fields))
-}
-
-// formatArrayAsText formats a Go slice as a PostgreSQL array text representation: {val1,val2,val3}
 func formatArrayAsText(value interface{}) string {
 	switch arr := value.(type) {
 	case []string:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			// Quote strings and escape special characters if needed
+		return pgArray(len(arr), func(i int) string {
+			v := arr[i]
 			if strings.ContainsAny(v, ",{}\" ") || v == "" {
-				sb.WriteString(`"`)
-				sb.WriteString(strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`))
-				sb.WriteString(`"`)
-			} else {
-				sb.WriteString(v)
+				return `"` + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`) + `"`
 			}
-		}
-		sb.WriteString("}")
-		return sb.String()
+			return v
+		})
 	case []int:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			sb.WriteString(strconv.Itoa(v))
-		}
-		sb.WriteString("}")
-		return sb.String()
+		return pgArray(len(arr), func(i int) string { return strconv.Itoa(arr[i]) })
 	case []int32:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			sb.WriteString(strconv.FormatInt(int64(v), 10))
-		}
-		sb.WriteString("}")
-		return sb.String()
+		return pgArray(len(arr), func(i int) string { return strconv.FormatInt(int64(arr[i]), 10) })
 	case []int64:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			sb.WriteString(strconv.FormatInt(v, 10))
-		}
-		sb.WriteString("}")
-		return sb.String()
+		return pgArray(len(arr), func(i int) string { return strconv.FormatInt(arr[i], 10) })
 	case []float32:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			sb.WriteString(strconv.FormatFloat(float64(v), 'f', -1, 32))
-		}
-		sb.WriteString("}")
-		return sb.String()
+		return pgArray(len(arr), func(i int) string { return strconv.FormatFloat(float64(arr[i]), 'f', -1, 32) })
 	case []float64:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			sb.WriteString(strconv.FormatFloat(v, 'f', -1, 64))
-		}
-		sb.WriteString("}")
-		return sb.String()
+		return pgArray(len(arr), func(i int) string { return strconv.FormatFloat(arr[i], 'f', -1, 64) })
 	case []bool:
-		if len(arr) == 0 {
-			return "{}"
-		}
-		var sb strings.Builder
-		sb.WriteString("{")
-		for i, v := range arr {
-			if i > 0 {
-				sb.WriteString(",")
+		return pgArray(len(arr), func(i int) string {
+			if arr[i] {
+				return "t"
 			}
-			if v {
-				sb.WriteString("t")
-			} else {
-				sb.WriteString("f")
-			}
-		}
-		sb.WriteString("}")
-		return sb.String()
+			return "f"
+		})
 	default:
-		// Fallback to standard string representation
 		return fmt.Sprintf("%v", value)
 	}
 }
+
+func pgArray(n int, elem func(int) string) string {
+	if n == 0 {
+		return "{}"
+	}
+	var sb strings.Builder
+	sb.Grow(n*8 + 2)
+	sb.WriteByte('{')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(elem(i))
+	}
+	sb.WriteByte('}')
+	return sb.String()
+}
+
+// Suppress unused import if logger.Debugf uses zap fields indirectly
+var _ = zap.Any

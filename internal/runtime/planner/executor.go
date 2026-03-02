@@ -49,7 +49,7 @@ func ExecutePlan(plan *QueryPlan, ctx ExecutorContext) (*table.ExecuteResult, er
 	ctx.GoCtx = context.WithValue(ctx.GoCtx, "queryStartTime", time.Now().UnixMicro())
 
 	// Выполняем в транзакции
-	err = ctx.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+	err = ctx.Storage.RunTransactionWithAllocator(ctx.Allocator, func(tx *storage.DistributedTransactionVClock) error {
 		// Attach subquery executor to the plan so expressions can execute subqueries
 		plan.SubqueryExecutor = func(stmt *statements.SelectStatement) (*table.ExecuteResult, error) {
 			subPlan, err := CreateQueryPlan(stmt, PlannerContext{Database: ctx.Database, Schema: ctx.Schema})
@@ -362,10 +362,11 @@ func executeProject(
 	resultSchema := serializers.NewBaseSchema(newFields)
 
 	resultRows := make([]*ptypes.Row, 0, len(inputResult.Rows))
+	newRowValues := make([][]byte, 0, len(specs))
 
 	for rowNum, inputRow := range inputResult.Rows {
+		newRowValues = newRowValues[:0]
 		currentRow := &table.ResultRow{Row: inputRow, Schema: inputResult.Schema}
-		newRowValues := make([][]byte, 0, len(specs))
 
 		for si, sp := range specs {
 			switch sp.kind {
@@ -790,12 +791,13 @@ func findColumnInSet(name string, cols []table.TableColumn) int {
 // performNestedLoopJoin выполняет nested loop join (fallback для сложных условий)
 func performNestedLoopJoin(left, right *table.ExecuteResult, condition parser.IExpressionContext, ctx ExecutorContext, combinedSchema *serializers.BaseSchema, runtimeParams map[int]interface{}) []*ptypes.Row {
 	var result []*ptypes.Row
+	scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
 
 	errorCount := 0
 	for rowIdx, leftRow := range left.Rows {
 		for rightIdx, rightRow := range right.Rows {
 			// Объединяем строки
-			combinedRow, err := combineRows(leftRow, left.Schema, rightRow, right.Schema, combinedSchema, ctx.Allocator)
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
 			if err != nil {
 				logger.Debugf("Error combining rows: %v", err)
 				continue
@@ -861,37 +863,27 @@ func evaluateConditionResult(val rmodels.Expression) bool {
 }
 
 // combineRows объединяет две бинарные строки в одну
-func combineRows(leftRow *ptypes.Row, leftSchema *serializers.BaseSchema, rightRow *ptypes.Row, rightSchema *serializers.BaseSchema, combinedSchema *serializers.BaseSchema, allocator pmem.Allocator) (*ptypes.Row, error) {
-	// Извлекаем все поля из левой строки
-	leftValues := make([][]byte, len(leftSchema.Fields))
+func combineRows(leftRow, rightRow *ptypes.Row, leftSchema, rightSchema, combinedSchema *serializers.BaseSchema, allocator pmem.Allocator, scratch [][]byte) (*ptypes.Row, error) {
+	// scratch передаётся снаружи и переиспользуется
+	nL := len(leftSchema.Fields)
+	nR := len(rightSchema.Fields)
+	scratch = scratch[:nL+nR]
+
 	for i := range leftSchema.Fields {
 		buf, _, err := leftSchema.GetField(leftRow, i)
 		if err != nil {
-			return nil, fmt.Errorf("error getting left field %d: %w", i, err)
+			return nil, err
 		}
-		leftValues[i] = buf
+		scratch[i] = buf
 	}
-
-	// Извлекаем все поля из правой строки
-	rightValues := make([][]byte, len(rightSchema.Fields))
 	for i := range rightSchema.Fields {
 		buf, _, err := rightSchema.GetField(rightRow, i)
 		if err != nil {
-			return nil, fmt.Errorf("error getting right field %d: %w", i, err)
+			return nil, err
 		}
-		rightValues[i] = buf
+		scratch[nL+i] = buf
 	}
-
-	// Объединяем значения
-	combinedValues := append(leftValues, rightValues...)
-
-	// Упаковываем в новую строку
-	row, err := combinedSchema.Pack(allocator, combinedValues)
-	if err != nil {
-		return nil, fmt.Errorf("error packing combined row: %w", err)
-	}
-
-	return row, nil
+	return combinedSchema.Pack(allocator, scratch)
 }
 
 // createNullRow создает строку со всеми NULL значениями для заданной схемы
@@ -916,9 +908,11 @@ func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpress
 	for _, leftRow := range left.Rows {
 		hasMatch := false
 
+		scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
+
 		for _, rightRow := range right.Rows {
 			// Объединяем строки
-			combinedRow, err := combineRows(leftRow, left.Schema, rightRow, right.Schema, combinedSchema, ctx.Allocator)
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
 			if err != nil {
 				logger.Debugf("Error combining rows: %v", err)
 				continue
@@ -954,7 +948,7 @@ func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpress
 				logger.Debugf("Error creating null row: %v", err)
 				continue
 			}
-			combinedRow, err := combineRows(leftRow, left.Schema, nullRightRow, right.Schema, combinedSchema, ctx.Allocator)
+			combinedRow, err := combineRows(leftRow, nullRightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
 			if err != nil {
 				logger.Debugf("Error combining with null row: %v", err)
 				continue
@@ -967,9 +961,10 @@ func performLeftJoin(left, right *table.ExecuteResult, condition parser.IExpress
 
 func performCrossJoin(left, right *table.ExecuteResult, ctx ExecutorContext, combinedSchema *serializers.BaseSchema) []*ptypes.Row {
 	var result []*ptypes.Row
+	scratch := make([][]byte, len(left.Schema.Fields)+len(right.Schema.Fields)) // scratch для объединения строк
 	for _, leftRow := range left.Rows {
 		for _, rightRow := range right.Rows {
-			combinedRow, err := combineRows(leftRow, left.Schema, rightRow, right.Schema, combinedSchema, ctx.Allocator)
+			combinedRow, err := combineRows(leftRow, rightRow, left.Schema, right.Schema, combinedSchema, ctx.Allocator, scratch)
 			if err != nil {
 				logger.Debugf("Error combining rows in CROSS JOIN: %v", err)
 				continue

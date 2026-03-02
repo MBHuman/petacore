@@ -18,7 +18,7 @@ import (
 // TODO убрать хардкодинг, сделать поддержку всех типов данных и ограничений
 func (t *Table) Insert(allocator pmem.Allocator, tableName string, values [][]ptypes.BaseType[any], columnNames []string) error {
 	logger.Debugf("DEBUG: Insert into %s: %+v\n", tableName, values)
-	return t.Storage.RunTransaction(func(tx *storage.DistributedTransactionVClock) error {
+	return t.Storage.RunTransactionWithAllocator(allocator, func(tx *storage.DistributedTransactionVClock) error {
 		// Получаем метаданные таблицы
 		metaPrefixKey := t.getMetadataPrefixKey()
 		metaStr, found := tx.Read([]byte(metaPrefixKey))

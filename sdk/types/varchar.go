@@ -3,6 +3,7 @@ package ptypes
 import (
 	"bytes"
 	"fmt"
+	"petacore/internal/utils"
 	"petacore/sdk/pmem"
 	"strings"
 	"unicode/utf8"
@@ -25,8 +26,10 @@ var _ CastableType[string] = (*TypeVarchar)(nil)
 func (t TypeVarchar) GetType() OID      { return PTypeVarchar }
 func (t TypeVarchar) GetBuffer() []byte { return t.BufferPtr }
 
-func (t TypeVarchar) IntoGo() string {
-	return string(t.BufferPtr)
+// IntoGo returns the varchar as a Go string using zero-copy conversion.
+// The returned string shares memory with the underlying buffer.
+func (v TypeVarchar) IntoGo() string {
+	return utils.BytesToString(v.BufferPtr)
 }
 
 func (t TypeVarchar) Compare(other BaseType[string]) int {

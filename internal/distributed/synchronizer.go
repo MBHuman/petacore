@@ -170,8 +170,8 @@ func (s *Synchronizer) handleWatchEvent(event *WatchEvent) error {
 		// Синхронизируем HLC
 		s.logicalClock.Recv(uint64(event.Entry.Version))
 
-		// Записываем в локальный MVCC
-		s.mvcc.Write([]byte(event.Entry.Key), event.Entry.Value, event.Entry.Version)
+		// Записываем в локальный MVCC (конвертируем []byte в string)
+		s.mvcc.Write([]byte(event.Entry.Key), string(event.Entry.Value), event.Entry.Version)
 
 		// Обновляем ревизию
 		s.setLastSyncRevision(event.Entry.Revision)
@@ -192,7 +192,7 @@ func (s *Synchronizer) handleWatchEvent(event *WatchEvent) error {
 
 // WriteThrough записывает данные в ETCD и локальный MVCC
 // Это метод для записи, который гарантирует консистентность
-func (s *Synchronizer) WriteThrough(ctx context.Context, key []byte, value string) error {
+func (s *Synchronizer) WriteThrough(ctx context.Context, key []byte, value []byte) error {
 	// Генерируем новую версию с помощью HLC
 	version := int64(s.logicalClock.SendOrLocal())
 
@@ -205,7 +205,7 @@ func (s *Synchronizer) WriteThrough(ctx context.Context, key []byte, value strin
 
 	// ETCD Watch автоматически синхронизирует на все узлы
 	// Но мы также записываем локально для немедленного доступа
-	s.mvcc.Write(key, value, version)
+	s.mvcc.Write(key, string(value), version)
 
 	return nil
 }

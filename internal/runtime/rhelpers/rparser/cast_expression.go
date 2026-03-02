@@ -100,7 +100,7 @@ func CastValue(
 	// пробуем CastableType
 	castResult, err := tryCast(allocator, srcVal, srcOID, targetOID)
 	if err != nil {
-		return nil, fmt.Errorf("cast %s → %s: %w", srcOID, targetOID, err)
+		return nil, fmt.Errorf("cast to OID %d: %w", targetOID, err)
 	}
 
 	// сериализуем результат обратно в буфер
