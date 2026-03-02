@@ -213,7 +213,7 @@ func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseTyp
 		if err != nil {
 			return nil, fmt.Errorf("timestamp cast to date: %w", err)
 		}
-		return anyWrapper[*time.Time]{result}, nil
+		return AnyWrapper[*time.Time]{result}, nil
 
 	case PTypeTime:
 		tm := t.IntoGo()
@@ -230,7 +230,7 @@ func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseTyp
 			return nil, fmt.Errorf("timestamp cast to time: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTime{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTime{BufferPtr: buf}}, nil
 
 	case PTypeTimestampz:
 		// timestamp → timestampz: интерпретируем как UTC, буфер идентичен
@@ -239,7 +239,7 @@ func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseTyp
 			return nil, fmt.Errorf("timestamp cast to timestampz: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
 
 	case PTypeText:
 		tm := t.IntoGo()
@@ -256,7 +256,7 @@ func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseTyp
 			return nil, fmt.Errorf("timestamp cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		tm := t.IntoGo()
@@ -273,9 +273,17 @@ func (t TypeTimestamp) CastTo(allocator pmem.Allocator, targetType OID) (BaseTyp
 			return nil, fmt.Errorf("timestamp cast to varchar: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("timestamp: unsupported cast to OID %d", targetType)
 	}
+}
+
+func TimestampFactory(buf []byte) TypeTimestamp {
+	return TypeTimestamp{BufferPtr: buf}
+}
+
+func TimestampComparator(a, b TypeTimestamp) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

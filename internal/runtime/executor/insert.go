@@ -5,29 +5,35 @@ import (
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
+	ptypes "petacore/sdk/types"
 )
 
 // ExecuteInsert вставляет данные
 func ExecuteInsert(stmt *statements.InsertStatement, store *storage.DistributedStorageVClock, exCtx ExecutorContext) error {
 	// Резолвим схему и имя таблицы
-	schema, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
-	tbl := table.NewTable(store, exCtx.Database, schema, tableName)
+	// TODO перевести на новые типы данных и убрать лишнее копирование
+	schemaName, tableName := ComputeSchemaAndTableName(stmt.TableName, &exCtx)
+	tbl := table.NewTable(store, exCtx.Database, schemaName, tableName)
 
-	insertValues := make([][]interface{}, 0, len(stmt.Values))
+	insertValues := make([][]ptypes.BaseType[any], 0, len(stmt.Values))
 
 	for _, rowValues := range stmt.Values {
 		if len(rowValues) != len(stmt.Columns) {
 			return fmt.Errorf("number of values does not match number of columns")
 		}
-		// Создаем map значений для этой строки
-		// values := make(map[string]interface{})
-		// for i, col := range stmt.Columns {
-		// 	values[col] = rowValues[i]
-		// }
-
-		values := make([]interface{}, len(stmt.Columns))
-		// TODO убрать лишнее копирование
-		copy(values, rowValues)
+		values := make([]ptypes.BaseType[any], len(stmt.Columns))
+		// Convert interface{} values to BaseType[any]
+		for i, val := range rowValues {
+			// Use sdk/types conversion function
+			bt, err := ptypes.ToBaseTypeAny(val)
+			if err != nil {
+				return fmt.Errorf("failed to convert value at index %d: %w", i, err)
+			}
+			if bt == nil {
+				return fmt.Errorf("expected ptypes.BaseType[any] at index %d, got %T", i, val)
+			}
+			values[i] = bt
+		}
 
 		insertValues = append(insertValues, values)
 	}
@@ -37,7 +43,7 @@ func ExecuteInsert(stmt *statements.InsertStatement, store *storage.DistributedS
 		columnNames = append(columnNames, col)
 	}
 
-	if err := tbl.Insert(stmt.TableName, insertValues, columnNames); err != nil {
+	if err := tbl.Insert(exCtx.Allocator, stmt.TableName, insertValues, columnNames); err != nil {
 		return err
 	}
 

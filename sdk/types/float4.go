@@ -119,7 +119,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to float8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, OrderableFloat64bits(float64(v)))
-		return anyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
+		return AnyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
 
 	case PTypeInt2:
 		if v < math.MinInt16 || v > math.MaxInt16 {
@@ -130,7 +130,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to int2: %w", err)
 		}
 		binary.BigEndian.PutUint16(buf, uint16(int16(v))^0x8000)
-		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+		return AnyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
 
 	case PTypeInt4:
 		if v < math.MinInt32 || v > math.MaxInt32 {
@@ -141,7 +141,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to int4: %w", err)
 		}
 		binary.BigEndian.PutUint32(buf, uint32(int32(v))^0x80000000)
-		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+		return AnyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
 
 	case PTypeInt8:
 		if v < math.MinInt64 || v > math.MaxInt64 {
@@ -152,7 +152,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to int8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(int64(v))^0x8000000000000000)
-		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+		return AnyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
 
 	case PTypeNumeric:
 		meta := NumericMeta{Precision: 38, Scale: 10}
@@ -165,7 +165,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 		if err != nil {
 			return nil, fmt.Errorf("float4 cast to numeric: %w", err)
 		}
-		return anyWrapper[[]byte]{result}, nil
+		return AnyWrapper[[]byte]{result}, nil
 
 	case PTypeText:
 		s := strconv.FormatFloat(float64(v), 'f', -1, 32)
@@ -174,7 +174,7 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		s := strconv.FormatFloat(float64(v), 'f', -1, 32)
@@ -183,9 +183,17 @@ func (t TypeFloat4) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[a
 			return nil, fmt.Errorf("float4 cast to varchar: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("float4: unsupported cast to OID %d", targetType)
 	}
+}
+
+func Float4Factory(buf []byte) TypeFloat4 {
+	return TypeFloat4{BufferPtr: buf}
+}
+
+func Float4Comparator(a, b TypeFloat4) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

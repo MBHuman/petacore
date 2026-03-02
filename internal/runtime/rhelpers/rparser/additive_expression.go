@@ -8,80 +8,78 @@ import (
 	"petacore/internal/runtime/rhelpers/rops"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
 	"sort"
 )
 
-// parseAdditiveExpression handles addition and subtraction
-func ParseAdditiveExpression(ctx context.Context, addExpr parser.IAdditiveExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
+func ParseAdditiveExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	addExpr parser.IAdditiveExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (rmodels.Expression, error) {
 	if addExpr == nil {
 		return nil, nil
 	}
 
-	// Get the first multiplicative expression
-	multExpr := addExpr.MultiplicativeExpression(0)
-	if multExpr == nil {
+	multExprs := addExpr.AllMultiplicativeExpression()
+	if len(multExprs) == 0 {
 		return nil, nil
 	}
 
-	result, err = ParseMultiplicativeExpression(ctx, multExpr, row, subExec)
+	result, err := ParseMultiplicativeExpression(allocator, ctx, multExprs[0], row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle subsequent multiplicative expressions with operators
-	plusOps := addExpr.AllPLUS()
-	minusOps := addExpr.AllMINUS()
+	if len(multExprs) == 1 {
+		return result, nil
+	}
 
-	// Build operator order by token index
+	// собираем операторы в порядке появления
 	type opInfo struct {
 		op    string
 		index int
 	}
 	var ops []opInfo
-	for _, p := range plusOps {
+	for _, p := range addExpr.AllPLUS() {
 		ops = append(ops, opInfo{"+", p.GetSymbol().GetTokenIndex()})
 	}
-	for _, m := range minusOps {
+	for _, m := range addExpr.AllMINUS() {
 		ops = append(ops, opInfo{"-", m.GetSymbol().GetTokenIndex()})
 	}
-	// Sort by token index
 	sort.Slice(ops, func(i, j int) bool {
 		return ops[i].index < ops[j].index
 	})
 
-	// Simple stable order since grammar preserves order of terms
-	multExprs := addExpr.AllMultiplicativeExpression()
-	// Skip the first one since we already processed it
+	if len(ops) != len(multExprs)-1 {
+		return nil, fmt.Errorf("additive: operator count mismatch: %d ops for %d expressions",
+			len(ops), len(multExprs))
+	}
+
 	for i, op := range ops {
-		if i+1 >= len(multExprs) {
-			break
-		}
-		nextValue, err := ParseMultiplicativeExpression(ctx, multExprs[i+1], row, subExec)
+		nextResult, err := ParseMultiplicativeExpression(allocator, ctx, multExprs[i+1], row, subExec)
 		if err != nil {
 			return nil, err
 		}
 
+		a, aOk := result.(*rmodels.ResultRowsExpression)
+		b, bOk := nextResult.(*rmodels.ResultRowsExpression)
+		if !aOk || !bOk {
+			return nil, fmt.Errorf("additive: only result row expressions supported")
+		}
+		if len(a.Row.Rows) != 1 || len(b.Row.Rows) != 1 {
+			return nil, fmt.Errorf("additive: only single-row expressions supported")
+		}
+
 		switch op.op {
 		case "+":
-			if val, ok := result.(*rmodels.ResultRowsExpression); ok {
-				if nextVal, ok := nextValue.(*rmodels.ResultRowsExpression); ok {
-					result, err = rops.AddValues(val, nextVal)
-				} else {
-					return nil, fmt.Errorf("addition is only supported for result row expressions")
-				}
-			} else {
-				return nil, fmt.Errorf("addition is only supported for result row expressions")
-			}
+			result, err = rops.AddValues(allocator, a.Row.Rows[0], b.Row.Rows[0], a.Row.Schema, b.Row.Schema)
 		case "-":
-			if val, ok := result.(*rmodels.ResultRowsExpression); ok {
-				if nextVal, ok := nextValue.(*rmodels.ResultRowsExpression); ok {
-					result, err = rops.SubtractValues(val, nextVal)
-				} else {
-					return nil, fmt.Errorf("subtraction is only supported for result row expressions")
-				}
-			} else {
-				return nil, fmt.Errorf("subtraction is only supported for result row expressions")
-			}
+			result, err = rops.SubtractValues(allocator, a.Row.Rows[0], b.Row.Rows[0], a.Row.Schema, b.Row.Schema)
+		default:
+			return nil, fmt.Errorf("additive: unknown operator %q", op.op)
 		}
 		if err != nil {
 			return nil, err

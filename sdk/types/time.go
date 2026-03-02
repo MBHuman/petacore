@@ -141,7 +141,7 @@ func (t TypeTime) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("time cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		s := fmt.Sprintf("%02d:%02d:%02d.%06d", t.Hour(), t.Minute(), t.Second(), t.Microsecond())
@@ -150,7 +150,7 @@ func (t TypeTime) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("time cast to varchar: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	case PTypeTimestamp:
 		// time → timestamp: комбинируем с PgEpoch (2000-01-01)
@@ -160,7 +160,7 @@ func (t TypeTime) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("time cast to timestamp: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
 
 	case PTypeTimestampz:
 		// time → timestampz: то же самое но интерпретируется как UTC
@@ -170,8 +170,16 @@ func (t TypeTime) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("time cast to timestampz: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
 	default:
 		return nil, fmt.Errorf("time: unsupported cast to OID %d", targetType)
 	}
+}
+
+func TimeFactory(buf []byte) TypeTime {
+	return TypeTime{BufferPtr: buf}
+}
+
+func TimeComparator(a, b TypeTime) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

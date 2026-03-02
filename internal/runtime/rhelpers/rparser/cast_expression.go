@@ -7,67 +7,59 @@ import (
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 	"strings"
+	"time"
 )
 
-// parseCastExpression handles type casting with ::<type>, COLLATE, AT TIME ZONE
-func ParseCastExpression(ctx context.Context, castExpr parser.ICastExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
-	// logger.Debug("ParseCastExpression")
+func ParseCastExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	castExpr parser.ICastExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (rmodels.Expression, error) {
 	if castExpr == nil {
 		return nil, nil
 	}
 
-	// Get the primary expression
 	primExpr := castExpr.PrimaryExpression()
 	if primExpr == nil {
 		return nil, nil
 	}
 
-	// Parse the primary expression
-	value, err := ParsePrimaryExpression(ctx, primExpr, row, subExec)
+	value, err := ParsePrimaryExpression(allocator, ctx, primExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
-	// Apply postfixes
-	postfixes := castExpr.AllPostfix()
-	for _, postfix := range postfixes {
-		if postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil && postfix.STRING_LITERAL() != nil {
-			// AT TIME ZONE
-			if val, ok := value.(*rmodels.ResultRowsExpression); ok {
-				value = ApplyTimeZone(val, postfix.STRING_LITERAL().GetText())
-			} else {
-				return nil, fmt.Errorf("AT TIME ZONE can only be applied to timestamp expressions")
+	for _, postfix := range castExpr.AllPostfix() {
+		switch {
+		case postfix.AT() != nil && postfix.TIME() != nil && postfix.ZONE() != nil:
+			val, ok := value.(*rmodels.ResultRowsExpression)
+			if !ok {
+				return nil, fmt.Errorf("AT TIME ZONE: expected result expression")
 			}
-		} else if postfix.COLLATE() != nil && postfix.QualifiedName() != nil {
-			// COLLATE - for now, ignore
-			// value = applyCollate(value, postfix.QualifiedName().GetText())
-		} else {
-			castingTypes := postfix.AllTypeName()
-			for _, castingOp := range castingTypes {
+			value = ApplyTimeZone(val, postfix.STRING_LITERAL().GetText())
+
+		case postfix.COLLATE() != nil:
+			// игнорируем COLLATE
+
+		default:
+			for _, castingOp := range postfix.AllTypeName() {
 				typeName := strings.ToLower(castingOp.QualifiedName().GetText())
-				colType := table.ColTypeFromString(typeName)
-				if val, ok := value.(*rmodels.ResultRowsExpression); ok {
-					tableIdent := ""
-					if row != nil && len(row.Columns) > 0 {
-						tableIdent = row.Columns[0].TableIdentifier
-					}
-					value, err = CastValue(val, tableIdent, colType)
-				} else if val, ok := value.(*rmodels.BoolExpression); ok {
-					tableIdent := ""
-					if row != nil && len(row.Columns) > 0 {
-						tableIdent = row.Columns[0].TableIdentifier
-					}
-					newVal := &rmodels.ResultRowsExpression{
-						Row: &table.ExecuteResult{
-							Rows:    [][]interface{}{{val.Value}},
-							Columns: []table.TableColumn{{TableIdentifier: tableIdent, Type: table.ColTypeBool}},
-						},
-					}
-					value, err = CastValue(newVal, row.Columns[0].TableIdentifier, colType)
+				targetOID := ptypes.ColTypeFromString(typeName)
+
+				val, ok := value.(*rmodels.ResultRowsExpression)
+				if !ok {
+					return nil, fmt.Errorf("cast: expected result expression, got %T", value)
 				}
+
+				value, err = CastValue(allocator, val, targetOID)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("cast to %s: %w", typeName, err)
 				}
 			}
 		}
@@ -76,59 +68,138 @@ func ParseCastExpression(ctx context.Context, castExpr parser.ICastExpressionCon
 	return value, nil
 }
 
-// applyTimeZone applies time zone to a timestamp
-// TODO реализовать корректную работу с часовыми поясами
 func ApplyTimeZone(value *rmodels.ResultRowsExpression, tzStr string) rmodels.Expression {
-	// For simplicity, just return the value, ignore timezone
+	// TODO: реализовать корректную работу с часовыми поясами
 	return value
 }
 
-// castValue performs type casting to the specified type
-// TODO перевести cast в отдельный модуль + пересмотреть работу с типами
-func CastValue(expression *rmodels.ResultRowsExpression, tableIdentifier string, colType table.ColType) (rmodels.Expression, error) {
-	err := checkCastExpr(expression, colType)
-	if err != nil {
-		return nil, err
+func CastValue(
+	allocator pmem.Allocator,
+	expression *rmodels.ResultRowsExpression,
+	targetOID ptypes.OID,
+) (rmodels.Expression, error) {
+	if len(expression.Row.Rows) == 0 {
+		return nil, fmt.Errorf("cast: empty result")
+	}
+	if len(expression.Row.Schema.Fields) == 0 {
+		return nil, fmt.Errorf("cast: empty schema")
 	}
 
-	rows := expression.Row.Rows
-	val := rows[0][0]
-
-	typeOps := expression.Row.Columns[0].Type.TypeOps()
-	castedVal, err := typeOps.CastTo(val, colType)
+	// берём первое поле первой строки
+	buf, srcOID, err := expression.Row.Schema.GetField(expression.Row.Rows[0], 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cast: get field: %w", err)
 	}
 
-	// Сохраняем имя колонки из исходного выражения
-	colName := "?column?"
-	if len(expression.Row.Columns) > 0 {
-		colName = expression.Row.Columns[0].Name
+	// десериализуем в BaseType[any]
+	srcVal, err := serializers.DeserializeGeneric(buf, srcOID)
+	if err != nil {
+		return nil, fmt.Errorf("cast: deserialize: %w", err)
+	}
+
+	// пробуем CastableType
+	castResult, err := tryCast(allocator, srcVal, srcOID, targetOID)
+	if err != nil {
+		return nil, fmt.Errorf("cast %s → %s: %w", srcOID, targetOID, err)
+	}
+
+	// сериализуем результат обратно в буфер
+	resultBuf := castResult.GetBuffer()
+
+	// сохраняем имя колонки
+	colName := expression.Row.Schema.Fields[0].Name
+	if colName == "" {
+		colName = "?column?"
+	}
+
+	resultSchema := serializers.NewBaseSchema([]serializers.FieldDef{{
+		Name: colName,
+		OID:  targetOID,
+	}})
+
+	resultRow, err := resultSchema.Pack(allocator, [][]byte{resultBuf})
+	if err != nil {
+		return nil, fmt.Errorf("cast: pack result: %w", err)
 	}
 
 	return &rmodels.ResultRowsExpression{
 		Row: &table.ExecuteResult{
-			Rows:    [][]interface{}{{castedVal}},
-			Columns: []table.TableColumn{{TableIdentifier: tableIdentifier, Name: colName, Type: colType}},
+			Rows:   []*ptypes.Row{resultRow},
+			Schema: resultSchema,
 		},
 	}, nil
 }
 
-func checkCastExpr(a *rmodels.ResultRowsExpression, colType table.ColType) error {
-	if a == nil {
-		return fmt.Errorf("nil operand in cast")
+// tryCast выполняет каст через CastableType если тип его поддерживает
+func tryCast(
+	allocator pmem.Allocator,
+	val ptypes.BaseType[any],
+	srcOID ptypes.OID,
+	targetOID ptypes.OID,
+) (ptypes.BaseType[any], error) {
+	// извлекаем inner тип из AnyWrapper и пробуем CastableType
+	switch srcOID {
+	case ptypes.PTypeBool:
+		if w, ok := val.(ptypes.AnyWrapper[bool]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[bool]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeInt2:
+		if w, ok := val.(ptypes.AnyWrapper[int16]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[int16]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeInt4:
+		if w, ok := val.(ptypes.AnyWrapper[int32]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[int32]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeInt8:
+		if w, ok := val.(ptypes.AnyWrapper[int64]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[int64]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeFloat4:
+		if w, ok := val.(ptypes.AnyWrapper[float32]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[float32]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeFloat8:
+		if w, ok := val.(ptypes.AnyWrapper[float64]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[float64]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeNumeric:
+		if w, ok := val.(ptypes.AnyWrapper[[]byte]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[[]byte]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeText:
+		if w, ok := val.(ptypes.AnyWrapper[string]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[string]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeVarchar:
+		if w, ok := val.(ptypes.AnyWrapper[string]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[string]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
+	case ptypes.PTypeDate, ptypes.PTypeTime, ptypes.PTypeTimestamp, ptypes.PTypeTimestampz:
+		if w, ok := val.(ptypes.AnyWrapper[*time.Time]); ok {
+			if c, ok := w.Inner().(ptypes.CastableType[*time.Time]); ok {
+				return c.CastTo(allocator, targetOID)
+			}
+		}
 	}
-	if len(a.Row.Rows) == 0 {
-		return fmt.Errorf("empty rows in cast")
-	}
-	if len(a.Row.Columns) == 0 {
-		return fmt.Errorf("empty columns in cast")
-	}
-	if len(a.Row.Columns) > 1 {
-		return fmt.Errorf("cast supports only single-column expressions")
-	}
-	if len(a.Row.Rows) > 1 {
-		return fmt.Errorf("cast supports only single-row expressions")
-	}
-	return nil
+
+	return nil, fmt.Errorf("type OID %d does not support cast to OID %d", srcOID, targetOID)
 }

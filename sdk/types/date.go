@@ -178,7 +178,7 @@ func (t TypeDate) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("date cast to timestamp: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
 
 	case PTypeTimestampz:
 		tm := t.IntoGo()
@@ -191,7 +191,7 @@ func (t TypeDate) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("date cast to timestampz: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
 
 	case PTypeText:
 		tm := t.IntoGo()
@@ -204,7 +204,7 @@ func (t TypeDate) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("date cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		tm := t.IntoGo()
@@ -217,9 +217,17 @@ func (t TypeDate) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("date cast to varchar: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("date: unsupported cast to OID %d", targetType)
 	}
+}
+
+func DateFactory(buf []byte) TypeDate {
+	return TypeDate{BufferPtr: buf}
+}
+
+func DateComparator(a, b TypeDate) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

@@ -6,11 +6,11 @@ import (
 	ptypes "petacore/sdk/types"
 )
 
-type BytesSerializer struct{}
+type ByteaSerializer struct{}
 
-var BytesSerializerInstance BaseSerializer[[]byte, ptypes.TypeBytea] = &BytesSerializer{}
+var ByteaSerializerInstance BaseSerializer[[]byte, ptypes.TypeBytea] = &ByteaSerializer{}
 
-func (s *BytesSerializer) Serialize(allocator pmem.Allocator, value []byte) ([]byte, error) {
+func (s *ByteaSerializer) Serialize(allocator pmem.Allocator, value []byte) ([]byte, error) {
 	if value == nil {
 		return nil, nil
 	}
@@ -24,14 +24,14 @@ func (s *BytesSerializer) Serialize(allocator pmem.Allocator, value []byte) ([]b
 	return buf, nil
 }
 
-func (s *BytesSerializer) Deserialize(data []byte) (ptypes.TypeBytea, error) {
+func (s *ByteaSerializer) Deserialize(data []byte) (ptypes.TypeBytea, error) {
 	return ptypes.TypeBytea{BufferPtr: data}, nil
 }
 
-func (s *BytesSerializer) Validate(value ptypes.TypeBytea) error {
+func (s *ByteaSerializer) Validate(value ptypes.TypeBytea) error {
 	return nil
 }
 
-func (s *BytesSerializer) GetType() ptypes.OID {
+func (s *ByteaSerializer) GetType() ptypes.OID {
 	return ptypes.PTypeBytea
 }

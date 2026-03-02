@@ -4,14 +4,23 @@ import (
 	"context"
 	"fmt"
 	"petacore/internal/logger"
-	"petacore/internal/runtime/rhelpers"
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 )
 
 // evaluateCaseExpression evaluates a CASE WHEN THEN ELSE END expression
-func EvaluateCaseExpression(goCtx context.Context, caseExpr *rmodels.CaseExpression, row *table.ResultRow, subExec subquery.SubqueryExecutor, runtimeParams map[int]interface{}) (rmodels.Expression, error) {
+func EvaluateCaseExpression(
+	allocator pmem.Allocator,
+	goCtx context.Context,
+	caseExpr *rmodels.CaseExpression,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+	runtimeParams map[int]interface{},
+) (rmodels.Expression, error) {
 	ctx := caseExpr.Context
 	// In new grammar: CASE (WHEN expression THEN expression)+ (ELSE expression)? END
 	// AllExpression returns all expressions: WHEN1, THEN1, WHEN2, THEN2, ..., ELSE (if present)
@@ -32,7 +41,7 @@ func EvaluateCaseExpression(goCtx context.Context, caseExpr *rmodels.CaseExpress
 		}
 
 		// Evaluate WHEN condition
-		condition, err := EvaluateExpressionContext(goCtx, allExpressions[whenIdx], row, subExec, runtimeParams)
+		condition, err := EvaluateExpressionContext(allocator, goCtx, allExpressions[whenIdx], row, subExec, runtimeParams)
 		if err != nil {
 			return nil, err
 		}
@@ -43,24 +52,30 @@ func EvaluateCaseExpression(goCtx context.Context, caseExpr *rmodels.CaseExpress
 			isTrue = boolExpr.Value
 		} else if resultExpr, ok := condition.(*rmodels.ResultRowsExpression); ok {
 			// Извлекаем значение из ResultRowsExpression
-			if len(resultExpr.Row.Rows) > 0 && len(resultExpr.Row.Rows[0]) > 0 {
-				val := resultExpr.Row.Rows[0][0]
-				if boolVal, ok := val.(bool); ok {
-					isTrue = boolVal
+			if len(resultExpr.Row.Rows) > 0 {
+				val, oid, err := resultExpr.Row.Schema.GetField(resultExpr.Row.Rows[0], 0)
+				if err != nil {
+					return nil, err
+				}
+				value, err := serializers.DeserializeGeneric(val, oid)
+				if err != nil {
+					return nil, err
+				}
+
+				valueBool, ok := ptypes.TryIntoBool(value)
+				if ok {
+					isTrue = valueBool.IntoGo()
 				} else {
-					// Для других типов используем IsTrue
-					isTrue = rhelpers.IsTrue(val)
+					// TODO возможно тут падать будет
+					return nil, fmt.Errorf("CASE WHEN condition does not evaluate to boolean")
 				}
 			}
-		} else {
-			// Fallback - используем IsTrue для других типов
-			isTrue = rhelpers.IsTrue(condition)
 		}
 
 		if isTrue {
 			if thenIdx < len(allExpressions) {
 				// Evaluate THEN result
-				result, err := EvaluateExpressionContext(goCtx, allExpressions[thenIdx], row, subExec, runtimeParams)
+				result, err := EvaluateExpressionContext(allocator, goCtx, allExpressions[thenIdx], row, subExec, runtimeParams)
 				if err != nil {
 					return nil, err
 				}
@@ -72,7 +87,7 @@ func EvaluateCaseExpression(goCtx context.Context, caseExpr *rmodels.CaseExpress
 	// Check for ELSE
 	elseIdx := numWhen * 2
 	if elseIdx < len(allExpressions) {
-		result, err := EvaluateExpressionContext(goCtx, allExpressions[elseIdx], row, subExec, runtimeParams)
+		result, err := EvaluateExpressionContext(allocator, goCtx, allExpressions[elseIdx], row, subExec, runtimeParams)
 		if err != nil {
 			return nil, err
 		}

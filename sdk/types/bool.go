@@ -109,7 +109,7 @@ func (t TypeBool) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			v = uint16(0) ^ 0x8000
 		}
 		binary.BigEndian.PutUint16(buf, v)
-		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+		return AnyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
 
 	case PTypeInt4:
 		buf, err := allocator.AllocAligned(4, 4)
@@ -123,7 +123,7 @@ func (t TypeBool) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			v = uint32(0) ^ 0x80000000
 		}
 		binary.BigEndian.PutUint32(buf, v)
-		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+		return AnyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
 
 	case PTypeInt8:
 		buf, err := allocator.AllocAligned(8, 8)
@@ -137,7 +137,7 @@ func (t TypeBool) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			v = uint64(0) ^ 0x8000000000000000
 		}
 		binary.BigEndian.PutUint64(buf, v)
-		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+		return AnyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
 
 	case PTypeText, PTypeVarchar:
 		s := "false"
@@ -149,9 +149,17 @@ func (t TypeBool) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("bool cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("bool: unsupported cast to OID %d", targetType)
 	}
+}
+
+func BoolFactory(buf []byte) TypeBool {
+	return TypeBool{BufferPtr: buf}
+}
+
+func BoolComparator(a, b TypeBool) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

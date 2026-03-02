@@ -315,7 +315,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to int2: %w", err)
 		}
 		binary.BigEndian.PutUint16(buf, uint16(int16(i64))^0x8000)
-		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+		return AnyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
 
 	case PTypeInt4:
 		i64, _ := f.Int64()
@@ -327,7 +327,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to int4: %w", err)
 		}
 		binary.BigEndian.PutUint32(buf, uint32(int32(i64))^0x80000000)
-		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+		return AnyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
 
 	case PTypeInt8:
 		i64, acc := f.Int64()
@@ -339,7 +339,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to int8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(i64)^0x8000000000000000)
-		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+		return AnyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
 
 	case PTypeFloat4:
 		f32, _ := f.Float32()
@@ -348,7 +348,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to float4: %w", err)
 		}
 		binary.BigEndian.PutUint32(buf, OrderableFloat32bits(f32))
-		return anyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
+		return AnyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
 
 	case PTypeFloat8:
 		f64, _ := f.Float64()
@@ -357,7 +357,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to float8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, OrderableFloat64bits(f64))
-		return anyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
+		return AnyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
 
 	case PTypeNumeric:
 		// каст в numeric с другой Meta — просто пересериализуем
@@ -367,7 +367,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 		if err != nil {
 			return nil, fmt.Errorf("numeric cast to numeric: %w", err)
 		}
-		return anyWrapper[[]byte]{result}, nil
+		return AnyWrapper[[]byte]{result}, nil
 
 	case PTypeText:
 		s := f.Text('f', int(t.Meta.Scale))
@@ -376,7 +376,7 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to text: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		s := f.Text('f', int(t.Meta.Scale))
@@ -385,9 +385,17 @@ func (t TypeNumeric) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("numeric cast to varchar: %w", err)
 		}
 		copy(buf, s)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("numeric: unsupported cast to OID %d", targetType)
 	}
+}
+
+func NumericFactory(buf []byte, meta NumericMeta) TypeNumeric {
+	return TypeNumeric{BufferPtr: buf, Meta: meta}
+}
+
+func NumericComparator(a, b TypeNumeric) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

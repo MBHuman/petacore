@@ -7,6 +7,7 @@ import (
 	"petacore/internal/runtime/executor"
 	"petacore/internal/runtime/rsql/visitor"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
 	"sort"
 	"strings"
 )
@@ -15,7 +16,7 @@ import (
 var systemTablesSQL embed.FS
 
 // InitializeSystemTables creates system tables from SQL files in stables directory
-func InitializeSystemTables(store *storage.DistributedStorageVClock) error {
+func InitializeSystemTables(allocator pmem.Allocator, store *storage.DistributedStorageVClock) error {
 	logger.Info("Initializing system tables...")
 
 	// Read all SQL files from stables directory
@@ -62,7 +63,7 @@ func InitializeSystemTables(store *storage.DistributedStorageVClock) error {
 			// 	Schema:   "public",
 			// }
 
-			stmt, err := visitor.ParseSQL(stmtStr)
+			stmt, err := visitor.ParseSQL(allocator, stmtStr)
 			if err != nil {
 				return fmt.Errorf("failed to parse statement from %s: %w", filename, err)
 			}
@@ -72,7 +73,7 @@ func InitializeSystemTables(store *storage.DistributedStorageVClock) error {
 				sessionParams["__information_schema"] = "true"
 			}
 
-			_, err = executor.ExecuteStatement(stmt, store, sessionParams)
+			_, err = executor.ExecuteStatement(allocator, stmt, store, sessionParams)
 			if err != nil {
 				// Log error but continue with other statements
 				logger.Warnf("Failed to execute statement from %s: %v\nStatement: %s", filename, err, stmt)

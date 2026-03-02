@@ -7,6 +7,7 @@ import (
 	"petacore/internal/runtime/rhelpers/rparser"
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
+	ptypes "petacore/sdk/types"
 	"strconv"
 	"strings"
 
@@ -38,7 +39,7 @@ func (l *sqlListener) EnterCreateTableStatement(ctx *parser.CreateTableStatement
 			col.Type = rparser.ParseDataType(dataTypeText)
 			if strings.Contains(dataTypeText, "SERIAL") {
 				col.IsSerial = true
-				col.Type = table.ColTypeInt // SERIAL is integer
+				col.Type = ptypes.PTypeInt8 // SERIAL is integer
 			}
 		}
 

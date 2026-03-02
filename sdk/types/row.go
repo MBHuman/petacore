@@ -17,6 +17,10 @@ type Row struct {
 	BufferPtr []byte
 }
 
+func RowFactory(buf []byte) *Row {
+	return &Row{BufferPtr: buf}
+}
+
 func (r *Row) FieldCount() int {
 	if len(r.BufferPtr) < 4 {
 		return 0

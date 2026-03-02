@@ -190,7 +190,7 @@ func (t TypeVarchar) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("varchar cast to text: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		// varchar → varchar: копируем с той же Meta
@@ -199,7 +199,7 @@ func (t TypeVarchar) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[
 			return nil, fmt.Errorf("varchar cast to varchar: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf, Meta: t.Meta}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf, Meta: t.Meta}}, nil
 
 	default:
 		// всё остальное делегируем в TypeText

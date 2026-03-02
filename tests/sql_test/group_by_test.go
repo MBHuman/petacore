@@ -1,6 +1,8 @@
 package petacore_test
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/jackc/pgx"
@@ -96,47 +98,95 @@ func TestAggregateFunctions(t *testing.T) {
 	PopulateGroupByData(t, conn)
 
 	tests := []struct {
-		name     string
-		query    string
-		expected float64
+		name    string
+		query   string
+		checkFn func(t *testing.T, row *pgx.Row) error
 	}{
 		{
-			name:     "SUM test",
-			query:    "SELECT SUM(amount) FROM group_by_orders;",
-			expected: 800.0,
+			name:  "SUM test",
+			query: "SELECT SUM(amount) FROM group_by_orders;",
+			checkFn: func(t *testing.T, row *pgx.Row) error {
+				var sum float64
+				err := row.Scan(&sum)
+				if err != nil {
+					return fmt.Errorf("failed to scan result: %v", err)
+				}
+				if sum != 800.0 {
+					return fmt.Errorf("expected sum 800.0, got %.2f", sum)
+				}
+				return nil
+			},
 		},
 		{
-			name:     "COUNT test",
-			query:    "SELECT COUNT(*) FROM group_by_orders;",
-			expected: 5,
+			name:  "COUNT test",
+			query: "SELECT COUNT(*) FROM group_by_orders;",
+			// expected: 5,
+			checkFn: func(t *testing.T, row *pgx.Row) error {
+				var cnt int
+				err := row.Scan(&cnt)
+				if err != nil {
+					return fmt.Errorf("failed to scan result: %v", err)
+				}
+				if cnt != 5 {
+					return fmt.Errorf("expected count 5, got %d", cnt)
+				}
+				return nil
+			},
 		},
 		{
-			name:     "AVG test",
-			query:    "SELECT AVG(amount) FROM group_by_orders;",
-			expected: 160.0,
+			name:  "AVG test",
+			query: "SELECT AVG(amount) FROM group_by_orders;",
+			checkFn: func(t *testing.T, row *pgx.Row) error {
+				var avg float64
+				err := row.Scan(&avg)
+				if err != nil {
+					return fmt.Errorf("failed to scan result: %v", err)
+				}
+				if avg != 160.0 {
+					return fmt.Errorf("expected avg 160.0, got %.2f", avg)
+				}
+				return nil
+			},
 		},
 		{
-			name:     "MAX test",
-			query:    "SELECT MAX(amount) FROM group_by_orders;",
-			expected: 300.0,
+			name:  "MAX test",
+			query: "SELECT MAX(amount) FROM group_by_orders;",
+			checkFn: func(t *testing.T, row *pgx.Row) error {
+				var max float64
+				err := row.Scan(&max)
+				if err != nil {
+					return fmt.Errorf("failed to scan result: %v", err)
+				}
+				if max != 300.0 {
+					return fmt.Errorf("expected max 300.0, got %.2f", max)
+				}
+				return nil
+			},
 		},
 		{
-			name:     "MIN test",
-			query:    "SELECT MIN(amount) FROM group_by_orders;",
-			expected: 50.0,
+			name:  "MIN test",
+			query: "SELECT MIN(amount) FROM group_by_orders;",
+			checkFn: func(t *testing.T, row *pgx.Row) error {
+				var min float64
+				err := row.Scan(&min)
+				if err != nil {
+					return fmt.Errorf("failed to scan result: %v", err)
+				}
+				if min != 50.0 {
+					return fmt.Errorf("expected min 50.0, got %.2f", min)
+				}
+				return nil
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			row := conn.QueryRow(tt.query)
-			var result float64
-			err := row.Scan(&result)
-			if err != nil {
-				t.Fatalf("Query failed: %v", err)
-			}
-			if result != tt.expected {
-				t.Errorf("Expected %.2f, got %.2f", tt.expected, result)
+			if tt.checkFn != nil {
+				if err := tt.checkFn(t, row); err != nil {
+					t.Errorf("Check failed: %v", err)
+				}
 			}
 		})
 	}
@@ -201,7 +251,6 @@ func TestMultipleAggregates(t *testing.T) {
 			},
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rows, err := conn.Query(tt.query)
@@ -219,6 +268,11 @@ func TestMultipleAggregates(t *testing.T) {
 				resultRows = append(resultRows, row)
 			}
 
+			// проверяем ошибку после итерации
+			if err := rows.Err(); err != nil {
+				t.Fatalf("Rows iteration error: %v", err)
+			}
+
 			if len(resultRows) != len(tt.expected) {
 				t.Fatalf("Expected %d rows, got %d", len(tt.expected), len(resultRows))
 			}
@@ -226,8 +280,21 @@ func TestMultipleAggregates(t *testing.T) {
 			for i, expectedRow := range tt.expected {
 				resultRow := resultRows[i]
 				for j, expectedValue := range expectedRow {
-					if resultRow[j] != expectedValue {
-						t.Errorf("row %d column %d: expected %v, got %v", i+1, j+1, expectedValue, resultRow[j])
+					// float сравнение через epsilon
+					switch exp := expectedValue.(type) {
+					case float64:
+						got, ok := resultRow[j].(float64)
+						if !ok {
+							t.Errorf("row %d col %d: expected float64, got %T", i+1, j+1, resultRow[j])
+							continue
+						}
+						if math.Abs(got-exp) > 1e-9 {
+							t.Errorf("row %d col %d: expected %v, got %v", i+1, j+1, exp, got)
+						}
+					default:
+						if resultRow[j] != expectedValue {
+							t.Errorf("row %d col %d: expected %v, got %v", i+1, j+1, expectedValue, resultRow[j])
+						}
 					}
 				}
 			}
@@ -243,62 +310,194 @@ func TestOrdersGroupBy(t *testing.T) {
 	PopulateGroupByData(t, conn)
 
 	tests := []struct {
-		name     string
-		query    string
-		expected map[int]float64 // customer_id -> total_amount
+		name    string
+		query   string
+		checkFn func(t *testing.T, rows *pgx.Rows) error
 	}{
 		{
 			name:  "Total amount per customer",
 			query: "SELECT customer_id, SUM(amount) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 250.0,
-				2: 250.0,
-				3: 300.0,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]float64{
+					1: 250.0,
+					2: 250.0,
+					3: 300.0,
+				}
+				results := make(map[int]float64)
+				for rows.Next() {
+					var customerID int
+					var totalAmount float64
+					err := rows.Scan(&customerID, &totalAmount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = totalAmount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedAmount := range expected {
+					if results[custID] != expectedAmount {
+						return fmt.Errorf("for customer_id %d, expected total amount %.2f, got %.2f", custID, expectedAmount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 		{
 			name:  "Count * orders per customer",
 			query: "SELECT customer_id, COUNT(*) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 2,
-				2: 2,
-				3: 1,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]int{
+					1: 2,
+					2: 2,
+					3: 1,
+				}
+				results := make(map[int]int)
+				for rows.Next() {
+					var customerID int
+					var orderCount int
+					err := rows.Scan(&customerID, &orderCount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = orderCount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedCount := range expected {
+					if results[custID] != expectedCount {
+						return fmt.Errorf("for customer_id %d, expected order count %d, got %d", custID, expectedCount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 		{
 			name:  "Count orders per customer",
 			query: "SELECT customer_id, COUNT(1) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 2,
-				2: 2,
-				3: 1,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]int{
+					1: 2,
+					2: 2,
+					3: 1,
+				}
+				results := make(map[int]int)
+				for rows.Next() {
+					var customerID int
+					var orderCount int
+					err := rows.Scan(&customerID, &orderCount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = orderCount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedCount := range expected {
+					if results[custID] != expectedCount {
+						return fmt.Errorf("for customer_id %d, expected order count %d, got %d", custID, expectedCount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 		{
 			name:  "Average order amount per customer",
 			query: "SELECT customer_id, AVG(amount) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 125.0,
-				2: 125.0,
-				3: 300.0,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]float64{
+					1: 125.0,
+					2: 125.0,
+					3: 300.0,
+				}
+				results := make(map[int]float64)
+				for rows.Next() {
+					var customerID int
+					var avgAmount float64
+					err := rows.Scan(&customerID, &avgAmount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = avgAmount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedAmount := range expected {
+					if results[custID] != expectedAmount {
+						return fmt.Errorf("for customer_id %d, expected average amount %.2f, got %.2f", custID, expectedAmount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 		{
 			name:  "Max order amount per customer",
 			query: "SELECT customer_id, MAX(amount) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 150.0,
-				2: 200.0,
-				3: 300.0,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]float64{
+					1: 150.0,
+					2: 200.0,
+					3: 300.0,
+				}
+				results := make(map[int]float64)
+				for rows.Next() {
+					var customerID int
+					var maxAmount float64
+					err := rows.Scan(&customerID, &maxAmount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = maxAmount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedAmount := range expected {
+					if results[custID] != expectedAmount {
+						return fmt.Errorf("for customer_id %d, expected max amount %.2f, got %.2f", custID, expectedAmount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 		{
 			name:  "Min order amount per customer",
 			query: "SELECT customer_id, MIN(amount) FROM group_by_orders GROUP BY customer_id;",
-			expected: map[int]float64{
-				1: 100.0,
-				2: 50.0,
-				3: 300.0,
+			checkFn: func(t *testing.T, rows *pgx.Rows) error {
+				expected := map[int]float64{
+					1: 100.0,
+					2: 50.0,
+					3: 300.0,
+				}
+				results := make(map[int]float64)
+				for rows.Next() {
+					var customerID int
+					var minAmount float64
+					err := rows.Scan(&customerID, &minAmount)
+					if err != nil {
+						return err
+					}
+					results[customerID] = minAmount
+				}
+
+				if len(results) != len(expected) {
+					return fmt.Errorf("expected %d results, got %d", len(expected), len(results))
+				}
+				for custID, expectedAmount := range expected {
+					if results[custID] != expectedAmount {
+						return fmt.Errorf("for customer_id %d, expected min amount %.2f, got %.2f", custID, expectedAmount, results[custID])
+					}
+				}
+				return nil
 			},
 		},
 	}
@@ -310,26 +509,15 @@ func TestOrdersGroupBy(t *testing.T) {
 				t.Fatalf("Query failed: %v", err)
 			}
 			defer rows.Close()
-
-			results := make(map[int]float64)
-			for rows.Next() {
-				var customerID int
-				var totalAmount float64
-				err := rows.Scan(&customerID, &totalAmount)
-				if err != nil {
-					t.Fatalf("Failed to scan row: %v", err)
+			if tt.checkFn != nil {
+				if err := tt.checkFn(t, rows); err != nil {
+					t.Errorf("Check failed: %v", err)
 				}
-				results[customerID] = totalAmount
 			}
-
-			if len(results) != len(tt.expected) {
-				t.Fatalf("Expected %d results, got %d", len(tt.expected), len(results))
-			}
-
-			for custID, expectedAmount := range tt.expected {
-				if results[custID] != expectedAmount {
-					t.Errorf("For customer_id %d, expected total amount %.2f, got %.2f", custID, expectedAmount, results[custID])
-				}
+			// If no checkFn provided, just ensure the query executes without error.
+			// Detailed result validation is handled in other tests.
+			if err := rows.Err(); err != nil {
+				t.Fatalf("Error iterating rows: %v", err)
 			}
 		})
 	}

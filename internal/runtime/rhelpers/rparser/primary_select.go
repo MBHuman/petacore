@@ -5,6 +5,7 @@ import (
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rsql/items"
 	"petacore/internal/runtime/rsql/statements"
+	ptypes "petacore/sdk/types"
 	"strconv"
 )
 
@@ -80,6 +81,6 @@ func ParsePrimarySelectStatement(ctx parser.IPrimarySelectStatementContext) (stm
 
 	return &statements.SelectStatement{
 		Primary:       primary,
-		SubqueryCache: make(map[*statements.SelectStatement]interface{}),
+		SubqueryCache: make(map[*statements.SelectStatement]*ptypes.Row),
 	}, nil
 }

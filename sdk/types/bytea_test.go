@@ -10,11 +10,11 @@ import (
 
 func makeBytea(t *testing.T, arena pmem.Allocator, val []byte) ptypes.TypeBytea {
 	t.Helper()
-	buf, err := serializers.BytesSerializerInstance.Serialize(arena, val)
+	buf, err := serializers.ByteaSerializerInstance.Serialize(arena, val)
 	if err != nil {
 		t.Fatalf("serialize bytea: %v", err)
 	}
-	result, err := serializers.BytesSerializerInstance.Deserialize(buf)
+	result, err := serializers.ByteaSerializerInstance.Deserialize(buf)
 	if err != nil {
 		t.Fatalf("deserialize bytea: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestTypeBytea_SerializeDeserialize_Empty(t *testing.T) {
 func TestTypeBytea_SerializeDeserialize_Nil(t *testing.T) {
 	arena := newArena()
 
-	buf, err := serializers.BytesSerializerInstance.Serialize(arena, []byte(nil))
+	buf, err := serializers.ByteaSerializerInstance.Serialize(arena, []byte(nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"petacore/internal/storage"
 	baseplugin "petacore/plugins/base"
 	psdk "petacore/sdk"
+	"petacore/sdk/pmem"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -96,10 +97,13 @@ func main() {
 		}()
 	}
 
+	systemTablesAllocator := pmem.NewArena(1028 * 1028)
+
 	// Initialize system tables
-	if err := system.InitializeSystemTables(store); err != nil {
+	if err := system.InitializeSystemTables(systemTablesAllocator, store); err != nil {
 		logger.Warnf("Failed to initialize system tables: %v", err)
 	}
+	systemTablesAllocator.Close()
 
 	server := wire.NewWireServer(store, "5432")
 	if err := server.Start(); err != nil {

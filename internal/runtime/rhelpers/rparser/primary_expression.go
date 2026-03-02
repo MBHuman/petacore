@@ -9,7 +9,9 @@ import (
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
-	"petacore/internal/utils"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 	"strconv"
 	"strings"
 	"time"
@@ -17,17 +19,21 @@ import (
 
 // parsePrimaryExpression handles the basic expressions
 // Always returns ResultRowExpression
-func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
-	// logger.Debug("ParsePrimaryExpression")
-
+func ParsePrimaryExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	primExpr parser.IPrimaryExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (rmodels.Expression, error) {
 	// Check for parenthesized expression
 	if primExpr.Expression() != nil {
-		return ParseExpression(ctx, primExpr.Expression(), row, subExec)
+		return ParseExpression(allocator, ctx, primExpr.Expression(), row, subExec)
 	}
 
 	// Check for CASE expression
 	if primExpr.CaseExpression() != nil {
-		return ParseCaseExpression(ctx, primExpr.CaseExpression())
+		return ParseCaseExpression(allocator, ctx, primExpr.CaseExpression())
 	}
 
 	// Check for subquery expression
@@ -74,23 +80,36 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 				return nil, fmt.Errorf("unsupported function argument: %s", argExpr.GetText())
 			}
 
-			val, err := ParseExpression(ctx, argExpr.Expression(), row, subExec)
+			val, err := ParseExpression(allocator, ctx, argExpr.Expression(), row, subExec)
 			if err != nil {
 				return nil, err
 			}
 			// TODO переделать передачу аргументов функций
 			// на строго типизированную передачу Expression
 			if valExpr, ok := val.(*rmodels.ResultRowsExpression); ok {
-				if len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
-					args = append(args, valExpr.Row.Rows[0][0])
+				if len(valExpr.Row.Rows) == 1 && len(valExpr.Row.Schema.Fields) == 1 {
+					buf, oid, err := valExpr.Row.Schema.GetField(valExpr.Row.Rows[0], 0)
+					if err != nil {
+						return nil, fmt.Errorf("failed to get field: %w", err)
+					}
+					desVal, err := serializers.DeserializeGeneric(buf, oid)
+					if err != nil {
+						return nil, fmt.Errorf("failed to deserialize arg: %w", err)
+					}
+					args = append(args, desVal)
 				} else {
-					args = append(args, nil)
+					return nil, fmt.Errorf("function arguments must be single-row single-column expressions")
 				}
+				// if len(valExpr.Row.Rows) > 0 && len(valExpr.Row.Rows[0]) > 0 {
+				// 	args = append(args, valExpr.Row.Rows[0][0])
+				// } else {
+				// 	args = append(args, nil)
+				// }
 			}
 			// args = append(args, ParseExpression(argExpr, row))
 		}
 
-		value, err := functions.ExecuteFunctionWithContext(ctx, funcName, args)
+		value, err := functions.ExecuteFunctionWithContext(allocator, ctx, funcName, args)
 		if err != nil {
 			return nil, err
 		}
@@ -98,17 +117,23 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 			return nil, fmt.Errorf("function %s returned nil result", funcName)
 		}
 		// If function returns a single boolean value, return BoolExpression for WHERE conditions
-		if len(value.Rows) == 1 && len(value.Rows[0]) == 1 && len(value.Columns) == 1 && value.Columns[0].Type == table.ColTypeBool {
-			if boolVal, ok := value.Rows[0][0].(bool); ok {
-				return &rmodels.BoolExpression{Value: boolVal}, nil
+		if len(value.Rows) == 1 && len(value.Schema.Fields) == 1 && value.Schema.Fields[0].OID == ptypes.PTypeBool {
+			field, _, err := value.Schema.GetField(value.Rows[0], 0)
+			if err != nil {
+				return nil, fmt.Errorf("error getting field from function result: %v", err)
 			}
+			boolVal, err := serializers.BoolSerializerInstance.Deserialize(field)
+			if err != nil {
+				return nil, fmt.Errorf("error deserializing boolean value from function result: %v", err)
+			}
+			return &rmodels.BoolExpression{Value: boolVal.IntoGo()}, nil
 		}
 		return &rmodels.ResultRowsExpression{Row: value}, nil
 	}
 
 	// Check for extract function
 	if primExpr.ExtractFunction() != nil {
-		return ParseExtractFunction(ctx, primExpr.ExtractFunction(), row, subExec)
+		return ParseExtractFunction(allocator, ctx, primExpr.ExtractFunction(), row, subExec)
 	}
 
 	// Check for literal values
@@ -118,23 +143,46 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 			numStr := valueCtx.NUMBER().GetText()
 			if strings.Contains(numStr, ".") {
 				if val, err := strconv.ParseFloat(numStr, 64); err == nil {
+					fields := []serializers.FieldDef{{
+						Name: "?column?",
+						OID:  ptypes.PTypeFloat8,
+					}}
+					resultSchema := serializers.NewBaseSchema(fields)
+					serVal, err := serializers.Float8SerializerInstance.Serialize(allocator, val)
+					if err != nil {
+						return nil, fmt.Errorf("failed to serialize float value: %v", err)
+					}
+					resultRow, err := resultSchema.Pack(allocator, [][]byte{serVal})
+					if err != nil {
+						return nil, fmt.Errorf("failed to pack float value: %v", err)
+					}
 					return &rmodels.ResultRowsExpression{
 						Row: &table.ExecuteResult{
-							Rows: [][]interface{}{{val}},
-							Columns: []table.TableColumn{
-								{Idx: 0, Name: "?column?", Type: table.ColTypeFloat},
-							},
+							Rows:   []*ptypes.Row{resultRow},
+							Schema: resultSchema,
 						},
 					}, nil
 				}
 			} else {
 				if val, err := strconv.Atoi(numStr); err == nil {
+					fields := []serializers.FieldDef{{
+						Name: "?column?",
+						OID:  ptypes.PTypeInt4,
+					}}
+					resultSchema := serializers.NewBaseSchema(fields)
+					serVal, err := serializers.Int4SerializerInstance.Serialize(allocator, int32(val))
+					if err != nil {
+						return nil, fmt.Errorf("failed to serialize integer value: %v", err)
+					}
+					resultRow, err := resultSchema.Pack(allocator, [][]byte{serVal})
+					if err != nil {
+						return nil, fmt.Errorf("failed to pack integer value: %v", err)
+					}
+
 					return &rmodels.ResultRowsExpression{
 						Row: &table.ExecuteResult{
-							Rows: [][]interface{}{{val}},
-							Columns: []table.TableColumn{
-								{Idx: 0, Name: "?column?", Type: table.ColTypeInt},
-							},
+							Rows:   []*ptypes.Row{resultRow},
+							Schema: resultSchema,
 						},
 					}, nil
 				}
@@ -145,56 +193,92 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 			str := valueCtx.STRING_LITERAL().GetText()
 			// Remove quotes
 			if len(str) >= 2 && str[0] == '\'' && str[len(str)-1] == '\'' {
-				// return str[1 : len(str)-1]
 				str = str[1 : len(str)-1]
-				return &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows: [][]interface{}{{str}},
-						Columns: []table.TableColumn{
-							{Idx: 0, Name: "?column?", Type: table.ColTypeString},
-						},
-					},
-				}, nil
+			}
+			fields := []serializers.FieldDef{{
+				Name: "?column?",
+				OID:  ptypes.PTypeText,
+			}}
+			resultSchema := serializers.NewBaseSchema(fields)
+			serVal, err := serializers.TextSerializerInstance.Serialize(allocator, str)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize string value: %v", err)
+			}
+			resultRow, err := resultSchema.Pack(allocator, [][]byte{serVal})
+			if err != nil {
+				return nil, fmt.Errorf("failed to pack string value: %v", err)
 			}
 			return &rmodels.ResultRowsExpression{
 				Row: &table.ExecuteResult{
-					Rows: [][]interface{}{{str}},
-					Columns: []table.TableColumn{
-						{Idx: 0, Name: "?column?", Type: table.ColTypeString},
-					},
+					Rows:   []*ptypes.Row{resultRow},
+					Schema: resultSchema,
 				},
 			}, nil
 		}
 
 		if valueCtx.TRUE() != nil {
+			fields := []serializers.FieldDef{{
+				Name: "?column?",
+				OID:  ptypes.PTypeBool,
+			}}
+			resultSchema := serializers.NewBaseSchema(fields)
+			val, err := serializers.BoolSerializerInstance.Serialize(allocator, true)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize boolean value: %v", err)
+			}
+			resultRow, err := resultSchema.Pack(allocator, [][]byte{val})
+			if err != nil {
+				return nil, fmt.Errorf("failed to pack boolean value: %v", err)
+			}
 			return &rmodels.ResultRowsExpression{
 				Row: &table.ExecuteResult{
-					Rows: [][]interface{}{{true}},
-					Columns: []table.TableColumn{
-						{Idx: 0, Name: "?column?", Type: table.ColTypeBool},
-					},
+					Rows:   []*ptypes.Row{resultRow},
+					Schema: resultSchema,
 				},
 			}, nil
 		}
 
 		if valueCtx.FALSE() != nil {
+			fields := []serializers.FieldDef{{
+				Name: "?column?",
+				OID:  ptypes.PTypeBool,
+			}}
+			resultSchema := serializers.NewBaseSchema(fields)
+			val, err := serializers.BoolSerializerInstance.Serialize(allocator, false)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize boolean value: %v", err)
+			}
+			resultRow, err := resultSchema.Pack(allocator, [][]byte{val})
+			if err != nil {
+				return nil, fmt.Errorf("failed to pack boolean value: %v", err)
+			}
 			return &rmodels.ResultRowsExpression{
 				Row: &table.ExecuteResult{
-					Rows: [][]interface{}{{false}},
-					Columns: []table.TableColumn{
-						{Idx: 0, Name: "?column?", Type: table.ColTypeBool},
-					},
+					Rows:   []*ptypes.Row{resultRow},
+					Schema: resultSchema,
 				},
 			}, nil
 		}
 
 		if valueCtx.CURRENT_TIMESTAMP() != nil {
+			fields := []serializers.FieldDef{{
+				Name: "?column?",
+				OID:  ptypes.PTypeTimestamp,
+			}}
+			resultSchema := serializers.NewBaseSchema(fields)
+			timeVal := time.Now()
+			val, err := serializers.TimestampSerializerInstance.Serialize(allocator, &timeVal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize timestamp value: %v", err)
+			}
+			resultRow, err := resultSchema.Pack(allocator, [][]byte{val})
+			if err != nil {
+				return nil, fmt.Errorf("failed to pack timestamp value: %v", err)
+			}
 			return &rmodels.ResultRowsExpression{
 				Row: &table.ExecuteResult{
-					Rows: [][]interface{}{{time.Now().UnixMicro()}},
-					Columns: []table.TableColumn{
-						{Idx: 0, Name: "?column?", Type: table.ColTypeTimestampTz},
-					},
+					Rows:   []*ptypes.Row{resultRow},
+					Schema: resultSchema,
 				},
 			}, nil
 		}
@@ -216,21 +300,23 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 			}
 
 			// Check which type of literal
-			if typedLit.INTERVAL_TYPE() != nil {
-				// Parse interval string
-				intervalMicros, err := utils.ParseInterval(str)
-				if err != nil {
-					return nil, fmt.Errorf("invalid interval: %v", err)
-				}
-				return &rmodels.ResultRowsExpression{
-					Row: &table.ExecuteResult{
-						Rows: [][]interface{}{{intervalMicros}},
-						Columns: []table.TableColumn{
-							{Idx: 0, Name: "?column?", Type: table.ColTypeInterval},
-						},
-					},
-				}, nil
-			} else if typedLit.DATE_TYPE() != nil || typedLit.TIMESTAMP_TYPE() != nil {
+			// TODO not supported in typesystem
+			// if typedLit.INTERVAL_TYPE() != nil {
+			// 	// Parse interval string
+			// 	intervalMicros, err := utils.ParseInterval(str)
+			// 	if err != nil {
+			// 		return nil, fmt.Errorf("invalid interval: %v", err)
+			// 	}
+			// 	return &rmodels.ResultRowsExpression{
+			// 		Row: &table.ExecuteResult{
+			// 			Rows: [][]interface{}{{intervalMicros}},
+			// 			Columns: []table.TableColumn{
+			// 				{Idx: 0, Name: "?column?", Type: table.ColTypeInterval},
+			// 			},
+			// 		},
+			// 	}, nil
+			// } else
+			if typedLit.DATE_TYPE() != nil || typedLit.TIMESTAMP_TYPE() != nil {
 				// Parse date/timestamp string
 				// TODO: Implement proper date/timestamp parsing
 				// For now, try parsing ISO 8601 format
@@ -241,16 +327,28 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 						return nil, fmt.Errorf("invalid date/timestamp format: %s", str)
 					}
 				}
-				colType := table.ColTypeTimestamp
+				colType := ptypes.PTypeTimestamp
 				if typedLit.TIMESTAMP_TYPE() != nil {
-					colType = table.ColTypeTimestampTz
+					colType = ptypes.PTypeTimestampz
 				}
+				fields := []serializers.FieldDef{{
+					Name: "?column?",
+					OID:  colType,
+				}}
+				resultSchema := serializers.NewBaseSchema(fields)
+				val, err := serializers.TimestampSerializerInstance.Serialize(allocator, &t)
+				if err != nil {
+					return nil, fmt.Errorf("failed to serialize timestamp value: %v", err)
+				}
+				resultRow, err := resultSchema.Pack(allocator, [][]byte{val})
+				if err != nil {
+					return nil, fmt.Errorf("failed to pack timestamp value: %v", err)
+				}
+
 				return &rmodels.ResultRowsExpression{
 					Row: &table.ExecuteResult{
-						Rows: [][]interface{}{{t.UnixMicro()}},
-						Columns: []table.TableColumn{
-							{Idx: 0, Name: "?column?", Type: colType},
-						},
+						Rows:   []*ptypes.Row{resultRow},
+						Schema: resultSchema,
 					},
 				}, nil
 			}
@@ -287,34 +385,80 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 
 		// Look up column in row - try full qualified name first, then just column name
 		if row != nil {
+			// Fast path: use the schema nameIdx which already has both bare names and
+			// qualified names (tableAlias.colName) pre-indexed by RebuildIndex().
+			// This correctly resolves e.g. "t.typelem" when TableAlias="t", Name="typelem".
+			if i, ok := row.Schema.FieldIndex(fullQualifiedName); ok {
+				fields := []serializers.FieldDef{{
+					Name: row.Schema.Fields[i].Name,
+					OID:  row.Schema.Fields[i].OID,
+				}}
+				resultSchema := serializers.NewBaseSchema(fields)
+				buf, _, err := row.Schema.GetField(row.Row, i)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get column value: %v", err)
+				}
+				resultRow, err := resultSchema.Pack(allocator, [][]byte{buf})
+				if err != nil {
+					return nil, fmt.Errorf("failed to pack column value: %v", err)
+				}
+				return &rmodels.ResultRowsExpression{
+					Row: &table.ExecuteResult{
+						Rows:   []*ptypes.Row{resultRow},
+						Schema: resultSchema,
+					},
+				}, nil
+			}
+
 			// Сначала ищем по полному qualified имени (например, "c.id" или "o.user_id")
-			// todo убрать паразитный цикл на колонки
-			for i, col := range row.Columns {
+			for i, col := range row.Schema.Fields {
 				// Проверяем прямое совпадение с col.Name
 				if col.Name == fullQualifiedName {
-					if i < len(row.Row) {
+					if i < len(row.Schema.Fields) {
+						fields := []serializers.FieldDef{{
+							Name: col.Name,
+							OID:  col.OID,
+						}}
+						resultSchema := serializers.NewBaseSchema(fields)
+						buf, _, err := row.Schema.GetField(row.Row, i)
+						if err != nil {
+							return nil, fmt.Errorf("failed to get column value: %v", err)
+						}
+						resultRow, err := resultSchema.Pack(allocator, [][]byte{buf})
+						if err != nil {
+							return nil, fmt.Errorf("failed to pack column value: %v", err)
+						}
 						return &rmodels.ResultRowsExpression{
 							Row: &table.ExecuteResult{
-								Rows: [][]interface{}{{row.Row[i]}},
-								Columns: []table.TableColumn{
-									{Idx: 0, Name: col.Name, Type: col.Type, TableIdentifier: col.TableIdentifier},
-								},
+								Rows:   []*ptypes.Row{resultRow},
+								Schema: resultSchema,
 							},
 						}, nil
 					}
 				}
 
-				// Проверяем составное имя TableIdentifier.Name
-				if col.TableIdentifier != "" {
-					qualifiedColName := col.TableIdentifier + "." + col.Name
-					if qualifiedColName == fullQualifiedName {
-						if i < len(row.Row) {
+				// Проверяем составное имя с префиксом (например table.column)
+				// В FieldDef нет TableIdentifier, так что просто ищем колонку с полным именем
+				if strings.Contains(col.Name, ".") {
+					if col.Name == fullQualifiedName {
+						if i < len(row.Schema.Fields) {
+							fields := []serializers.FieldDef{{
+								Name: col.Name,
+								OID:  col.OID,
+							}}
+							resultSchema := serializers.NewBaseSchema(fields)
+							buf, _, err := row.Schema.GetField(row.Row, i)
+							if err != nil {
+								return nil, fmt.Errorf("failed to get column value: %v", err)
+							}
+							resultRow, err := resultSchema.Pack(allocator, [][]byte{buf})
+							if err != nil {
+								return nil, fmt.Errorf("failed to pack column value: %v", err)
+							}
 							return &rmodels.ResultRowsExpression{
 								Row: &table.ExecuteResult{
-									Rows: [][]interface{}{{row.Row[i]}},
-									Columns: []table.TableColumn{
-										{Idx: 0, Name: col.Name, Type: col.Type, TableIdentifier: col.TableIdentifier},
-									},
+									Rows:   []*ptypes.Row{resultRow},
+									Schema: resultSchema,
 								},
 							}, nil
 						}
@@ -323,28 +467,9 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 			}
 
 			// Проверяем, не использует ли пользователь оригинальное имя таблицы вместо алиаса
-			if qn := primExpr.ColumnName().QualifiedName(); qn != nil {
-				parts := qn.AllNamePart()
-				if len(parts) >= 2 {
-					tablePrefix := parts[0].GetText()
-					columnName := parts[len(parts)-1].GetText()
-
-					// Ищем колонку с таким именем, но с другим TableIdentifier
-					for _, col := range row.Columns {
-						if col.OriginalTableName == tablePrefix && col.TableIdentifier != tablePrefix {
-							// Проверяем, что имя колонки совпадает
-							colParts := strings.Split(col.Name, ".")
-							if len(colParts) >= 2 && colParts[len(colParts)-1] == columnName {
-								return nil, fmt.Errorf(
-									"invalid reference to FROM-clause entry for table \"%s\"\nHINT: Perhaps you meant to reference the table alias \"%s\"",
-									tablePrefix,
-									col.TableIdentifier,
-								)
-							}
-						}
-					}
-				}
-			}
+			// В новой структуре нет OriginalTableName и TableIdentifier в FieldDef
+			// Эта проверка на алиасы пока пропускается
+			// TODO: добавить метаданные о таблицах и алиасах в схему, если требуется
 
 			// Если не нашли точное совпадение и имя не квалифицированное (без префикса),
 			// ищем по имени колонки без префикса (например, "amount" найдет "o.amount")
@@ -356,13 +481,16 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 					var matchedCols []int
 					var matchedColNames []string
 
-					for i, col := range row.Columns {
-						// Проверяем прямое совпадение с именем колонки
+					for i, col := range row.Schema.Fields {
+						// Проверяем прямое совпадение с именем колонки или с последней частью
 						if col.Name == columnName {
 							matchedCols = append(matchedCols, i)
-							if col.TableIdentifier != "" {
-								matchedColNames = append(matchedColNames, col.TableIdentifier+"."+col.Name)
-							} else {
+							matchedColNames = append(matchedColNames, col.Name)
+						} else if strings.Contains(col.Name, ".") {
+							// Check if last part matches (e.g., "o.amount" matches "amount")
+							colParts := strings.Split(col.Name, ".")
+							if colParts[len(colParts)-1] == columnName {
+								matchedCols = append(matchedCols, i)
 								matchedColNames = append(matchedColNames, col.Name)
 							}
 						}
@@ -371,13 +499,24 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 					if len(matchedCols) == 1 {
 						// Найдена ровно одна колонка - используем её
 						i := matchedCols[0]
-						if i < len(row.Row) {
+						if i < len(row.Schema.Fields) {
+							fields := []serializers.FieldDef{{
+								Name: row.Schema.Fields[i].Name,
+								OID:  row.Schema.Fields[i].OID,
+							}}
+							resultSchema := serializers.NewBaseSchema(fields)
+							buf, _, err := row.Schema.GetField(row.Row, i)
+							if err != nil {
+								return nil, fmt.Errorf("failed to get column value: %v", err)
+							}
+							resultRow, err := resultSchema.Pack(allocator, [][]byte{buf})
+							if err != nil {
+								return nil, fmt.Errorf("failed to pack column value: %v", err)
+							}
 							return &rmodels.ResultRowsExpression{
 								Row: &table.ExecuteResult{
-									Rows: [][]interface{}{{row.Row[i]}},
-									Columns: []table.TableColumn{
-										{Idx: 0, Name: row.Columns[i].Name, Type: row.Columns[i].Type, TableIdentifier: row.Columns[i].TableIdentifier},
-									},
+									Rows:   []*ptypes.Row{resultRow},
+									Schema: resultSchema,
 								},
 							}, nil
 						}
@@ -410,12 +549,23 @@ func ParsePrimaryExpression(ctx context.Context, primExpr parser.IPrimaryExpress
 
 	// If nothing matches, return the text
 	text := primExpr.GetText()
+	fields := []serializers.FieldDef{{
+		Name: "?column?",
+		OID:  ptypes.PTypeText,
+	}}
+	resultSchema := serializers.NewBaseSchema(fields)
+	serVal, err := serializers.TextSerializerInstance.Serialize(allocator, text)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize text value: %v", err)
+	}
+	resultRow, err := resultSchema.Pack(allocator, [][]byte{serVal})
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack text value: %v", err)
+	}
 	return &rmodels.ResultRowsExpression{
 		Row: &table.ExecuteResult{
-			Rows: [][]interface{}{{text}},
-			Columns: []table.TableColumn{
-				{Idx: 0, Name: "?column?", Type: table.ColTypeString},
-			},
+			Rows:   []*ptypes.Row{resultRow},
+			Schema: resultSchema,
 		},
 	}, nil
 }

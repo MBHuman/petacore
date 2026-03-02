@@ -2,9 +2,10 @@ package ptypes
 
 import (
 	"bytes"
-	"petacore/internal/runtime/rsql/table"
+	"fmt"
 	"petacore/sdk/pmem"
 	"reflect"
+	"regexp"
 )
 
 type BaseType[T any] interface {
@@ -12,6 +13,51 @@ type BaseType[T any] interface {
 	Compare(other BaseType[T]) int
 	GetBuffer() []byte
 	IntoGo() T
+}
+
+func TryIntoBool(val BaseType[any]) (BaseType[bool], bool) {
+	w, ok := val.(AnyWrapper[bool])
+	if !ok {
+		return nil, false
+	}
+	inner, ok := w.Inner().(BaseType[bool])
+	return inner, ok
+}
+
+func TryIntoNumeric[T any](val BaseType[any]) (NumericType[T], bool) {
+	w, ok := val.(AnyWrapper[T])
+	if !ok {
+		return nil, false
+	}
+	n, ok := w.Inner().(NumericType[T])
+	return n, ok
+}
+
+func TryIntoOrdered[T any](val BaseType[any]) (OrderedType[T], bool) {
+	w, ok := val.(AnyWrapper[T])
+	if !ok {
+		return nil, false
+	}
+	o, ok := w.Inner().(OrderedType[T])
+	return o, ok
+}
+
+func TryIntoBitwise[T any](val BaseType[any]) (BitwiseType[T], bool) {
+	w, ok := val.(AnyWrapper[T])
+	if !ok {
+		return nil, false
+	}
+	b, ok := w.Inner().(BitwiseType[T])
+	return b, ok
+}
+
+func TryIntoText[T any](val BaseType[any]) (TextType[T], bool) {
+	w, ok := val.(AnyWrapper[T])
+	if !ok {
+		return nil, false
+	}
+	t, ok := w.Inner().(TextType[T])
+	return t, ok
 }
 
 // NumericType — Add/Sub/Mul/Div/Mod создают новое значение — нужен аллокатор
@@ -69,6 +115,13 @@ type TextType[T any] interface {
 	ToLower(allocator pmem.Allocator) (TextType[T], error)
 	Trim(allocator pmem.Allocator) (TextType[T], error)
 	Substring(allocator pmem.Allocator, start, length int) (TextType[T], error)
+	AsStr() string
+
+	RegexpMatch(pattern string) (bool, error)
+	RegexpMatchCompiled(re *regexp.Regexp) bool
+	Replace(allocator pmem.Allocator, old, new string) (TextType[T], error)
+	RegexpReplace(allocator pmem.Allocator, pattern, replacement string) (TextType[T], error)
+	RegexpReplaceCompiled(allocator pmem.Allocator, re *regexp.Regexp, replacement string) (TextType[T], error)
 }
 
 // NullableType — только читает, аллокатор не нужен
@@ -85,18 +138,214 @@ type CastableType[T any] interface {
 	CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error)
 }
 
-// anyWrapper оборачивает конкретный BaseType[T] в BaseType[any]
+func ApplyNeg(allocator pmem.Allocator, val BaseType[any], oid OID) (BaseType[any], error) {
+	switch oid {
+	case PTypeInt2:
+		n, ok := TryIntoNumeric[int16](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract int2")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	case PTypeInt4:
+		n, ok := TryIntoNumeric[int32](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract int4")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	case PTypeInt8:
+		n, ok := TryIntoNumeric[int64](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract int8")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	case PTypeFloat4:
+		n, ok := TryIntoNumeric[float32](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract float4")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	case PTypeFloat8:
+		n, ok := TryIntoNumeric[float64](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract float8")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	case PTypeNumeric:
+		n, ok := TryIntoNumeric[[]byte](val)
+		if !ok {
+			return nil, fmt.Errorf("unary minus: failed to extract numeric")
+		}
+		return NewAnyWrapper(n.Neg(allocator)), nil
+
+	default:
+		return nil, fmt.Errorf("unary minus can only be applied to numeric values, got OID %d", oid)
+	}
+}
+
+// AnyWrapper оборачивает конкретный BaseType[T] в BaseType[any]
 // нужен для реализации CastableType — CastTo возвращает BaseType[any]
-type anyWrapper[T any] struct {
+type AnyWrapper[T any] struct {
 	inner BaseType[T]
 }
 
-func (w anyWrapper[T]) GetType() OID      { return w.inner.GetType() }
-func (w anyWrapper[T]) GetBuffer() []byte { return w.inner.GetBuffer() }
-func (w anyWrapper[T]) Compare(other BaseType[any]) int {
+func NewAnyWrapper[T any](inner BaseType[T]) AnyWrapper[T] {
+	return AnyWrapper[T]{inner: inner}
+}
+
+func (w AnyWrapper[T]) GetType() OID      { return w.inner.GetType() }
+func (w AnyWrapper[T]) GetBuffer() []byte { return w.inner.GetBuffer() }
+func (w AnyWrapper[T]) Compare(other BaseType[any]) int {
 	return bytes.Compare(w.inner.GetBuffer(), other.GetBuffer())
 }
-func (w anyWrapper[T]) IntoGo() any { return w.inner.IntoGo() }
+func (w AnyWrapper[T]) IntoGo() any        { return w.inner.IntoGo() }
+func (w AnyWrapper[T]) Inner() BaseType[T] { return w.inner }
+
+// CastTo delegates to the inner type's CastTo if it implements CastableType[T].
+// This allows AnyWrapper[T] to satisfy CastableType[any], enabling the
+// comparison code to upcast mismatched integer types (e.g. Int4 → Int8)
+// before doing a byte-level compare.
+func (w AnyWrapper[T]) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any], error) {
+	if castable, ok := w.inner.(CastableType[T]); ok {
+		return castable.CastTo(allocator, targetType)
+	}
+	return nil, fmt.Errorf("type %T does not support casting to OID %d", w.inner, targetType)
+}
+
+// NumericType[any] methods - forward to inner if it's numeric
+// These allow AnyWrapper[T] to act as NumericType[any] when T is numeric
+func (w AnyWrapper[T]) Add(allocator pmem.Allocator, other NumericType[any]) (NumericType[any], error) {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		// Try to extract other's inner value
+		var otherT NumericType[T]
+		if otherWrapper, ok := other.(AnyWrapper[T]); ok {
+			if otherNumeric, ok := otherWrapper.inner.(NumericType[T]); ok {
+				otherT = otherNumeric
+			} else {
+				return nil, fmt.Errorf("incompatible numeric types for Add")
+			}
+		} else {
+			return nil, fmt.Errorf("incompatible numeric types for Add")
+		}
+		result, err := numeric.Add(allocator, otherT)
+		if err != nil {
+			return nil, err
+		}
+		return NewAnyWrapper[T](result), nil
+	}
+	return nil, fmt.Errorf("inner type is not numeric")
+}
+
+func (w AnyWrapper[T]) Sub(allocator pmem.Allocator, other NumericType[any]) (NumericType[any], error) {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		var otherT NumericType[T]
+		if otherWrapper, ok := other.(AnyWrapper[T]); ok {
+			if otherNumeric, ok := otherWrapper.inner.(NumericType[T]); ok {
+				otherT = otherNumeric
+			} else {
+				return nil, fmt.Errorf("incompatible numeric types for Sub")
+			}
+		} else {
+			return nil, fmt.Errorf("incompatible numeric types for Sub")
+		}
+		result, err := numeric.Sub(allocator, otherT)
+		if err != nil {
+			return nil, err
+		}
+		return NewAnyWrapper[T](result), nil
+	}
+	return nil, fmt.Errorf("inner type is not numeric")
+}
+
+func (w AnyWrapper[T]) Mul(allocator pmem.Allocator, other NumericType[any]) (NumericType[any], error) {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		var otherT NumericType[T]
+		if otherWrapper, ok := other.(AnyWrapper[T]); ok {
+			if otherNumeric, ok := otherWrapper.inner.(NumericType[T]); ok {
+				otherT = otherNumeric
+			} else {
+				return nil, fmt.Errorf("incompatible numeric types for Mul")
+			}
+		} else {
+			return nil, fmt.Errorf("incompatible numeric types for Mul")
+		}
+		result, err := numeric.Mul(allocator, otherT)
+		if err != nil {
+			return nil, err
+		}
+		return NewAnyWrapper[T](result), nil
+	}
+	return nil, fmt.Errorf("inner type is not numeric")
+}
+
+func (w AnyWrapper[T]) Div(allocator pmem.Allocator, other NumericType[any]) (NumericType[any], error) {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		var otherT NumericType[T]
+		if otherWrapper, ok := other.(AnyWrapper[T]); ok {
+			if otherNumeric, ok := otherWrapper.inner.(NumericType[T]); ok {
+				otherT = otherNumeric
+			} else {
+				return nil, fmt.Errorf("incompatible numeric types for Div")
+			}
+		} else {
+			return nil, fmt.Errorf("incompatible numeric types for Div")
+		}
+		result, err := numeric.Div(allocator, otherT)
+		if err != nil {
+			return nil, err
+		}
+		return NewAnyWrapper[T](result), nil
+	}
+	return nil, fmt.Errorf("inner type is not numeric")
+}
+
+func (w AnyWrapper[T]) Mod(allocator pmem.Allocator, other NumericType[any]) (NumericType[any], error) {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		var otherT NumericType[T]
+		if otherWrapper, ok := other.(AnyWrapper[T]); ok {
+			if otherNumeric, ok := otherWrapper.inner.(NumericType[T]); ok {
+				otherT = otherNumeric
+			} else {
+				return nil, fmt.Errorf("incompatible numeric types for Mod")
+			}
+		} else {
+			return nil, fmt.Errorf("incompatible numeric types for Mod")
+		}
+		result, err := numeric.Mod(allocator, otherT)
+		if err != nil {
+			return nil, err
+		}
+		return NewAnyWrapper[T](result), nil
+	}
+	return nil, fmt.Errorf("inner type is not numeric")
+}
+
+func (w AnyWrapper[T]) IsZero() bool {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		return numeric.IsZero()
+	}
+	return false
+}
+
+func (w AnyWrapper[T]) Neg(allocator pmem.Allocator) NumericType[any] {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		result := numeric.Neg(allocator)
+		return NewAnyWrapper[T](result)
+	}
+	return nil
+}
+
+func (w AnyWrapper[T]) Abs(allocator pmem.Allocator) NumericType[any] {
+	if numeric, ok := w.inner.(NumericType[T]); ok {
+		result := numeric.Abs(allocator)
+		return NewAnyWrapper[T](result)
+	}
+	return nil
+}
 
 const (
 	// OIDs for basic types
@@ -130,38 +379,44 @@ const (
 	PTypeFloat8Array  OID = 1022
 )
 
-func FromColType(colType table.ColType) OID {
-	switch colType {
-	case table.ColTypeString:
-		return PTypeText
-	case table.ColTypeInt:
-		return PTypeInt4
-	case table.ColTypeBigInt:
-		return PTypeInt8
-	case table.ColTypeFloat:
-		return PTypeFloat8
-	case table.ColTypeBool:
+func ColTypeFromString(typeStr string) OID {
+	switch typeStr {
+	case "bool":
 		return PTypeBool
-	case table.ColTypeTimestamp:
-		return PTypeTimestamp
-	case table.ColTypeTimestampTz:
-		return PTypeTimestampz
-	case table.ColTypeInterval:
-		return PTypeInterval
-	case table.ColTypeStringArray:
-		return PTypeTextArray
-	case table.ColTypeIntArray:
-		return PTypeInt4Array
-	case table.ColTypeBigIntArray:
-		return PTypeInt8Array
-	case table.ColTypeFloatArray:
-		return PTypeFloat8Array
-	case table.ColTypeBoolArray:
-		return PTypeBoolArray
-	case table.ColTypeDate:
-		return PTypeDate
-	default:
+	case "bytea":
+		return PTypeBytea
+	case "char":
+		return PTypeChar
+	case "name":
+		return PTypeName
+	case "int8":
+		return PTypeInt8
+	case "int2":
+		return PTypeInt2
+	case "int4":
+		return PTypeInt4
+	case "text":
 		return PTypeText
+	case "float4":
+		return PTypeFloat4
+	case "float8":
+		return PTypeFloat8
+	case "varchar":
+		return PTypeVarchar
+	case "numeric":
+		return PTypeNumeric
+	case "timestamp":
+		return PTypeTimestamp
+	case "timestamptz":
+		return PTypeTimestampz
+	case "interval":
+		return PTypeInterval
+	case "date":
+		return PTypeDate
+	case "time":
+		return PTypeTime
+	default:
+		return 0 // unknown type
 	}
 }
 
@@ -213,37 +468,55 @@ func TypeToGoType(oid OID) reflect.Type {
 	}
 }
 
-// For backward compatibility
-
-func (oid OID) ToColType() table.ColType {
-	switch oid {
-	case PTypeBool:
-		return table.ColTypeBool
-	case PTypeInt2, PTypeInt4, PTypeInt8:
-		return table.ColTypeInt
-	case PTypeFloat4, PTypeFloat8, PTypeNumeric:
-		return table.ColTypeFloat
-	case PTypeText, PTypeVarchar, PTypeChar, PTypeName:
-		return table.ColTypeString
-	case PTypeBytea:
-		return table.ColTypeString // bytea можно представить как строку в кодировке base64
-	case PTypeTimestamp:
-		return table.ColTypeTimestamp
-	case PTypeTimestampz:
-		return table.ColTypeTimestampTz
-	case PTypeInterval:
-		return table.ColTypeInterval
-	case PTypeDate:
-		return table.ColTypeDate
-	case PTypeBoolArray:
-		return table.ColTypeBoolArray
-	case PTypeInt2Array, PTypeInt4Array, PTypeInt8Array:
-		return table.ColTypeIntArray
-	case PTypeFloat4Array, PTypeFloat8Array:
-		return table.ColTypeFloatArray
-	case PTypeTextArray, PTypeVarcharArray, PTypeNameArray:
-		return table.ColTypeStringArray
-	default:
-		return table.ColTypeString // по умолчанию считаем строкой
+// ToBaseTypeAny converts various types to BaseType[any]
+// Handles: BaseType[any], AnyWrapper[T] - returns as BaseType[any]
+// AnyWrapper[T] already implements BaseType[any] interface
+func ToBaseTypeAny(val any) (BaseType[any], error) {
+	// Already BaseType[any]
+	if bt, ok := val.(BaseType[any]); ok {
+		return bt, nil
 	}
+
+	// AnyWrapper[T] implements BaseType[any], so return as-is
+	// Note: We check specific types to ensure they implement the interface
+	switch v := val.(type) {
+	case AnyWrapper[bool]:
+		return v, nil
+	case AnyWrapper[int16]:
+		return v, nil
+	case AnyWrapper[int32]:
+		return v, nil
+	case AnyWrapper[int64]:
+		return v, nil
+	case AnyWrapper[float32]:
+		return v, nil
+	case AnyWrapper[float64]:
+		return v, nil
+	case AnyWrapper[string]:
+		return v, nil
+	case AnyWrapper[[]byte]:
+		return v, nil
+	case AnyWrapper[any]:
+		return v, nil
+	default:
+		return nil, nil
+	}
+}
+
+// ToNumericAny converts various types to NumericType[any]
+// Handles: BaseType[any], AnyWrapper[T], and checks if it's numeric
+func ToNumericAny(val any) (NumericType[any], error) {
+	bt, err := ToBaseTypeAny(val)
+	if err != nil {
+		return nil, err
+	}
+	if bt == nil {
+		return nil, nil
+	}
+
+	numeric, ok := TryIntoNumeric[any](bt)
+	if !ok {
+		return nil, nil
+	}
+	return numeric, nil
 }

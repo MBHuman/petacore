@@ -23,6 +23,8 @@ import (
 	"petacore/internal/runtime/rsql/visitor"
 	"petacore/internal/runtime/system"
 	"petacore/internal/storage"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
 	ptypes "petacore/sdk/types"
 )
 
@@ -201,13 +203,17 @@ func (ws *WireServer) handleStartup(backend *pgproto3.Backend, startupMessage *p
 
 func (ws *WireServer) handleParse(backend *pgproto3.Backend, msg *pgproto3.Parse, session *Session) {
 	logger.Debugf("Parse name: '%s', query: '%s'", msg.Name, msg.Query)
+	// Создаем allocator для этого запроса
+	allocator := pmem.NewArena(1024 * 1024) // 1MB arena
+	defer allocator.Close()
+
 	var stmt statements.SQLStatement
 	if strings.TrimSpace(msg.Query) == "" {
 		logger.Debug("Empty query in Parse, creating EmptyStatement")
 		stmt = &statements.EmptyStatement{}
 	} else {
 		var err error
-		stmt, err = visitor.ParseSQL(msg.Query)
+		stmt, err = visitor.ParseSQL(allocator, msg.Query)
 		if err != nil {
 			logger.Errorf("Parse error: %v", err)
 			backend.Send(&pgproto3.ErrorResponse{
@@ -315,8 +321,11 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 		return
 	}
 
+	// Создаем allocator для этого запроса
+	allocator := pmem.NewArena(26 * 1024 * 1024) // 26MB arena
+
 	// Parse and execute query
-	stmt, err := visitor.ParseSQL(query)
+	stmt, err := visitor.ParseSQL(allocator, query)
 	if err != nil {
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
@@ -329,7 +338,7 @@ func (ws *WireServer) handleQuery(backend *pgproto3.Backend, query string, sessi
 
 	logger.Debugf("Parsed statement: ", zap.Any("stmt", stmt))
 
-	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
+	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
 	if err != nil {
 		backend.Send(&pgproto3.ErrorResponse{
 			Severity: "ERROR",
@@ -612,6 +621,11 @@ func (ws *WireServer) getFieldDescriptions(stmt statements.SQLStatement) []pgpro
 
 func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Execute, session *Session) {
 	logger.Debugf("Execute portal: '%s'", msg.Portal)
+
+	// Создаем allocator для этой операции
+	allocator := pmem.NewArena(26 * 1024 * 1024) // 26MB arena
+	defer allocator.Close()
+
 	ps, ok := session.portals[msg.Portal]
 	if !ok {
 		logger.Errorf("Portal %s does not exist", msg.Portal)
@@ -660,7 +674,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 
 		// Re-parse with substituted values
 		var err error
-		stmt, err = visitor.ParseSQL(substitutedQuery)
+		stmt, err = visitor.ParseSQL(allocator, substitutedQuery)
 		if err != nil {
 			logger.Errorf("Parse error after substitution: %v", err)
 			backend.Send(&pgproto3.ErrorResponse{
@@ -676,7 +690,7 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 	}
 
 	// Execute the statement
-	result, err := executor.ExecuteStatement(stmt, ws.storage, session.params)
+	result, err := executor.ExecuteStatement(allocator, stmt, ws.storage, session.params)
 	if err != nil {
 		logger.Errorf("Execute error: %v", err)
 		backend.Send(&pgproto3.ErrorResponse{
@@ -709,8 +723,8 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 			for i, fd := range ps.Columns {
 				// Determine OID: prefer actual executed result column type when available
 				var oid uint32 = uint32(fd.DataTypeOID)
-				if i < len(result.Columns) {
-					oid = uint32(ptypes.FromColType(result.Columns[i].Type))
+				if result.Schema != nil && i < len(result.Schema.Fields) {
+					oid = uint32(result.Schema.Fields[i].OID)
 				}
 				// Force text format for data rows for now
 				format := int16(0)
@@ -725,14 +739,23 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 					Format:               format,
 				})
 			}
-			logger.Debugf("Execute (portal) - sending RowDescription: ps.Columns=%d, result.Columns=%d", len(ps.Columns), len(result.Columns))
+			logger.Debugf("Execute (portal) - sending RowDescription: ps.Columns=%d, result.Schema.Fields=%d", len(ps.Columns), func() int {
+				if result.Schema != nil {
+					return len(result.Schema.Fields)
+				}
+				return 0
+			}())
 			backend.Send(rowDesc)
 			// Send only data rows; do not resend RowDescription. Use portal's column count as expected.
 			ws.sendSelectResultWithFormats(backend, result, false, formatCodes, len(ps.Columns))
 		} else {
 			// No prior description; let sendSelectResultWithFormats send RowDescription
-			logger.Debugf("Execute - no prior description, will send RowDescription from result.Columns: result.Columns=%d", len(result.Columns))
-			ws.sendSelectResultWithFormats(backend, result, true, formatCodes, len(result.Columns))
+			colCount := 0
+			if result.Schema != nil {
+				colCount = len(result.Schema.Fields)
+			}
+			logger.Debugf("Execute - no prior description, will send RowDescription from result.Schema: result.Schema.Fields=%d", colCount)
+			ws.sendSelectResultWithFormats(backend, result, true, formatCodes, colCount)
 		}
 	case *statements.SetStatement:
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SET")})
@@ -742,20 +765,21 @@ func (ws *WireServer) handleExecute(backend *pgproto3.Backend, msg *pgproto3.Exe
 }
 
 func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool, formatCodes []int16, expectedCols int) {
-	logger.Debugf("sendSelectResultWithFormats: sendRowDesc=%v, result.Columns=%d, expectedCols=%d, rows=%d, formatCodes=%v", sendRowDesc, len(result.Columns), expectedCols, len(result.Rows), formatCodes)
+	schemaFieldCount := 0
+	if result.Schema != nil {
+		schemaFieldCount = len(result.Schema.Fields)
+	}
+	logger.Debugf("sendSelectResultWithFormats: sendRowDesc=%v, result.Schema.Fields=%d, expectedCols=%d, rows=%d, formatCodes=%v", sendRowDesc, schemaFieldCount, expectedCols, len(result.Rows), formatCodes)
 
 	if len(result.Rows) == 0 {
 		// No data
-		if sendRowDesc {
+		if sendRowDesc && result.Schema != nil {
 			rowDesc := &pgproto3.RowDescription{}
-			for _, column := range result.Columns {
-				oid := ptypes.FromColType(column.Type)
-
-				// Always advertise text format to clients for now
+			for _, field := range result.Schema.Fields {
+				oid := field.OID
 				format := int16(0)
-
 				rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-					Name:                 []byte(column.Name),
+					Name:                 []byte(field.Name),
 					TableOID:             0,
 					TableAttributeNumber: 0,
 					DataTypeOID:          uint32(oid),
@@ -772,17 +796,14 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 	}
 
 	// RowDescription
-	if sendRowDesc {
+	if sendRowDesc && result.Schema != nil {
 		rowDesc := &pgproto3.RowDescription{}
-		logger.Debug("sendSelectResultWithFormats: columns", zap.Any("result.Columns", result.Columns))
-		for _, column := range result.Columns {
-			oid := ptypes.FromColType(column.Type)
-
-			// Always advertise text format (0) for each column for now.
+		logger.Debug("sendSelectResultWithFormats: columns", zap.Any("result.Schema.Fields", result.Schema.Fields))
+		for _, field := range result.Schema.Fields {
+			oid := field.OID
 			format := int16(0)
-
 			rowDesc.Fields = append(rowDesc.Fields, pgproto3.FieldDescription{
-				Name:                 []byte(column.Name),
+				Name:                 []byte(field.Name),
 				TableOID:             0,
 				TableAttributeNumber: 0,
 				DataTypeOID:          uint32(oid),
@@ -797,25 +818,38 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 
 	// Data rows
 	for rIdx, row := range result.Rows {
-		if rIdx < 5 {
-			logger.Debugf("DataRow %d: len(row)=%d", rIdx, len(row))
+		if rIdx < 5 && result.Schema != nil {
+			logger.Debugf("DataRow %d: columns=%d", rIdx, len(result.Schema.Fields))
 		}
 		logger.Debug("DEBUG: Sending row:", zap.Any("row", row))
 
 		// Determine how many columns we must emit for this DataRow. If we
-		// just sent a RowDescription in this call, use the result.Columns
+		// just sent a RowDescription in this call, use the result.Schema.Fields
 		// length; otherwise use the expectedCols provided by the caller
 		// (which should match the RowDescription already sent earlier).
 		colCount := expectedCols
-		if sendRowDesc {
-			colCount = len(result.Columns)
+		if sendRowDesc && result.Schema != nil {
+			colCount = len(result.Schema.Fields)
 		}
 
 		dataRow := &pgproto3.DataRow{}
 		for i := 0; i < colCount; i++ {
+			// Extract field from binary row
 			var value interface{}
-			if i < len(row) {
-				value = row[i]
+			if result.Schema != nil && i < len(result.Schema.Fields) {
+				buf, oid, err := result.Schema.GetField(row, i)
+				if err != nil {
+					value = nil
+				} else if buf == nil {
+					value = nil
+				} else {
+					// Deserialize the value and extract native Go type
+					if bt, err := serializers.DeserializeGeneric(buf, oid); err == nil && bt != nil {
+						value = bt.IntoGo()
+					} else {
+						value = nil
+					}
+				}
 			} else {
 				value = nil
 			}
@@ -830,11 +864,11 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 
 			if rIdx < 3 {
 				// Log per-column format info for first few rows to help debug
-				colType := table.ColTypeString
-				if i < len(result.Columns) {
-					colType = result.Columns[i].Type
+				colOID := ptypes.PTypeText
+				if result.Schema != nil && i < len(result.Schema.Fields) {
+					colOID = result.Schema.Fields[i].OID
 				}
-				logger.Debugf("Row %d col %d: format=%d, colType=%d, valueType=%T", rIdx, i, format, colType, value)
+				logger.Debugf("Row %d col %d: format=%d, colOID=%d, valueType=%T", rIdx, i, format, colOID, value)
 			}
 
 			if value == nil {
@@ -843,15 +877,15 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 			}
 
 			if format == 1 {
-				// Binary format encoding based on column type. If the
+				// Binary format encoding based on column OID. If the
 				// result doesn't have type information for this index,
 				// default to string behavior.
-				colType := table.ColTypeString
-				if i < len(result.Columns) {
-					colType = result.Columns[i].Type
+				colOID := ptypes.PTypeText
+				if result.Schema != nil && i < len(result.Schema.Fields) {
+					colOID = result.Schema.Fields[i].OID
 				}
-				switch colType {
-				case table.ColTypeBool:
+				switch colOID {
+				case ptypes.PTypeBool:
 					if b, ok := value.(bool); ok {
 						if b {
 							dataRow.Values = append(dataRow.Values, []byte{1})
@@ -861,7 +895,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 					} else {
 						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", value)))
 					}
-				case table.ColTypeInt:
+				case ptypes.PTypeInt2, ptypes.PTypeInt4:
 					var v32 int32
 					appended := false
 					switch vv := value.(type) {
@@ -888,7 +922,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 					buf := make([]byte, 4)
 					binary.BigEndian.PutUint32(buf, uint32(v32))
 					dataRow.Values = append(dataRow.Values, buf)
-				case table.ColTypeBigInt:
+				case ptypes.PTypeInt8:
 					var v64 int64
 					appended := false
 					switch vv := value.(type) {
@@ -915,7 +949,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 					buf8 := make([]byte, 8)
 					binary.BigEndian.PutUint64(buf8, uint64(v64))
 					dataRow.Values = append(dataRow.Values, buf8)
-				case table.ColTypeTimestamp, table.ColTypeTimestampTz:
+				case ptypes.PTypeTimestamp, ptypes.PTypeTimestampz:
 					logger.Debug("Handling timestamp column in binary format", zap.Any("value", value), zap.Any("valueType", fmt.Sprintf("%T", value)))
 					// Return timestamps as int64 microseconds since epoch in binary format
 					var v64 int64
@@ -937,7 +971,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 					}
 					timestampValue := time.UnixMicro(v64)
 					dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", timestampValue)))
-				case table.ColTypeFloat:
+				case ptypes.PTypeFloat8:
 					var f64 float64
 					appended := false
 					switch vv := value.(type) {
@@ -962,16 +996,15 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 					buff := make([]byte, 8)
 					binary.BigEndian.PutUint64(buff, math.Float64bits(f64))
 					dataRow.Values = append(dataRow.Values, buff)
-				case table.ColTypeString:
+				case ptypes.PTypeText, ptypes.PTypeVarchar:
 					switch vv := value.(type) {
 					case string:
 						dataRow.Values = append(dataRow.Values, []byte(vv))
 					default:
 						dataRow.Values = append(dataRow.Values, []byte(fmt.Sprintf("%v", vv)))
 					}
-				// Array types (binary format)
-				case table.ColTypeStringArray, table.ColTypeIntArray, table.ColTypeBigIntArray,
-					table.ColTypeFloatArray, table.ColTypeBoolArray:
+				// Array types (binary format) - using text representation
+				case 1007, 1016: // _int4[], _int8[] and other array types
 					// For arrays in binary format, we'll use text representation for simplicity
 					dataRow.Values = append(dataRow.Values, []byte(formatArrayAsText(value)))
 				default:
@@ -980,23 +1013,36 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 			} else {
 				// Text format
 				// Check if we have column type info to format timestamps specially
-				colType := table.ColTypeString
-				if i < len(result.Columns) {
-					colType = result.Columns[i].Type
+				colOID := ptypes.PTypeText
+				if result.Schema != nil && i < len(result.Schema.Fields) {
+					colOID = result.Schema.Fields[i].OID
 				}
 
 				// Special handling for timestamp types
-				if colType == table.ColTypeTimestamp || colType == table.ColTypeTimestampTz {
-					if ts, ok := value.(int64); ok {
-						// Convert int64 microseconds to timestamp string
+				if colOID == ptypes.PTypeTimestamp || colOID == ptypes.PTypeTimestampz {
+					var formatted string
+					handled := false
+					switch ts := value.(type) {
+					case int64:
 						t := time.UnixMicro(ts)
-						if colType == table.ColTypeTimestampTz {
-							// timestamp with time zone - include timezone
-							dataRow.Values = append(dataRow.Values, []byte(t.Format("2006-01-02 15:04:05.999999-07")))
+						if colOID == ptypes.PTypeTimestampz {
+							formatted = t.Format("2006-01-02 15:04:05.999999-07")
 						} else {
-							// timestamp without time zone
-							dataRow.Values = append(dataRow.Values, []byte(t.UTC().Format("2006-01-02 15:04:05.999999")))
+							formatted = t.UTC().Format("2006-01-02 15:04:05.999999")
 						}
+						handled = true
+					case *time.Time:
+						if ts != nil {
+							if colOID == ptypes.PTypeTimestampz {
+								formatted = ts.Format("2006-01-02 15:04:05.999999-07")
+							} else {
+								formatted = ts.UTC().Format("2006-01-02 15:04:05.999999")
+							}
+							handled = true
+						}
+					}
+					if handled {
+						dataRow.Values = append(dataRow.Values, []byte(formatted))
 						continue
 					}
 				}
@@ -1028,7 +1074,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 		}
 
 		// Sanity log: actual values count must match the RowDescription/colCount
-		logger.Debugf("Sending DataRow: values=%d, colCount=%d, sourceRowLen=%d", len(dataRow.Values), colCount, len(row))
+		logger.Debugf("Sending DataRow: values=%d, colCount=%d, sourceRowLen=%d", len(dataRow.Values), colCount, row.FieldCount())
 		backend.Send(dataRow)
 	}
 
@@ -1037,7 +1083,7 @@ func (ws *WireServer) sendSelectResultWithFormats(backend *pgproto3.Backend, res
 
 // sendSelectResult is a wrapper that calls sendSelectResultWithFormats with text format (0)
 func (ws *WireServer) sendSelectResult(backend *pgproto3.Backend, result *table.ExecuteResult, sendRowDesc bool) {
-	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0}, len(result.Columns))
+	ws.sendSelectResultWithFormats(backend, result, sendRowDesc, []int16{0}, len(result.Schema.Fields))
 }
 
 // formatArrayAsText formats a Go slice as a PostgreSQL array text representation: {val1,val2,val3}

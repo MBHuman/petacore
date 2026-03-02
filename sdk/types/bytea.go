@@ -127,7 +127,7 @@ func (t TypeBytea) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[an
 			return nil, fmt.Errorf("bytea cast to text: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeText{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeText{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		buf, err := allocator.Alloc(len(t.BufferPtr))
@@ -135,9 +135,17 @@ func (t TypeBytea) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[an
 			return nil, fmt.Errorf("bytea cast to varchar: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("bytea: unsupported cast to OID %d", targetType)
 	}
+}
+
+func ByteaFactory(buf []byte) TypeBytea {
+	return TypeBytea{BufferPtr: buf}
+}
+
+func ByteaComparator(a, b TypeBytea) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

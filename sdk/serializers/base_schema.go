@@ -10,8 +10,9 @@ import (
 
 // FieldDef описывает поле схемы
 type FieldDef struct {
-	Name string
-	OID  ptypes.OID
+	Name       string
+	OID        ptypes.OID
+	TableAlias string // optional table name or alias (e.g. "t", "pg_type")
 }
 
 // BaseSchema описывает структуру Row — порядок и типы полей
@@ -21,11 +22,34 @@ type BaseSchema struct {
 }
 
 func NewBaseSchema(fields []FieldDef) *BaseSchema {
-	idx := make(map[string]int, len(fields))
-	for i, f := range fields {
+	s := &BaseSchema{Fields: fields}
+	s.RebuildIndex()
+	return s
+}
+
+// RebuildIndex rebuilds the name→index map after fields (particularly TableAlias) are modified.
+// Indexes both the bare name ("oid") and the qualified name ("pg_type.oid").
+func (s *BaseSchema) RebuildIndex() {
+	idx := make(map[string]int, len(s.Fields)*2)
+	for i, f := range s.Fields {
 		idx[f.Name] = i
+		if f.TableAlias != "" {
+			idx[f.TableAlias+"."+f.Name] = i
+		}
 	}
-	return &BaseSchema{Fields: fields, nameIdx: idx}
+	s.nameIdx = idx
+}
+
+func (s *BaseSchema) Equal(other *BaseSchema) bool {
+	if len(s.Fields) != len(other.Fields) {
+		return false
+	}
+	for i := range s.Fields {
+		if s.Fields[i] != other.Fields[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // FieldIndex возвращает индекс поля по имени — O(1)
@@ -36,7 +60,14 @@ func (s *BaseSchema) FieldIndex(name string) (int, bool) {
 
 // Pack упаковывает значения в Row буфер через аллокатор
 // values — уже сериализованные байты каждого поля в порядке схемы
-func (s *BaseSchema) Pack(allocator pmem.Allocator, values [][]byte) (*ptypes.Row, error) {
+func (s *BaseSchema) Pack(allocator pmem.Allocator, values [][]byte) (*ptypes.Row, error) { // добавь в начало
+	if allocator == nil {
+		return nil, fmt.Errorf("schema pack: allocator is nil")
+	}
+	if s == nil {
+		return nil, fmt.Errorf("schema pack: schema is nil")
+	}
+	// ...
 	if len(values) != len(s.Fields) {
 		return nil, fmt.Errorf("schema pack: expected %d fields, got %d", len(s.Fields), len(values))
 	}

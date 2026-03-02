@@ -8,6 +8,7 @@ import (
 	"petacore/internal/runtime/rsql/statements"
 	"petacore/internal/runtime/rsql/table"
 	"petacore/internal/storage"
+	"petacore/sdk/serializers"
 	"strings"
 )
 
@@ -349,14 +350,24 @@ func executeInitPlanNode(
 		cols := 0
 		if res != nil {
 			rows = len(res.Rows)
-			if rows > 0 {
-				cols = len(res.Rows[0])
+			if rows > 0 && res.Schema != nil {
+				cols = len(res.Schema.Fields)
 			}
 		}
 		if rows == 0 {
 			val = nil // NULL
 		} else if rows == 1 && cols == 1 {
-			val = res.Rows[0][0]
+			// Extract single value from first row, first field
+			if res.Schema != nil && len(res.Schema.Fields) > 0 {
+				buf, oid, err := res.Schema.GetField(res.Rows[0], 0)
+				if err == nil {
+					val, _ = serializers.DeserializeGeneric(buf, oid)
+				} else {
+					val = nil
+				}
+			} else {
+				val = nil
+			}
 		} else {
 			logger.Errorf("InitPlanNode: scalar subquery param=%d returned rows=%d cols=%d", sub.Param, rows, cols)
 			return nil, fmt.Errorf("scalar subquery returned more than one row or column")
@@ -386,8 +397,8 @@ func executeScalarSubqueryPlanNode(
 		logger.Debugf("ScalarSubqueryPlanNode returned nil result for node type=%s", node.Input.NodeType())
 	} else {
 		logger.Debugf("ScalarSubqueryPlanNode result rows=%d cols=%d for node type=%s", len(res.Rows), func() int {
-			if len(res.Rows) > 0 {
-				return len(res.Rows[0])
+			if res.Schema != nil {
+				return len(res.Schema.Fields)
 			} else {
 				return 0
 			}

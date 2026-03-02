@@ -2,14 +2,24 @@ package rparser
 
 import (
 	"context"
+	"fmt"
 	"petacore/internal/runtime/parser"
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
+	"petacore/sdk/serializers"
+	ptypes "petacore/sdk/types"
 )
 
 // ParseUnaryExpression handles unary operators (+ and -)
-func ParseUnaryExpression(ctx context.Context, unaryExpr parser.IUnaryExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (result rmodels.Expression, err error) {
+func ParseUnaryExpression(
+	allocator pmem.Allocator,
+	ctx context.Context,
+	unaryExpr parser.IUnaryExpressionContext,
+	row *table.ResultRow,
+	subExec subquery.SubqueryExecutor,
+) (result rmodels.Expression, err error) {
 	if unaryExpr == nil {
 		return nil, nil
 	}
@@ -21,36 +31,46 @@ func ParseUnaryExpression(ctx context.Context, unaryExpr parser.IUnaryExpression
 	}
 
 	// Parse the cast expression
-	result, err = ParseCastExpression(ctx, castExpr, row, subExec)
+	result, err = ParseCastExpression(allocator, ctx, castExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
 
 	// Check for unary operators
 	hasMinus := unaryExpr.MINUS() != nil
-	// hasPlus := unaryExpr.PLUS() != nil
 
 	if hasMinus {
 		// Apply unary minus
 		if val, ok := result.(*rmodels.ResultRowsExpression); ok {
-			if len(val.Row.Rows) > 0 && len(val.Row.Rows[0]) > 0 {
-				value := val.Row.Rows[0][0]
-				switch v := value.(type) {
-				case int:
-					val.Row.Rows[0][0] = -v
-				case int32:
-					val.Row.Rows[0][0] = -v
-				case int64:
-					val.Row.Rows[0][0] = -v
-				case float32:
-					val.Row.Rows[0][0] = -v
-				case float64:
-					val.Row.Rows[0][0] = -v
+			// TODO перевести на inplace если есть возможность, сейчас это будет создавать новый результат, что не очень эффективно
+			if len(val.Row.Rows) == 1 && len(val.Row.Schema.Fields) == 1 {
+				fieldVal, oid, err := val.Row.Schema.GetField(val.Row.Rows[0], 0)
+				if err != nil {
+					return nil, err
 				}
+				desVal, err := serializers.DeserializeGeneric(fieldVal, oid)
+				if err != nil {
+					return nil, err
+				}
+				negated, err := ptypes.ApplyNeg(allocator, desVal, oid)
+				if err != nil {
+					return nil, err
+				}
+				resultRow, err := val.Row.Schema.Pack(allocator, [][]byte{negated.GetBuffer()})
+				if err != nil {
+					return nil, err
+				}
+				result = &rmodels.ResultRowsExpression{
+					Row: &table.ExecuteResult{
+						Rows:   []*ptypes.Row{resultRow},
+						Schema: val.Row.Schema,
+					},
+				}
+			} else {
+				return nil, fmt.Errorf("unary minus is only supported for single-row single-column result expressions")
 			}
 		}
 	}
-	// For unary plus, we don't need to do anything
 
 	return result, nil
 }

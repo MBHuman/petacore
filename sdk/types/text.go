@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"petacore/sdk/pmem"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -55,20 +56,20 @@ func (t TypeText) IsNotNull() bool { return t.BufferPtr != nil }
 // TextType операции — создают новый буфер
 // ============================================================
 
-// Concat объединяет две строки
-func (t TypeText) Concat(allocator pmem.Allocator, other TypeText) (TypeText, error) {
-	size := len(t.BufferPtr) + len(other.BufferPtr)
+var _ TextType[string] = (*TypeText)(nil)
+
+func (t TypeText) Concat(allocator pmem.Allocator, other TextType[string]) (TextType[string], error) {
+	size := len(t.BufferPtr) + len(other.GetBuffer())
 	buf, err := allocator.Alloc(size)
 	if err != nil {
 		return TypeText{}, fmt.Errorf("text concat: %w", err)
 	}
 	copy(buf, t.BufferPtr)
-	copy(buf[len(t.BufferPtr):], other.BufferPtr)
+	copy(buf[len(t.BufferPtr):], other.GetBuffer())
 	return TypeText{BufferPtr: buf}, nil
 }
 
-// ToUpper возвращает строку в верхнем регистре
-func (t TypeText) ToUpper(allocator pmem.Allocator) (TypeText, error) {
+func (t TypeText) ToUpper(allocator pmem.Allocator) (TextType[string], error) {
 	s := strings.ToUpper(string(t.BufferPtr))
 	buf, err := allocator.Alloc(len(s))
 	if err != nil {
@@ -78,8 +79,7 @@ func (t TypeText) ToUpper(allocator pmem.Allocator) (TypeText, error) {
 	return TypeText{BufferPtr: buf}, nil
 }
 
-// ToLower возвращает строку в нижнем регистре
-func (t TypeText) ToLower(allocator pmem.Allocator) (TypeText, error) {
+func (t TypeText) ToLower(allocator pmem.Allocator) (TextType[string], error) {
 	s := strings.ToLower(string(t.BufferPtr))
 	buf, err := allocator.Alloc(len(s))
 	if err != nil {
@@ -89,8 +89,7 @@ func (t TypeText) ToLower(allocator pmem.Allocator) (TypeText, error) {
 	return TypeText{BufferPtr: buf}, nil
 }
 
-// Substring возвращает подстроку по символьным позициям (не байтовым)
-func (t TypeText) Substring(allocator pmem.Allocator, start, length int) (TypeText, error) {
+func (t TypeText) Substring(allocator pmem.Allocator, start, length int) (TextType[string], error) {
 	runes := []rune(string(t.BufferPtr))
 	if start < 0 || start+length > len(runes) {
 		return TypeText{}, fmt.Errorf("text substring: [%d:%d] out of bounds %d", start, start+length, len(runes))
@@ -104,8 +103,7 @@ func (t TypeText) Substring(allocator pmem.Allocator, start, length int) (TypeTe
 	return TypeText{BufferPtr: buf}, nil
 }
 
-// Trim убирает пробелы с обоих концов
-func (t TypeText) Trim(allocator pmem.Allocator) (TypeText, error) {
+func (t TypeText) Trim(allocator pmem.Allocator) (TextType[string], error) {
 	s := strings.TrimSpace(string(t.BufferPtr))
 	buf, err := allocator.Alloc(len(s))
 	if err != nil {
@@ -115,8 +113,7 @@ func (t TypeText) Trim(allocator pmem.Allocator) (TypeText, error) {
 	return TypeText{BufferPtr: buf}, nil
 }
 
-// Replace заменяет все вхождения old на new
-func (t TypeText) Replace(allocator pmem.Allocator, old, new string) (TypeText, error) {
+func (t TypeText) Replace(allocator pmem.Allocator, old, new string) (TextType[string], error) {
 	s := strings.ReplaceAll(string(t.BufferPtr), old, new)
 	buf, err := allocator.Alloc(len(s))
 	if err != nil {
@@ -124,6 +121,40 @@ func (t TypeText) Replace(allocator pmem.Allocator, old, new string) (TypeText, 
 	}
 	copy(buf, s)
 	return TypeText{BufferPtr: buf}, nil
+}
+
+func (t TypeText) RegexpMatch(pattern string) (bool, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false, fmt.Errorf("text regexp: invalid pattern %q: %w", pattern, err)
+	}
+	return re.Match(t.BufferPtr), nil
+}
+
+func (t TypeText) RegexpMatchCompiled(re *regexp.Regexp) bool {
+	return re.Match(t.BufferPtr)
+}
+
+func (t TypeText) RegexpReplace(allocator pmem.Allocator, pattern, replacement string) (TextType[string], error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return TypeText{}, fmt.Errorf("text regexp replace: invalid pattern %q: %w", pattern, err)
+	}
+	return t.RegexpReplaceCompiled(allocator, re, replacement)
+}
+
+func (t TypeText) RegexpReplaceCompiled(allocator pmem.Allocator, re *regexp.Regexp, replacement string) (TextType[string], error) {
+	s := re.ReplaceAllString(string(t.BufferPtr), replacement)
+	buf, err := allocator.Alloc(len(s))
+	if err != nil {
+		return TypeText{}, fmt.Errorf("text regexp replace: %w", err)
+	}
+	copy(buf, s)
+	return TypeText{BufferPtr: buf}, nil
+}
+
+func (t TypeText) AsStr() string {
+	return string(t.BufferPtr)
 }
 
 // ============================================================
@@ -257,7 +288,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 		} else {
 			buf[0] = 0
 		}
-		return anyWrapper[bool]{TypeBool{BufferPtr: buf}}, nil
+		return AnyWrapper[bool]{TypeBool{BufferPtr: buf}}, nil
 
 	case PTypeBytea:
 		buf, err := allocator.Alloc(len(t.BufferPtr))
@@ -265,7 +296,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to bytea: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[[]byte]{TypeBytea{BufferPtr: buf}}, nil
+		return AnyWrapper[[]byte]{TypeBytea{BufferPtr: buf}}, nil
 
 	case PTypeVarchar:
 		buf, err := allocator.Alloc(len(t.BufferPtr))
@@ -273,7 +304,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to varchar: %w", err)
 		}
 		copy(buf, t.BufferPtr)
-		return anyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
+		return AnyWrapper[string]{TypeVarchar{BufferPtr: buf}}, nil
 
 	case PTypeInt2:
 		v, err := strconv.ParseInt(s, 10, 16)
@@ -285,7 +316,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to int2: %w", err)
 		}
 		binary.BigEndian.PutUint16(buf, uint16(int16(v))^0x8000)
-		return anyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
+		return AnyWrapper[int16]{TypeInt2{BufferPtr: buf}}, nil
 
 	case PTypeInt4:
 		v, err := strconv.ParseInt(s, 10, 32)
@@ -297,7 +328,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to int4: %w", err)
 		}
 		binary.BigEndian.PutUint32(buf, uint32(int32(v))^0x80000000)
-		return anyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
+		return AnyWrapper[int32]{TypeInt4{BufferPtr: buf}}, nil
 
 	case PTypeInt8:
 		v, err := strconv.ParseInt(s, 10, 64)
@@ -309,7 +340,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to int8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(v)^0x8000000000000000)
-		return anyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
+		return AnyWrapper[int64]{TypeInt8{BufferPtr: buf}}, nil
 
 	case PTypeFloat4:
 		v, err := strconv.ParseFloat(s, 32)
@@ -321,7 +352,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to float4: %w", err)
 		}
 		binary.BigEndian.PutUint32(buf, OrderableFloat32bits(float32(v)))
-		return anyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
+		return AnyWrapper[float32]{TypeFloat4{BufferPtr: buf}}, nil
 
 	case PTypeFloat8:
 		v, err := strconv.ParseFloat(s, 64)
@@ -333,7 +364,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to float8: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, OrderableFloat64bits(v))
-		return anyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
+		return AnyWrapper[float64]{TypeFloat8{BufferPtr: buf}}, nil
 
 	case PTypeNumeric:
 		meta := NumericMeta{Precision: 38, Scale: 10}
@@ -345,7 +376,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 		if err != nil {
 			return nil, fmt.Errorf("text cast to numeric: %w", err)
 		}
-		return anyWrapper[[]byte]{result}, nil
+		return AnyWrapper[[]byte]{result}, nil
 
 	case PTypeDate:
 		tm, err := time.Parse("2006-01-02", s)
@@ -356,7 +387,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 		if err != nil {
 			return nil, fmt.Errorf("text cast to date: %w", err)
 		}
-		return anyWrapper[*time.Time]{result}, nil
+		return AnyWrapper[*time.Time]{result}, nil
 
 	case PTypeTimestamp:
 		tm, err := parseTimestampString(s)
@@ -369,7 +400,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to timestamp: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestamp{BufferPtr: buf}}, nil
 
 	case PTypeTimestampz:
 		tm, err := parseTimestampString(s)
@@ -382,7 +413,7 @@ func (t TypeText) CastTo(allocator pmem.Allocator, targetType OID) (BaseType[any
 			return nil, fmt.Errorf("text cast to timestampz: %w", err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(usec)^0x8000000000000000)
-		return anyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
+		return AnyWrapper[*time.Time]{TypeTimestampz{BufferPtr: buf}}, nil
 
 	default:
 		return nil, fmt.Errorf("text: unsupported cast to OID %d", targetType)
@@ -407,4 +438,12 @@ func parseTimestampString(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("invalid timestamp %q, expected ISO 8601", s)
+}
+
+func TextFactory(buf []byte) TypeText {
+	return TypeText{BufferPtr: buf}
+}
+
+func TextComparator(a, b TypeText) int {
+	return bytes.Compare(a.BufferPtr, b.BufferPtr)
 }

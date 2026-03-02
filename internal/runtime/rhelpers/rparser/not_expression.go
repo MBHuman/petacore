@@ -8,12 +8,13 @@ import (
 	"petacore/internal/runtime/rhelpers/rmodels"
 	"petacore/internal/runtime/rhelpers/subquery"
 	"petacore/internal/runtime/rsql/table"
+	"petacore/sdk/pmem"
 
 	"go.uber.org/zap"
 )
 
 // parseNotExpression handles NOT expression
-func ParseNotExpression(ctx context.Context, notExpr parser.INotExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
+func ParseNotExpression(allocator pmem.Allocator, ctx context.Context, notExpr parser.INotExpressionContext, row *table.ResultRow, subExec subquery.SubqueryExecutor) (rmodels.Expression, error) {
 	if notExpr == nil {
 		return nil, nil
 	}
@@ -45,7 +46,7 @@ func ParseNotExpression(ctx context.Context, notExpr parser.INotExpressionContex
 		return nil, nil
 	}
 
-	result, err := ParseComparisonExpression(ctx, compExpr, row, subExec)
+	result, err := ParseComparisonExpression(allocator, ctx, compExpr, row, subExec)
 	if err != nil {
 		return nil, err
 	}
